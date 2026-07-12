@@ -27,6 +27,15 @@ type SymbolConfig struct {
 	MakerFee    decimal.Decimal // fraction (e.g. 0.001 = 0.1%)
 	TakerFee    decimal.Decimal
 	Active      bool
+
+	// Futures-only. Zero/unset for Spot and Options.
+	MaxLeverage           int             // maximum leverage an account may select
+	MaintenanceMarginRate decimal.Decimal // fraction of notional required to avoid liquidation
+	FundingIntervalHours  int             // hours between funding settlements
+
+	// Options-only. Zero/unset for Spot and Futures.
+	ContractMultiplier decimal.Decimal // contract size multiplier (e.g. 1 BTC per contract)
+	UnderlyingSymbol   string          // spot symbol used for mark/index price lookup
 }
 
 // Registry is the in-memory symbol configuration store.
@@ -36,6 +45,14 @@ type Registry struct {
 	configs map[string]*SymbolConfig // key: symbol+":"+market
 	pool    *pgxpool.Pool
 	log     *slog.Logger
+}
+
+// NewInMemoryRegistry creates an empty Registry with no Postgres backing.
+// Used when Postgres is disabled (e.g. local dev); Get/All simply behave as
+// if no symbols are configured, rather than requiring a nil-pool check
+// everywhere a Registry is used.
+func NewInMemoryRegistry() *Registry {
+	return &Registry{configs: make(map[string]*SymbolConfig), log: slog.Default()}
 }
 
 // NewRegistry creates a Registry and loads initial configuration from Postgres.
@@ -96,7 +113,9 @@ func (r *Registry) reload(ctx context.Context) error {
 	rows, err := r.pool.Query(ctx, `
 		SELECT symbol, market, base_currency, quote_currency,
 		       tick_size, lot_size, min_notional, max_price,
-		       maker_fee, taker_fee, active
+		       maker_fee, taker_fee, active,
+		       max_leverage, maintenance_margin_rate, funding_interval_hours,
+		       contract_multiplier, underlying_symbol
 		FROM symbol_configs
 		WHERE active = true`)
 	if err != nil {
@@ -109,9 +128,12 @@ func (r *Registry) reload(ctx context.Context) error {
 		var c SymbolConfig
 		var market string
 		var tickSize, lotSize, minNotional, maxPrice, makerFee, takerFee string
+		var maintenanceMarginRate, contractMultiplier string
 		if err := rows.Scan(&c.Symbol, &market, &c.BaseCurrency, &c.QuoteCurrency,
 			&tickSize, &lotSize, &minNotional, &maxPrice,
-			&makerFee, &takerFee, &c.Active); err != nil {
+			&makerFee, &takerFee, &c.Active,
+			&c.MaxLeverage, &maintenanceMarginRate, &c.FundingIntervalHours,
+			&contractMultiplier, &c.UnderlyingSymbol); err != nil {
 			return fmt.Errorf("scan symbol_config row: %w", err)
 		}
 		c.Market = models.MarketType(market)
@@ -121,6 +143,8 @@ func (r *Registry) reload(ctx context.Context) error {
 		c.MaxPrice, _ = decimal.NewFromString(maxPrice)
 		c.MakerFee, _ = decimal.NewFromString(makerFee)
 		c.TakerFee, _ = decimal.NewFromString(takerFee)
+		c.MaintenanceMarginRate, _ = decimal.NewFromString(maintenanceMarginRate)
+		c.ContractMultiplier, _ = decimal.NewFromString(contractMultiplier)
 		fresh[c.Symbol+":"+market] = &c
 	}
 	if err := rows.Err(); err != nil {
@@ -149,7 +173,38 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		    maker_fee      NUMERIC     NOT NULL DEFAULT '0.001',
 		    taker_fee      NUMERIC     NOT NULL DEFAULT '0.001',
 		    active         BOOLEAN     NOT NULL DEFAULT true,
+		    max_leverage             INTEGER NOT NULL DEFAULT 0,
+		    maintenance_margin_rate  NUMERIC NOT NULL DEFAULT '0',
+		    funding_interval_hours   INTEGER NOT NULL DEFAULT 0,
+		    contract_multiplier      NUMERIC NOT NULL DEFAULT '0',
+		    underlying_symbol        TEXT    NOT NULL DEFAULT '',
 		    PRIMARY KEY (symbol, market)
+		)`)
+	if err != nil {
+		return err
+	}
+	_, err = pool.Exec(ctx, `
+		ALTER TABLE symbol_configs
+		    ADD COLUMN IF NOT EXISTS max_leverage INTEGER NOT NULL DEFAULT 0,
+		    ADD COLUMN IF NOT EXISTS maintenance_margin_rate NUMERIC NOT NULL DEFAULT '0',
+		    ADD COLUMN IF NOT EXISTS funding_interval_hours INTEGER NOT NULL DEFAULT 0,
+		    ADD COLUMN IF NOT EXISTS contract_multiplier NUMERIC NOT NULL DEFAULT '0',
+		    ADD COLUMN IF NOT EXISTS underlying_symbol TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// EnsureOptionInstruments creates the option_instruments table, listing
+// discrete tradeable option contracts (strike/expiry pairs) per underlying.
+func EnsureOptionInstruments(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS option_instruments (
+		    symbol             TEXT      NOT NULL,
+		    underlying_symbol  TEXT      NOT NULL,
+		    strike_price       NUMERIC   NOT NULL,
+		    expiry             TIMESTAMPTZ NOT NULL,
+		    option_type        TEXT      NOT NULL,
+		    active             BOOLEAN   NOT NULL DEFAULT true,
+		    PRIMARY KEY (symbol, strike_price, expiry, option_type)
 		)`)
 	return err
 }

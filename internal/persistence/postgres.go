@@ -92,4 +92,27 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS events_symbol_seq ON events (symbol, sequence_number);
+
+CREATE TABLE IF NOT EXISTS funding_payments (
+    id          BIGSERIAL   PRIMARY KEY,
+    account_id  TEXT        NOT NULL,
+    symbol      TEXT        NOT NULL,
+    rate        NUMERIC     NOT NULL,
+    amount      NUMERIC     NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS funding_payments_account ON funding_payments (account_id, symbol);
+
+CREATE TABLE IF NOT EXISTS option_positions (
+    account_id   TEXT        NOT NULL,
+    symbol       TEXT        NOT NULL,
+    option_type  TEXT        NOT NULL,
+    strike_price NUMERIC     NOT NULL,
+    expiry       TIMESTAMPTZ NOT NULL,
+    size         NUMERIC     NOT NULL,
+    premium      NUMERIC     NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (account_id, symbol, option_type, strike_price, expiry)
+);
 `

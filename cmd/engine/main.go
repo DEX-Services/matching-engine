@@ -14,17 +14,21 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/cache"
+	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/liquidation"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
 	"github.com/dex/matching-engine/internal/persistence"
+	"github.com/dex/matching-engine/internal/pricing"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/risk_admin"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/dex/matching-engine/internal/ws"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/shopspring/decimal"
 )
@@ -58,13 +62,19 @@ func main() {
 	ledger := risk.NewLedger()
 	checker := risk.NewChecker(ledger)
 
+	// Futures/Options settlement handlers are shared singletons (not one per
+	// symbol) so the liquidation engine, funding scheduler, and expiry
+	// processor can see every open position across all registered markets.
+	futuresSettlement := settlement.NewFuturesSettlement(ledger)
+	optionsSettlement := settlement.NewOptionsSettlement(ledger)
+
 	// Phase 6: Settlement factory
 	settlementFactory := func(symbol string, market models.MarketType) matching.SettlementHandler {
 		switch market {
 		case models.Futures:
-			return settlement.NewFuturesSettlement(ledger)
+			return futuresSettlement
 		case models.Options:
-			return settlement.NewOptionsSettlement(ledger)
+			return optionsSettlement
 		default:
 			return settlement.NewSpotSettlement(ledger)
 		}
@@ -95,6 +105,7 @@ func main() {
 		{"BTC-USDT", models.Spot},
 		{"ETH-USDT", models.Spot},
 		{"BTC-USDT", models.Futures},
+		{"BTC-USDT", models.Options},
 	}
 	for _, p := range pairs {
 		if _, err := reg.Register(p.symbol, p.market); err != nil {
@@ -129,18 +140,52 @@ func main() {
 	}
 
 	// Phase 5: Postgres
+	var symbolRegistry *config.Registry
+	var pgPool *pgxpool.Pool
 	if os.Getenv("POSTGRES_HOST") != "" {
 		pool, err := persistence.NewPool(ctx)
 		if err != nil {
 			slog.Warn("postgres disabled", "reason", err)
 		} else {
+			pgPool = pool
 			persistence.Migrate(ctx, pool)
 			if writer, err := persistence.NewWriter(pool); err == nil {
 				go writer.Run(ctx)
 				slog.Info("postgres writer started")
 			}
+
+			if err := config.EnsureSchema(ctx, pool); err != nil {
+				slog.Error("ensure symbol_configs schema", "error", err)
+			} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {
+				slog.Error("ensure option_instruments schema", "error", err)
+			} else {
+				seedSymbolConfigs(ctx, pool)
+				seedOptionInstruments(ctx, pool)
+				if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
+					slog.Error("load symbol config registry", "error", err)
+				} else {
+					symbolRegistry = cfgReg
+					go cfgReg.StartHotReload(ctx, time.Minute)
+				}
+			}
 		}
 	}
+	if symbolRegistry == nil {
+		// Postgres disabled (local/dev without a DB): fall back to an empty
+		// in-memory registry so futures maintenance-margin/funding config
+		// simply reads as "not configured" instead of nil-panicking.
+		symbolRegistry = config.NewInMemoryRegistry()
+	}
+
+	// Futures liquidation, funding, and options expiry background loops.
+	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus)
+	go liqEngine.Run(ctx, time.Second)
+
+	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus)
+	go fundingScheduler.Run(ctx, time.Minute)
+
+	expiryProcessor := settlement.NewExpiryProcessor(optionsSettlement, ledger, mdSvc, bus)
+	go expiryProcessor.Run(ctx, time.Minute)
 
 	// Phase 5: Redis
 	if os.Getenv("REDIS_SERVICE_URI") != "" {
@@ -196,11 +241,19 @@ func main() {
 		}
 		price, _ := decimal.NewFromString(q.Get("price"))
 		qty, _ := decimal.NewFromString(q.Get("qty"))
+		leverage, _ := strconv.Atoi(q.Get("leverage"))
+		strike, _ := decimal.NewFromString(q.Get("strike"))
+		var expiry time.Time
+		if exp := q.Get("expiry"); exp != "" {
+			expiry, _ = time.Parse(time.RFC3339, exp)
+		}
 		o := &models.Order{
 			ID: uuid.NewString(), AccountID: q.Get("account"),
 			Symbol: q.Get("symbol"), Market: models.MarketType(q.Get("market")),
 			Side: side, Type: orderType, Price: price, Quantity: qty,
 			TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
+			Leverage: leverage, MarginMode: q.Get("marginMode"),
+			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
 		}
 		if err := checker.Check(o); err != nil {
 			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
@@ -330,7 +383,91 @@ func main() {
 		})
 	})
 
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	mux.HandleFunc("/positions", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		account := q.Get("account")
+		if account == "" {
+			http.Error(w, "account is required", http.StatusBadRequest)
+			return
+		}
+		out := PositionsResponse{
+			Futures: make([]FuturesPositionDTO, 0),
+			Options: make([]OptionsPositionDTO, 0),
+		}
+		for _, p := range futuresSettlement.AllPositions() {
+			if p.AccountID != account || p.Size.IsZero() {
+				continue
+			}
+			mark := decimal.Zero
+			if ticker, err := mdSvc.Ticker(p.Symbol, models.Futures); err == nil {
+				mark = ticker.MidPrice
+			}
+			out.Futures = append(out.Futures, FuturesPositionDTO{
+				Symbol: p.Symbol, Side: string(p.Side), Size: p.Size.String(),
+				EntryPrice: p.EntryPrice.String(), MarkPrice: mark.String(),
+				Margin: p.Margin.String(), Leverage: p.Leverage,
+				UnrealizedPnl: p.PnL(mark).String(),
+			})
+		}
+		for _, p := range optionsSettlement.AllPositions() {
+			if p.AccountID != account || p.Size.IsZero() {
+				continue
+			}
+			out.Options = append(out.Options, OptionsPositionDTO{
+				Symbol: p.Symbol, OptionType: p.OptionType, StrikePrice: p.StrikePrice.String(),
+				Expiry: p.Expiry.Format(time.RFC3339), Size: p.Size.String(), Premium: p.Premium.String(),
+			})
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+
+	mux.HandleFunc("/option-chain", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		underlying := q.Get("underlying")
+		if underlying == "" {
+			http.Error(w, "underlying is required", http.StatusBadRequest)
+			return
+		}
+		spotTicker, err := mdSvc.Ticker(underlying, models.Spot)
+		if err != nil || spotTicker.MidPrice.IsZero() {
+			http.Error(w, "no mark price for underlying", http.StatusNotFound)
+			return
+		}
+		spot, _ := spotTicker.MidPrice.Float64()
+
+		const assumedVol = 0.6  // annualized IV assumption until a real vol surface exists
+		const riskFreeRate = 0.03
+
+		instruments, err := loadOptionInstruments(ctx, pgPool, underlying)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out := make([]OptionChainEntry, 0, len(instruments))
+		for _, inst := range instruments {
+			strike, _ := inst.Strike.Float64()
+			tYears := time.Until(inst.Expiry).Hours() / 24 / 365
+			if tYears <= 0 {
+				continue
+			}
+			isCall := inst.OptionType == "CALL"
+			price := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
+			greeks := pricing.CalcGreeks(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
+			spread := price * 0.02
+			out = append(out, OptionChainEntry{
+				Symbol: inst.Symbol, OptionType: inst.OptionType, Strike: inst.Strike.String(),
+				Expiry: inst.Expiry.Format(time.RFC3339),
+				Bid:    fmt.Sprintf("%.4f", price-spread/2),
+				Ask:    fmt.Sprintf("%.4f", price+spread/2),
+				Mid:    fmt.Sprintf("%.4f", price),
+				IV:     assumedVol * 100,
+				Delta:  greeks.Delta, Gamma: greeks.Gamma, Theta: greeks.Theta, Vega: greeks.Vega, Rho: greeks.Rho,
+			})
+		}
+		writeJSON(w, http.StatusOK, OptionChainResponse{Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out})
+	})
+
+	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
 	go func() {
 		slog.Info("HTTP server listening", "addr", ":8080")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

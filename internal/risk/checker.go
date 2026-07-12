@@ -23,6 +23,11 @@ func NewChecker(ledger *Ledger) *Checker {
 // Check validates an order before submission to the matching engine.
 // Returns nil if all checks pass.
 func (c *Checker) Check(order *models.Order) error {
+	if order.InternalLiquidation {
+		// Forced position close: the position already exists and is being
+		// reduced, so no additional margin/collateral needs to be reserved.
+		return nil
+	}
 	if order.AccountID == "" {
 		return fmt.Errorf("order missing AccountID")
 	}
@@ -93,15 +98,49 @@ func assetFor(order *models.Order) string {
 	if len(parts) != 2 {
 		return order.Symbol
 	}
-	if order.IsBuy() {
-		return parts[1] // quote
+	switch order.Market {
+	case models.Futures:
+		// Both sides post margin in the quote currency (cross/isolated margin, cash-settled).
+		return parts[1]
+	case models.Options:
+		// Buyer pays premium in quote currency; seller (writer) posts cash-secured
+		// collateral in quote currency too (first-pass: no physical covered calls).
+		return parts[1]
+	default:
+		if order.IsBuy() {
+			return parts[1] // quote
+		}
+		return parts[0] // base
 	}
-	return parts[0] // base
+}
+
+// MarginRequired returns the margin (in quote currency) needed to open a
+// futures position of the given notional at the given leverage. Shared by
+// the risk checker and futures settlement so the two never disagree.
+func MarginRequired(notional decimal.Decimal, leverage int) decimal.Decimal {
+	if leverage < 1 {
+		leverage = 1
+	}
+	return notional.Div(decimal.NewFromInt(int64(leverage)))
 }
 
 func notionalFor(order *models.Order, qty decimal.Decimal) decimal.Decimal {
-	if order.IsBuy() {
-		return order.Price.Mul(qty)
+	switch order.Market {
+	case models.Futures:
+		notional := order.Price.Mul(qty)
+		return MarginRequired(notional, order.Leverage)
+	case models.Options:
+		if order.IsBuy() {
+			// Premium owed by the buyer.
+			return order.Price.Mul(qty)
+		}
+		// Cash-secured collateral for the writer (both CALL and PUT): lock
+		// strike*qty in quote currency. No physical covered-call support yet.
+		return order.StrikePrice.Mul(qty)
+	default:
+		if order.IsBuy() {
+			return order.Price.Mul(qty)
+		}
+		return qty
 	}
-	return qty
 }

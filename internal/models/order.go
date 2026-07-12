@@ -84,6 +84,19 @@ type Order struct {
 
 	// AccountID is required for risk/balance checks (Phase 3+).
 	AccountID string `json:"accountId"`
+
+	// Leverage and MarginMode apply to futures only; ignored by spot/options.
+	Leverage   int    `json:"leverage,omitempty"`
+	MarginMode string `json:"marginMode,omitempty"` // "ISOLATED" | "CROSS"
+
+	// OptionType, StrikePrice, and Expiry apply to options only; ignored by spot/futures.
+	OptionType  string          `json:"optionType,omitempty"` // "CALL" | "PUT"
+	StrikePrice decimal.Decimal `json:"strikePrice,omitempty"`
+	Expiry      time.Time       `json:"expiry,omitempty"`
+
+	// InternalLiquidation marks an order forced by the liquidation engine;
+	// such orders bypass pre-trade risk checks (the position is already open).
+	InternalLiquidation bool `json:"-"`
 }
 
 // RemainingQty returns the unfilled portion of the order.
