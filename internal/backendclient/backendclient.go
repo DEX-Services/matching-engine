@@ -15,7 +15,22 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
+
+// RawUnitScale is the number of decimals Dex-Backend's Postgres user_balances
+// columns use for raw fixed-point integer storage (matches USDC's 6 on-chain
+// decimals, e.g. 40000000 = $40). Callers must convert decimal dollar
+// notionals to this raw integer scale before calling Lock/Unlock/Settle —
+// Dex-Backend rejects non-integer amount strings.
+const RawUnitScale = 6
+
+// ToRawUnits converts a decimal dollar amount (e.g. engine risk notionals) to
+// the raw integer string Dex-Backend expects.
+func ToRawUnits(amount decimal.Decimal) string {
+	return amount.Shift(RawUnitScale).Truncate(0).String()
+}
 
 // Client calls Dex-Backend's internal balance-lock endpoints. A nil/zero-value
 // Client (created when DEX_BACKEND_URL or DEX_BACKEND_ENGINE_SECRET is unset)

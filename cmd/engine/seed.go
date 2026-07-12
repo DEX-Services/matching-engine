@@ -20,7 +20,7 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 	}{
 		{"BTC-USDT", "SPOT", "BTC", "USDT", "", 0, 0, "0", "0"},
 		{"ETH-USDT", "SPOT", "ETH", "USDT", "", 0, 0, "0", "0"},
-		{"BTC-USDT", "FUTURES", "BTC", "USDT", "BTC-USDT", 100, 8, "0.005", "0"},
+		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDC", 100, 8, "0.005", "0"},
 		{"BTC-USDT", "OPTIONS", "BTC", "USDT", "BTC-USDT", 0, 0, "0", "1"},
 	}
 	for _, r := range rows {

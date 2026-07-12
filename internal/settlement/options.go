@@ -67,7 +67,7 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 		return fmt.Errorf("options settle debit buyer premium: %w", err)
 	}
 	backendclient.Async("settle", func(ctx context.Context) error {
-		return o.backend.Settle(ctx, buyerID, quote, premium.String())
+		return o.backend.Settle(ctx, buyerID, quote, backendclient.ToRawUnits(premium))
 	})
 	o.ledger.Credit(sellerID, quote, premium)
 
@@ -196,7 +196,7 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 			p.log.Error("expiry exercise debit failed", "account", pos.AccountID, "symbol", pos.Symbol, "error", err)
 		} else {
 			backendclient.Async("settle", func(ctx context.Context) error {
-				return p.backend.Settle(ctx, pos.AccountID, quote, payout.String())
+				return p.backend.Settle(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
 			})
 		}
 	}

@@ -105,13 +105,13 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 		return fmt.Errorf("futures: debit buyer margin: %w", err)
 	}
 	backendclient.Async("settle", func(ctx context.Context) error {
-		return f.backend.Settle(ctx, buyerID, quote, buyerMargin.String())
+		return f.backend.Settle(ctx, buyerID, quote, backendclient.ToRawUnits(buyerMargin))
 	})
 	if err := f.ledger.Debit(sellerID, quote, sellerMargin); err != nil {
 		return fmt.Errorf("futures: debit seller margin: %w", err)
 	}
 	backendclient.Async("settle", func(ctx context.Context) error {
-		return f.backend.Settle(ctx, sellerID, quote, sellerMargin.String())
+		return f.backend.Settle(ctx, sellerID, quote, backendclient.ToRawUnits(sellerMargin))
 	})
 
 	// Update positions.

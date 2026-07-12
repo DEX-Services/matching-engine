@@ -8,7 +8,24 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
+
+func TestToRawUnits_ConvertsDollarDecimalToRawInteger(t *testing.T) {
+	cases := map[string]string{
+		"40":            "40000000",
+		"9.97531483311": "9975314", // truncated, not rounded
+		"0.000001":      "1",
+		"0":             "0",
+	}
+	for in, want := range cases {
+		got := ToRawUnits(decimal.RequireFromString(in))
+		if got != want {
+			t.Errorf("ToRawUnits(%s) = %s, want %s", in, got, want)
+		}
+	}
+}
 
 func TestNew_DisabledWhenUnconfigured(t *testing.T) {
 	t.Setenv("DEX_BACKEND_URL", "")

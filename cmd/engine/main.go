@@ -110,7 +110,7 @@ func main() {
 	}{
 		{"BTC-USDT", models.Spot},
 		{"ETH-USDT", models.Spot},
-		{"BTC-USDT", models.Futures},
+		{"BTC-USDC", models.Futures},
 		{"BTC-USDT", models.Options},
 	}
 	for _, p := range pairs {
@@ -274,7 +274,7 @@ func main() {
 			// wallet doesn't have the funds (or Dex-Backend is unreachable),
 			// the in-memory ledger and Postgres must not diverge, so roll
 			// back the local reservation and reject the order.
-			if err := backend.Lock(r.Context(), o.AccountID, lockAsset, lockAmount.String()); err != nil {
+			if err := backend.Lock(r.Context(), o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount)); err != nil {
 				checker.Release(o)
 				http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
 				return
@@ -288,7 +288,7 @@ func main() {
 			checker.Release(o)
 			if lockAsset, lockAmount := risk.RequiredFor(o); lockAmount.IsPositive() {
 				backendclient.Async("unlock", func(ctx context.Context) error {
-					return backend.Unlock(ctx, o.AccountID, lockAsset, lockAmount.String())
+					return backend.Unlock(ctx, o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount))
 				})
 			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -323,7 +323,7 @@ func main() {
 		checker.Release(order)
 		if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
 			backendclient.Async("unlock", func(ctx context.Context) error {
-				return backend.Unlock(ctx, order.AccountID, unlockAsset, unlockAmount.String())
+				return backend.Unlock(ctx, order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount))
 			})
 		}
 		writeJSON(w, http.StatusOK, OrderResponse{
@@ -408,6 +408,46 @@ func main() {
 			Reserved:  ledger.Reserved(account, asset).String(),
 			Available: ledger.Available(account, asset).String(),
 		})
+	})
+
+	// /internal/ledger/sync lets Dex-Backend keep the engine's in-memory risk
+	// ledger in step with real Postgres balance changes (deposits, approved
+	// withdrawals). Authenticated with the same shared secret used for the
+	// reverse-direction backendclient calls.
+	mux.HandleFunc("/internal/ledger/sync", func(w http.ResponseWriter, r *http.Request) {
+		engineSecret := os.Getenv("DEX_BACKEND_ENGINE_SECRET")
+		if engineSecret == "" || r.Header.Get("X-Engine-Secret") != engineSecret {
+			http.Error(w, "not authorized", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			AccountID string `json:"accountId"`
+			Asset     string `json:"asset"`
+			Amount    string `json:"amount"`
+			Direction string `json:"direction"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AccountID == "" {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		amount, err := decimal.NewFromString(req.Amount)
+		if err != nil || !amount.IsPositive() {
+			http.Error(w, "amount must be a positive decimal", http.StatusBadRequest)
+			return
+		}
+		switch req.Direction {
+		case "credit":
+			ledger.Credit(req.AccountID, req.Asset, amount)
+		case "debit":
+			if err := ledger.Debit(req.AccountID, req.Asset, amount); err != nil {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+		default:
+			http.Error(w, "direction must be credit or debit", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
 	})
 
 	mux.HandleFunc("/positions", func(w http.ResponseWriter, r *http.Request) {
