@@ -1,10 +1,12 @@
 package settlement
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/shopspring/decimal"
@@ -63,6 +65,7 @@ func (p *Position) PnL(markPrice decimal.Decimal) decimal.Decimal {
 // and are deliberately absent from the core Order/Trade structs.
 type FuturesSettlement struct {
 	ledger    *risk.Ledger
+	backend   *backendclient.Client
 	mu        sync.RWMutex
 	positions map[string]*Position // key: accountID+":"+symbol
 }
@@ -71,6 +74,7 @@ type FuturesSettlement struct {
 func NewFuturesSettlement(ledger *risk.Ledger) *FuturesSettlement {
 	return &FuturesSettlement{
 		ledger:    ledger,
+		backend:   backendclient.New(),
 		positions: make(map[string]*Position),
 	}
 }
@@ -100,9 +104,15 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	if err := f.ledger.Debit(buyerID, quote, buyerMargin); err != nil {
 		return fmt.Errorf("futures: debit buyer margin: %w", err)
 	}
+	backendclient.Async("settle", func(ctx context.Context) error {
+		return f.backend.Settle(ctx, buyerID, quote, buyerMargin.String())
+	})
 	if err := f.ledger.Debit(sellerID, quote, sellerMargin); err != nil {
 		return fmt.Errorf("futures: debit seller margin: %w", err)
 	}
+	backendclient.Async("settle", func(ctx context.Context) error {
+		return f.backend.Settle(ctx, sellerID, quote, sellerMargin.String())
+	})
 
 	// Update positions.
 	f.updatePosition(buyerID, trade.Symbol, models.Buy, trade.Quantity, trade.Price, buyerMargin, buyerLeverage)

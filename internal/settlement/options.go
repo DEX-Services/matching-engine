@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
@@ -31,6 +32,7 @@ type OptionsPosition struct {
 // the gateway from the option instrument the client selected.
 type OptionsSettlement struct {
 	ledger    *risk.Ledger
+	backend   *backendclient.Client
 	mu        sync.RWMutex
 	positions map[string]*OptionsPosition // key: accountID+":"+symbol+":"+strike+":"+expiry+":"+type
 }
@@ -39,6 +41,7 @@ type OptionsSettlement struct {
 func NewOptionsSettlement(ledger *risk.Ledger) *OptionsSettlement {
 	return &OptionsSettlement{
 		ledger:    ledger,
+		backend:   backendclient.New(),
 		positions: make(map[string]*OptionsPosition),
 	}
 }
@@ -63,6 +66,9 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 	if err := o.ledger.Debit(buyerID, quote, premium); err != nil {
 		return fmt.Errorf("options settle debit buyer premium: %w", err)
 	}
+	backendclient.Async("settle", func(ctx context.Context) error {
+		return o.backend.Settle(ctx, buyerID, quote, premium.String())
+	})
 	o.ledger.Credit(sellerID, quote, premium)
 
 	o.recordPosition(buyerID, trade.Symbol, trade.Quantity, premium, trade.BuyOrder)
@@ -129,6 +135,7 @@ var _ Handler = (*OptionsSettlement)(nil)
 type ExpiryProcessor struct {
 	options    *OptionsSettlement
 	ledger     *risk.Ledger
+	backend    *backendclient.Client
 	marketdata *marketdata.Service
 	bus        *events.Bus
 	log        *slog.Logger
@@ -136,7 +143,7 @@ type ExpiryProcessor struct {
 
 // NewExpiryProcessor creates an ExpiryProcessor.
 func NewExpiryProcessor(options *OptionsSettlement, ledger *risk.Ledger, md *marketdata.Service, bus *events.Bus) *ExpiryProcessor {
-	return &ExpiryProcessor{options: options, ledger: ledger, marketdata: md, bus: bus, log: slog.Default()}
+	return &ExpiryProcessor{options: options, ledger: ledger, backend: backendclient.New(), marketdata: md, bus: bus, log: slog.Default()}
 }
 
 // Run starts the expiry sweep loop; call in a goroutine. Stops when ctx is cancelled.
@@ -187,6 +194,10 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 			p.ledger.Credit(pos.AccountID, quote, payout)
 		} else if err := p.ledger.Debit(pos.AccountID, quote, payout); err != nil {
 			p.log.Error("expiry exercise debit failed", "account", pos.AccountID, "symbol", pos.Symbol, "error", err)
+		} else {
+			backendclient.Async("settle", func(ctx context.Context) error {
+				return p.backend.Settle(ctx, pos.AccountID, quote, payout.String())
+			})
 		}
 	}
 

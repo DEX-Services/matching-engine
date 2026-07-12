@@ -78,6 +78,28 @@ func (c *Checker) Release(order *models.Order) {
 	}
 }
 
+// RequiredFor exposes the asset and amount that Reserve would lock for order,
+// for callers outside this package (e.g. the Postgres balance-lock bridge)
+// that must mirror the same reservation externally. Mirrors Reserve's market-
+// order skip: market orders have no known notional at submission time, so no
+// amount is returned.
+func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
+	if order.Type == models.Market {
+		return "", decimal.Zero
+	}
+	return required(order)
+}
+
+// ReleaseAmountFor exposes the asset and amount that Release would free for
+// order, for callers outside this package that must mirror the same release
+// externally. Mirrors Release's market-order skip.
+func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal) {
+	if order.Type == models.Market {
+		return "", decimal.Zero
+	}
+	return releaseAmount(order)
+}
+
 // required returns the asset and amount that must be available for the order
 // at submission time, based on the full original Quantity. Used by Check and
 // Reserve, before anything has filled.

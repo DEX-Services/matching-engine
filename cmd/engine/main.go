@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/cache"
 	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
@@ -61,6 +62,11 @@ func main() {
 	// Phase 3: Risk Ledger
 	ledger := risk.NewLedger()
 	checker := risk.NewChecker(ledger)
+
+	// Postgres balance-lock bridge: mirrors Reserve/Release/Debit into
+	// Dex-Backend's real user_balances table so the wallet UI's "Available"
+	// figure reflects held funds. No-ops if unconfigured.
+	backend := backendclient.New()
 
 	// Futures/Options settlement handlers are shared singletons (not one per
 	// symbol) so the liquidation engine, funding scheduler, and expiry
@@ -263,12 +269,28 @@ func main() {
 			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if lockAsset, lockAmount := risk.RequiredFor(o); lockAmount.IsPositive() && backend.Enabled() {
+			// Mirror the reservation into Postgres synchronously: if the real
+			// wallet doesn't have the funds (or Dex-Backend is unreachable),
+			// the in-memory ledger and Postgres must not diverge, so roll
+			// back the local reservation and reject the order.
+			if err := backend.Lock(r.Context(), o.AccountID, lockAsset, lockAmount.String()); err != nil {
+				checker.Release(o)
+				http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		trades, err := reg.Submit(o)
 		if err != nil {
 			// Nothing filled in any of these rejection paths (halt, FOK-not-
 			// filled, post-only-cross, invalid order) — release the full
 			// reservation we just took.
 			checker.Release(o)
+			if lockAsset, lockAmount := risk.RequiredFor(o); lockAmount.IsPositive() {
+				backendclient.Async("unlock", func(ctx context.Context) error {
+					return backend.Unlock(ctx, o.AccountID, lockAsset, lockAmount.String())
+				})
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -299,6 +321,11 @@ func main() {
 		// for partial fills: order.Filled reflects everything settled before
 		// cancel, so RemainingQty() is exactly what's still held.
 		checker.Release(order)
+		if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
+			backendclient.Async("unlock", func(ctx context.Context) error {
+				return backend.Unlock(ctx, order.AccountID, unlockAsset, unlockAmount.String())
+			})
+		}
 		writeJSON(w, http.StatusOK, OrderResponse{
 			OrderID: order.ID, Status: string(order.Status), Filled: order.Filled.String(),
 		})
