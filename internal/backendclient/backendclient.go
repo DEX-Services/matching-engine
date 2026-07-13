@@ -87,6 +87,13 @@ func (c *Client) Settle(ctx context.Context, userID, asset, amount string) error
 	return c.call(ctx, "/internal/balance/settle", userID, asset, amount)
 }
 
+// Credit calls POST /internal/balance/credit, realizing released margin plus
+// PnL into a user's real Postgres balance when a futures position closes.
+// amount may be negative (net loss); Dex-Backend applies it as a debit.
+func (c *Client) Credit(ctx context.Context, userID, asset, amount string) error {
+	return c.call(ctx, "/internal/balance/credit", userID, asset, amount)
+}
+
 // Backfill calls POST /internal/engine-backfill, asking Dex-Backend to push
 // every nonzero Postgres balance into the engine's in-memory ledger. Used on
 // engine startup to self-heal after a restart wipes the in-memory ledger.

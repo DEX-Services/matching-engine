@@ -93,32 +93,106 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	buyerLeverage := effectiveLeverage(trade.BuyOrder.Leverage)
 	sellerLeverage := effectiveLeverage(trade.SellOrder.Leverage)
 
-	notional := trade.Price.Mul(trade.Quantity)
-	buyerMargin := risk.MarginRequired(notional, buyerLeverage)
-	sellerMargin := risk.MarginRequired(notional, sellerLeverage)
-
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	// Debit initial margin from both sides.
-	if err := f.ledger.Debit(buyerID, quote, buyerMargin); err != nil {
-		return fmt.Errorf("futures: debit buyer margin: %w", err)
+	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage); err != nil {
+		return fmt.Errorf("futures: apply buyer fill: %w", err)
 	}
-	backendclient.Async("settle", func(ctx context.Context) error {
-		return f.backend.Settle(ctx, buyerID, quote, backendclient.ToRawUnits(buyerMargin))
-	})
-	if err := f.ledger.Debit(sellerID, quote, sellerMargin); err != nil {
-		return fmt.Errorf("futures: debit seller margin: %w", err)
+	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage); err != nil {
+		return fmt.Errorf("futures: apply seller fill: %w", err)
 	}
-	backendclient.Async("settle", func(ctx context.Context) error {
-		return f.backend.Settle(ctx, sellerID, quote, backendclient.ToRawUnits(sellerMargin))
-	})
-
-	// Update positions.
-	f.updatePosition(buyerID, trade.Symbol, models.Buy, trade.Quantity, trade.Price, buyerMargin, buyerLeverage)
-	f.updatePosition(sellerID, trade.Symbol, models.Sell, trade.Quantity, trade.Price, sellerMargin, sellerLeverage)
 
 	return nil
+}
+
+// applyFill applies one side of a trade fill to accountID's position. If the
+// account holds no position, or a position in the same direction as side,
+// this opens/adds to the position (original behavior). If the account holds
+// an opposite-direction position, this closes it (fully or partially,
+// realizing PnL and releasing margin) and, on overfill, opens a new position
+// in the new direction with the remaining quantity.
+func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side models.OrderSide,
+	qty, price decimal.Decimal, leverage int) error {
+	existing := f.GetPosition(accountID, symbol)
+
+	if existing == nil || existing.Side == side {
+		notional := price.Mul(qty)
+		margin := risk.MarginRequired(notional, leverage)
+		if err := f.ledger.Debit(accountID, quoteAsset, margin); err != nil {
+			return err
+		}
+		backendclient.Async("settle", func(ctx context.Context) error {
+			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
+		})
+		f.updatePosition(accountID, symbol, side, qty, price, margin, leverage)
+		return nil
+	}
+
+	closeQty := decimal.Min(qty, existing.Size)
+	openQty := qty.Sub(closeQty)
+
+	f.closePortion(accountID, symbol, quoteAsset, price, closeQty)
+
+	if openQty.IsPositive() {
+		notional := price.Mul(openQty)
+		margin := risk.MarginRequired(notional, leverage)
+		if err := f.ledger.Debit(accountID, quoteAsset, margin); err != nil {
+			return err
+		}
+		backendclient.Async("settle", func(ctx context.Context) error {
+			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
+		})
+		f.updatePosition(accountID, symbol, side, openQty, price, margin, leverage)
+	}
+	return nil
+}
+
+// closePortion realizes PnL and releases a proportional slice of margin for
+// closeQty of accountID's existing position at symbol, crediting the result
+// to the ledger and (asynchronously) to Postgres. Deletes the position if it
+// is fully closed.
+func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal) {
+	key := accountID + ":" + symbol
+	f.mu.Lock()
+	pos, ok := f.positions[key]
+	if !ok || closeQty.IsZero() {
+		f.mu.Unlock()
+		return
+	}
+
+	pnl := pos.PnL(price).Mul(closeQty).Div(pos.Size)
+	releaseMargin := pos.Margin.Mul(closeQty).Div(pos.Size)
+
+	pos.Size = pos.Size.Sub(closeQty)
+	pos.Margin = pos.Margin.Sub(releaseMargin)
+	fullyClosed := pos.Size.IsZero()
+	if fullyClosed {
+		delete(f.positions, key)
+	}
+	f.mu.Unlock()
+
+	f.realizeAndCredit(accountID, quoteAsset, releaseMargin, pnl)
+}
+
+// realizeAndCredit settles a released margin amount plus realized PnL back
+// to accountID's balance, in-memory and (best-effort) in Postgres. The net
+// settlement may be negative (a loss exceeding the released margin); this
+// still applies as a debit so the loss is actually collected, unlike a
+// silent no-op.
+func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margin, pnl decimal.Decimal) {
+	settlement := margin.Add(pnl)
+	if settlement.IsPositive() {
+		f.ledger.Credit(accountID, quoteAsset, settlement)
+	} else if settlement.IsNegative() {
+		// Best-effort: a position's margin is expected to cover its own
+		// losses under normal liquidation thresholds, but guard against the
+		// in-memory ledger going negative from an outsized adverse move.
+		_ = f.ledger.Debit(accountID, quoteAsset, settlement.Neg())
+	}
+	backendclient.Async("credit", func(ctx context.Context) error {
+		return f.backend.Credit(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement))
+	})
 }
 
 // effectiveLeverage returns the order's leverage, or the default if unset.
@@ -191,7 +265,9 @@ func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decim
 }
 
 // ClosePosition removes a position after it has been fully closed (e.g. by
-// liquidation or a reduce-only order), realizing PnL to the ledger.
+// liquidation), realizing PnL and released margin to the ledger. If the
+// position was already closed (e.g. its closing fill already ran through
+// Settle/applyFill), this is a no-op — safe to call defensively.
 func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, markPrice decimal.Decimal) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
@@ -205,10 +281,7 @@ func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, 
 	delete(f.positions, key)
 	f.mu.Unlock()
 
-	settlement := margin.Add(pnl)
-	if settlement.IsPositive() {
-		f.ledger.Credit(accountID, quoteAsset, settlement)
-	}
+	f.realizeAndCredit(accountID, quoteAsset, margin, pnl)
 }
 
 // GetPosition returns the current position for an account/symbol, or nil.
