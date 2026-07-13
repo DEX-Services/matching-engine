@@ -61,12 +61,13 @@ func New(symbol string, market models.MarketType) *Book {
 
 // ─── Public interface ────────────────────────────────────────────────────────
 
-// Submit processes an incoming order against the book and returns generated trades.
-func (b *Book) Submit(order *models.Order) ([]*models.Trade, error) {
+// Submit processes an incoming order against the book and returns generated
+// trades plus any resting maker orders cancelled by self-trade prevention.
+func (b *Book) Submit(order *models.Order) ([]*models.Trade, []*models.Order, error) {
 	if err := validateOrder(order); err != nil {
 		order.Status = models.StatusRejected
 		order.UpdatedAt = time.Now()
-		return nil, fmt.Errorf("%w: %v", ErrInvalidOrder, err)
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidOrder, err)
 	}
 
 	order.UpdatedAt = time.Now()
@@ -81,13 +82,22 @@ func (b *Book) Submit(order *models.Order) ([]*models.Trade, error) {
 	case models.FOK:
 		return b.processFOK(order)
 	case models.PostOnly:
-		return b.processPostOnly(order)
+		// PostOnly never crosses the book (rejected if it would), so it never
+		// calls matchAggressively and can never produce STP cancellations —
+		// nil is correct today. If Phase 2 ever routes PostOnly through
+		// matchAggressively, this must return the real cancelled-makers slice.
+		trades, err := b.processPostOnly(order)
+		return trades, nil, err
 	case models.Stop:
 		// Phase 1: stop orders are accepted and rested; activation logic in Phase 2.
-		return b.restOrder(order)
+		// Resting never calls matchAggressively, so nil is correct today. If
+		// Phase 2 activation later routes triggered stop orders through
+		// matchAggressively, this must return the real cancelled-makers slice.
+		trades, err := b.restOrder(order)
+		return trades, nil, err
 	default:
 		order.Status = models.StatusRejected
-		return nil, fmt.Errorf("%w: unknown order type %s", ErrInvalidOrder, order.Type)
+		return nil, nil, fmt.Errorf("%w: unknown order type %s", ErrInvalidOrder, order.Type)
 	}
 }
 
@@ -104,18 +114,18 @@ func (b *Book) Cancel(orderID string) (*models.Order, error) {
 }
 
 // Modify performs a cancel-and-replace, resetting time priority.
-func (b *Book) Modify(orderID string, newPrice, newQty decimal.Decimal) (*models.Order, error) {
-	order, err := b.Cancel(orderID)
+func (b *Book) Modify(orderID string, newPrice, newQty decimal.Decimal) (order *models.Order, trades []*models.Trade, cancelled []*models.Order, err error) {
+	order, err = b.Cancel(orderID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	order.Price = newPrice
 	order.Quantity = newQty
 	order.Filled = decimal.Zero
 	order.Status = models.StatusPending
 	order.UpdatedAt = time.Now()
-	_, err = b.Submit(order)
-	return order, err
+	trades, cancelled, err = b.Submit(order)
+	return order, trades, cancelled, err
 }
 
 // BestBid returns the highest resting bid price, or zero if no bids exist.
@@ -151,62 +161,62 @@ func (b *Book) Depth(levels int) (bids, asks []*PriceLevel) {
 	return
 }
 
-// OrderByID returns a resting order without removing it.
+// OrderByID returns a copy of a resting order without removing it.
 func (b *Book) OrderByID(orderID string) (*models.Order, bool) {
 	o, ok := b.orderIndex[orderID]
-	return o, ok
+	return o.Copy(), ok
 }
 
-// AllOrders returns every resting order in the book, unordered.
+// AllOrders returns a copy of every resting order in the book, unordered.
 func (b *Book) AllOrders() []*models.Order {
 	out := make([]*models.Order, 0, len(b.orderIndex))
 	for _, o := range b.orderIndex {
-		out = append(out, o)
+		out = append(out, o.Copy())
 	}
 	return out
 }
 
 // ─── Order processing ────────────────────────────────────────────────────────
 
-func (b *Book) processMarket(order *models.Order) ([]*models.Trade, error) {
-	trades := b.matchAggressively(order)
+func (b *Book) processMarket(order *models.Order) ([]*models.Trade, []*models.Order, error) {
+	trades, cancelled := b.matchAggressively(order)
 	if order.RemainingQty().IsPositive() {
 		// Market orders cannot rest; cancel any unfilled remainder.
 		order.Status = models.StatusCancelled
 	}
 	order.UpdatedAt = time.Now()
-	return trades, nil
+	return trades, cancelled, nil
 }
 
-func (b *Book) processLimit(order *models.Order) ([]*models.Trade, error) {
-	trades := b.matchAggressively(order)
+func (b *Book) processLimit(order *models.Order) ([]*models.Trade, []*models.Order, error) {
+	trades, cancelled := b.matchAggressively(order)
 	if order.RemainingQty().IsPositive() {
 		// Rest the unfilled remainder.
 		if _, err := b.restOrder(order); err != nil {
-			return trades, err
+			return trades, cancelled, err
 		}
 	}
-	return trades, nil
+	return trades, cancelled, nil
 }
 
-func (b *Book) processIOC(order *models.Order) ([]*models.Trade, error) {
-	trades := b.matchAggressively(order)
+func (b *Book) processIOC(order *models.Order) ([]*models.Trade, []*models.Order, error) {
+	trades, cancelled := b.matchAggressively(order)
 	if order.RemainingQty().IsPositive() {
 		// IOC: cancel remainder immediately; never rests.
 		order.Status = models.StatusCancelled
 	}
 	order.UpdatedAt = time.Now()
-	return trades, nil
+	return trades, cancelled, nil
 }
 
-func (b *Book) processFOK(order *models.Order) ([]*models.Trade, error) {
+func (b *Book) processFOK(order *models.Order) ([]*models.Trade, []*models.Order, error) {
 	// Check whether the full quantity can be filled before touching the book.
 	if !b.canFillFully(order) {
 		order.Status = models.StatusCancelled
-		return nil, ErrFOKNotFilled
+		return nil, nil, ErrFOKNotFilled
 	}
-	trades := b.matchAggressively(order)
-	return trades, nil
+	trades, cancelled := b.matchAggressively(order)
+	return trades, cancelled, nil
 }
 
 func (b *Book) processPostOnly(order *models.Order) ([]*models.Trade, error) {
@@ -222,8 +232,11 @@ func (b *Book) processPostOnly(order *models.Order) ([]*models.Trade, error) {
 
 // matchAggressively walks the opposite side of the book and generates trades
 // until the incoming order is fully filled or no more matching levels exist.
-func (b *Book) matchAggressively(aggressor *models.Order) []*models.Trade {
+// The second return value lists resting maker orders that were cancelled by
+// self-trade prevention (see selfTradeCancelled) rather than matched.
+func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*models.Order) {
 	var trades []*models.Trade
+	var cancelledMakers []*models.Order
 
 	for aggressor.RemainingQty().IsPositive() {
 		level := b.bestOppositeLevel(aggressor)
@@ -233,6 +246,17 @@ func (b *Book) matchAggressively(aggressor *models.Order) []*models.Trade {
 		maker := level.Front()
 		if maker == nil {
 			break
+		}
+
+		// Self-trade prevention: an account may not match against its own
+		// resting order. Cancel the resting maker and try the next order at
+		// this price level (or the next level, once this one empties out).
+		if aggressor.AccountID != "" && maker.AccountID == aggressor.AccountID {
+			maker.Status = models.StatusCancelled
+			maker.UpdatedAt = time.Now()
+			b.removeFromBook(maker)
+			cancelledMakers = append(cancelledMakers, maker)
+			continue
 		}
 
 		// Price check: limit aggressors may not execute at a worse price.
@@ -290,7 +314,7 @@ func (b *Book) matchAggressively(aggressor *models.Order) []*models.Trade {
 		aggressor.Status = models.StatusFilled
 	}
 
-	return trades
+	return trades, cancelledMakers
 }
 
 // ─── FOK pre-check ───────────────────────────────────────────────────────────
@@ -307,7 +331,7 @@ func (b *Book) canFillFully(order *models.Order) bool {
 				break
 			}
 		}
-		remaining = remaining.Sub(level.TotalQuantity())
+		remaining = remaining.Sub(level.TotalQuantityExcludingAccount(order.AccountID))
 		if remaining.IsNegative() || remaining.IsZero() {
 			return true
 		}

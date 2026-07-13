@@ -35,7 +35,7 @@ func TestStress_MultiSymbolConcurrentLoad(t *testing.T) {
 		t.Skip("skipping stress test in short mode")
 	}
 
-	reg := matching.NewRegistry(dropBus{}, nil)
+	reg := matching.NewRegistry(dropBus{}, nil, nil)
 	defer reg.StopAll()
 
 	// Register all symbols.
@@ -123,7 +123,7 @@ func TestStress_MultiSymbolConcurrentLoad(t *testing.T) {
 // TestStress_RaceDetector verifies no data races under concurrent access.
 // Run with: go test -race ./test/stress/...
 func TestStress_RaceDetector(t *testing.T) {
-	reg := matching.NewRegistry(dropBus{}, nil)
+	reg := matching.NewRegistry(dropBus{}, nil, nil)
 	defer reg.StopAll()
 	_, err := reg.Register("BTC-USDT", models.Spot)
 	require.NoError(t, err)

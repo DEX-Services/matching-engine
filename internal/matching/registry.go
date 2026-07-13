@@ -25,14 +25,18 @@ type Registry struct {
 
 	pub     EventPublisher
 	factory SettlementFactory
+	release ReleaseFunc
 }
 
-// NewRegistry creates a Registry.
-func NewRegistry(pub EventPublisher, factory SettlementFactory) *Registry {
+// NewRegistry creates a Registry. release may be nil (defaults to a no-op),
+// and is invoked for any resting maker order cancelled by self-trade
+// prevention so its reserved funds are returned to the ledger.
+func NewRegistry(pub EventPublisher, factory SettlementFactory, release ReleaseFunc) *Registry {
 	return &Registry{
 		engines: make(map[SymbolKey]*Engine),
 		pub:     pub,
 		factory: factory,
+		release: release,
 	}
 }
 
@@ -83,6 +87,16 @@ func (r *Registry) GetOrCreate(symbol string, market models.MarketType) *Engine 
 	return eng
 }
 
+// SubmitSnapshot routes an order to the correct engine and also returns a
+// race-safe copy of its post-submit state (see Engine.SubmitSnapshot).
+func (r *Registry) SubmitSnapshot(order *models.Order) ([]*models.Trade, *models.Order, error) {
+	eng, err := r.Get(order.Symbol, order.Market)
+	if err != nil {
+		return nil, nil, err
+	}
+	return eng.SubmitSnapshot(order)
+}
+
 // Submit routes an order to the correct engine. Returns ErrNoEngine if the
 // symbol is not registered.
 func (r *Registry) Submit(order *models.Order) ([]*models.Trade, error) {
@@ -127,5 +141,5 @@ func (r *Registry) newEngine(symbol string, market models.MarketType) *Engine {
 	if r.factory != nil {
 		sh = r.factory(symbol, market)
 	}
-	return NewEngine(symbol, market, r.pub, sh)
+	return NewEngine(symbol, market, r.pub, sh, r.release)
 }

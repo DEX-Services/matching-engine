@@ -115,3 +115,13 @@ func (o *Order) IsTerminal() bool {
 
 // IsBuy is a convenience helper.
 func (o *Order) IsBuy() bool { return o.Side == Buy }
+
+// Copy returns a shallow copy safe for handing to callers outside the
+// engine goroutine (all fields are value types, so shallow == deep here).
+func (o *Order) Copy() *Order {
+	if o == nil {
+		return nil
+	}
+	c := *o
+	return &c
+}

@@ -22,6 +22,7 @@ import (
 func newOrder(id string, side models.OrderSide, price, qty string, orderType models.OrderType) *models.Order {
 	return &models.Order{
 		ID:          id,
+		AccountID:   "acct-" + id,
 		Symbol:      "BTC-USDT",
 		Market:      models.Spot,
 		Side:        side,
@@ -56,14 +57,14 @@ func TestPriceTimePriority_SamePrice(t *testing.T) {
 	// Two bids at the same price; first one in should be matched first.
 	first := limitBuy("buy-1", "100", "1")
 	second := limitBuy("buy-2", "100", "1")
-	_, err := b.Submit(first)
+	_, _, err := b.Submit(first)
 	require.NoError(t, err)
-	_, err = b.Submit(second)
+	_, _, err = b.Submit(second)
 	require.NoError(t, err)
 
 	// A sell that fills exactly one unit should match buy-1 (earlier).
 	sell := limitSell("sell-1", "100", "1")
-	trades, err := b.Submit(sell)
+	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 	require.Len(t, trades, 1)
 	assert.Equal(t, "buy-1", trades[0].MakerOrderID, "first order should be matched first (time priority)")
@@ -80,14 +81,14 @@ func TestPriceTimePriority_BetterPriceFirst(t *testing.T) {
 	low := limitBuy("buy-low", "99", "1")
 	high := limitBuy("buy-high", "101", "1")
 
-	_, err := b.Submit(low)
+	_, _, err := b.Submit(low)
 	require.NoError(t, err)
-	_, err = b.Submit(high)
+	_, _, err = b.Submit(high)
 	require.NoError(t, err)
 
 	// Sell at 99 should match the 101 bid first (better price for seller = higher bid).
 	sell := limitSell("sell-1", "99", "1")
-	trades, err := b.Submit(sell)
+	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 	require.Len(t, trades, 1)
 	assert.Equal(t, "buy-high", trades[0].MakerOrderID, "higher bid must be matched first")
@@ -100,11 +101,11 @@ func TestConservation_SingleTrade(t *testing.T) {
 	b := newBook()
 
 	buy := limitBuy("buy-1", "100", "5")
-	_, err := b.Submit(buy)
+	_, _, err := b.Submit(buy)
 	require.NoError(t, err)
 
 	sell := limitSell("sell-1", "100", "5")
-	trades, err := b.Submit(sell)
+	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 
 	totalBuyFilled := decimal.Zero
@@ -132,13 +133,13 @@ func TestConservation_MultiplePartialFills(t *testing.T) {
 	// Rest three small sells.
 	for i := 1; i <= 3; i++ {
 		s := limitSell(fmt.Sprintf("sell-%d", i), "100", "2")
-		_, err := b.Submit(s)
+		_, _, err := b.Submit(s)
 		require.NoError(t, err)
 	}
 
 	// One big buy sweeps all three.
 	buy := limitBuy("buy-1", "100", "6")
-	trades, err := b.Submit(buy)
+	trades, _, err := b.Submit(buy)
 	require.NoError(t, err)
 	require.Len(t, trades, 3, "should generate 3 trades")
 
@@ -158,18 +159,18 @@ func TestLimitPriceNeverViolated_Buy(t *testing.T) {
 
 	// Rest a sell at 105.
 	sell := limitSell("sell-1", "105", "1")
-	_, err := b.Submit(sell)
+	_, _, err := b.Submit(sell)
 	require.NoError(t, err)
 
 	// Buy limit at 100 must NOT match (105 > 100).
 	buy := limitBuy("buy-1", "100", "1")
-	trades, err := b.Submit(buy)
+	trades, _, err := b.Submit(buy)
 	require.NoError(t, err)
 	assert.Empty(t, trades, "buy at 100 must not match a resting sell at 105")
 
 	// Buy limit at 110 CAN match the sell at 105; fill price should be 105 (maker).
 	buy2 := limitBuy("buy-2", "110", "1")
-	trades2, err := b.Submit(buy2)
+	trades2, _, err := b.Submit(buy2)
 	require.NoError(t, err)
 	require.Len(t, trades2, 1)
 	assert.True(t, trades2[0].Price.Equal(decimal.NewFromInt(105)),
@@ -184,18 +185,18 @@ func TestLimitPriceNeverViolated_Sell(t *testing.T) {
 
 	// Rest a buy at 95.
 	buy := limitBuy("buy-1", "95", "1")
-	_, err := b.Submit(buy)
+	_, _, err := b.Submit(buy)
 	require.NoError(t, err)
 
 	// Sell limit at 100 must NOT match (95 < 100).
 	sell := limitSell("sell-1", "100", "1")
-	trades, err := b.Submit(sell)
+	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 	assert.Empty(t, trades, "sell at 100 must not match a resting buy at 95")
 
 	// Sell limit at 90 CAN match at 95; fill price must be ≥ seller's limit.
 	sell2 := limitSell("sell-2", "90", "1")
-	trades2, err := b.Submit(sell2)
+	trades2, _, err := b.Submit(sell2)
 	require.NoError(t, err)
 	require.Len(t, trades2, 1)
 	assert.True(t, trades2[0].Price.GreaterThanOrEqual(sell2.Price),
@@ -221,7 +222,7 @@ func TestBookNeverCrossed(t *testing.T) {
 	}
 
 	for _, op := range ops {
-		_, err := b.Submit(op.order)
+		_, _, err := b.Submit(op.order)
 		require.NoError(t, err)
 		assertNotCrossed(t, b)
 	}
@@ -246,16 +247,16 @@ func TestOrderTerminalState_MarketOrderFullyFilled(t *testing.T) {
 	b := newBook()
 
 	// Rest enough liquidity.
-	_, err := b.Submit(limitSell("s1", "100", "10"))
+	_, _, err := b.Submit(limitSell("s1", "100", "10"))
 	require.NoError(t, err)
 
 	mkt := &models.Order{
-		ID: "mkt-1", Symbol: "BTC-USDT", Market: models.Spot,
+		ID: "mkt-1", AccountID: "acct-mkt-1", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Buy, Type: models.Market,
 		Quantity: decimal.NewFromInt(5), Status: models.StatusPending,
 		CreatedAt: time.Now(),
 	}
-	_, err = b.Submit(mkt)
+	_, _, err = b.Submit(mkt)
 	require.NoError(t, err)
 	assert.True(t, mkt.IsTerminal(), "market order must reach terminal state after submission")
 	assert.Equal(t, models.StatusFilled, mkt.Status)
@@ -269,7 +270,7 @@ func TestOrderTerminalState_MarketOrderNoLiquidity(t *testing.T) {
 		Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
 		CreatedAt: time.Now(),
 	}
-	_, err := b.Submit(mkt)
+	_, _, err := b.Submit(mkt)
 	require.NoError(t, err)
 	assert.True(t, mkt.IsTerminal(), "market order with no liquidity must still reach terminal state")
 	assert.Equal(t, models.StatusCancelled, mkt.Status)
@@ -277,11 +278,11 @@ func TestOrderTerminalState_MarketOrderNoLiquidity(t *testing.T) {
 
 func TestOrderTerminalState_IOCPartiallyFilled(t *testing.T) {
 	b := newBook()
-	_, err := b.Submit(limitSell("s1", "100", "3"))
+	_, _, err := b.Submit(limitSell("s1", "100", "3"))
 	require.NoError(t, err)
 
 	ioc := newOrder("ioc-1", models.Buy, "100", "10", models.IOC)
-	_, err = b.Submit(ioc)
+	_, _, err = b.Submit(ioc)
 	require.NoError(t, err)
 	assert.True(t, ioc.IsTerminal(), "IOC order must reach terminal state")
 	// Partially filled → remainder cancelled.
@@ -291,11 +292,11 @@ func TestOrderTerminalState_IOCPartiallyFilled(t *testing.T) {
 
 func TestOrderTerminalState_FOKCancelledWhenCannotFill(t *testing.T) {
 	b := newBook()
-	_, err := b.Submit(limitSell("s1", "100", "3"))
+	_, _, err := b.Submit(limitSell("s1", "100", "3"))
 	require.NoError(t, err)
 
 	fok := newOrder("fok-1", models.Buy, "100", "10", models.FOK)
-	_, err = b.Submit(fok)
+	_, _, err = b.Submit(fok)
 	assert.ErrorIs(t, err, orderbook.ErrFOKNotFilled)
 	assert.True(t, fok.IsTerminal())
 	assert.Equal(t, models.StatusCancelled, fok.Status)
@@ -308,12 +309,12 @@ func TestOrderTerminalState_FOKCancelledWhenCannotFill(t *testing.T) {
 func TestPartialFill_StatusAndQuantities(t *testing.T) {
 	b := newBook()
 	buy := limitBuy("buy-1", "100", "10")
-	_, err := b.Submit(buy)
+	_, _, err := b.Submit(buy)
 	require.NoError(t, err)
 
 	// Partial fill with a smaller sell.
 	sell := limitSell("sell-1", "100", "4")
-	trades, err := b.Submit(sell)
+	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 	require.Len(t, trades, 1)
 	assert.True(t, trades[0].Quantity.Equal(decimal.NewFromInt(4)))
@@ -332,7 +333,7 @@ func TestPartialFill_StatusAndQuantities(t *testing.T) {
 func TestCancel_RemovesOrderFromBook(t *testing.T) {
 	b := newBook()
 	buy := limitBuy("buy-1", "100", "5")
-	_, err := b.Submit(buy)
+	_, _, err := b.Submit(buy)
 	require.NoError(t, err)
 
 	cancelled, err := b.Cancel("buy-1")
@@ -348,11 +349,11 @@ func TestCancel_RemovesOrderFromBook(t *testing.T) {
 
 func TestPostOnly_RejectsWhenCrossing(t *testing.T) {
 	b := newBook()
-	_, err := b.Submit(limitSell("s1", "100", "1"))
+	_, _, err := b.Submit(limitSell("s1", "100", "1"))
 	require.NoError(t, err)
 
 	po := newOrder("po-1", models.Buy, "100", "1", models.PostOnly)
-	_, err = b.Submit(po)
+	_, _, err = b.Submit(po)
 	assert.ErrorIs(t, err, orderbook.ErrPostOnlyCrossing)
 	assert.Equal(t, models.StatusRejected, po.Status)
 	assertNotCrossed(t, b)
@@ -360,11 +361,11 @@ func TestPostOnly_RejectsWhenCrossing(t *testing.T) {
 
 func TestPostOnly_RestsWhenNotCrossing(t *testing.T) {
 	b := newBook()
-	_, err := b.Submit(limitSell("s1", "105", "1"))
+	_, _, err := b.Submit(limitSell("s1", "105", "1"))
 	require.NoError(t, err)
 
 	po := newOrder("po-1", models.Buy, "100", "1", models.PostOnly)
-	_, err = b.Submit(po)
+	_, _, err = b.Submit(po)
 	require.NoError(t, err)
 	assert.Equal(t, models.StatusOpen, po.Status)
 }

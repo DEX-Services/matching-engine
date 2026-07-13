@@ -28,3 +28,15 @@ type Trade struct {
 	BuyOrder  *Order `json:"-"`
 	SellOrder *Order `json:"-"`
 }
+
+// Copy returns a deep copy, including nil-safe copies of BuyOrder/SellOrder,
+// safe for handing to callers outside the engine goroutine.
+func (t *Trade) Copy() *Trade {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	c.BuyOrder = t.BuyOrder.Copy()
+	c.SellOrder = t.SellOrder.Copy()
+	return &c
+}

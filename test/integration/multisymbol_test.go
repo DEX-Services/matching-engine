@@ -24,13 +24,17 @@ type noopBus struct{}
 func (noopBus) Publish(_ *models.Event) {}
 
 func newRegistry() *matching.Registry {
-	return matching.NewRegistry(noopBus{}, nil)
+	return matching.NewRegistry(noopBus{}, nil, nil)
 }
 
 func order(symbol string, side models.OrderSide, price, qty string) *models.Order {
+	accountID := "acc-buyer"
+	if side == models.Sell {
+		accountID = "acc-seller"
+	}
 	return &models.Order{
 		ID:          uuid.NewString(),
-		AccountID:   "acc-1",
+		AccountID:   accountID,
 		Symbol:      symbol,
 		Market:      models.Spot,
 		Side:        side,
@@ -109,10 +113,10 @@ func TestConcurrentOrdersOnSameSymbol(t *testing.T) {
 					price = "100"
 				}
 				o := order("BTC-USDT", side, price, "1")
-				trades, err := reg.Submit(o)
+				trades, snap, err := reg.SubmitSnapshot(o)
 				if err == nil {
 					totalTrades.Add(int64(len(trades)))
-					if o.Filled.IsPositive() {
+					if snap.Filled.IsPositive() {
 						totalFilled.Add(1)
 					}
 				}
@@ -165,7 +169,7 @@ func TestSequenceNumbersAreMonotonic(t *testing.T) {
 		sb.mu.Unlock()
 	}}
 
-	reg := matching.NewRegistry(bus, nil)
+	reg := matching.NewRegistry(bus, nil, nil)
 	defer reg.StopAll()
 	_, err := reg.Register("BTC-USDT", models.Spot)
 	require.NoError(t, err)

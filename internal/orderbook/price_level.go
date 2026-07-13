@@ -71,7 +71,26 @@ func (pl *PriceLevel) TotalQuantity() decimal.Decimal {
 	return total
 }
 
-// Orders returns all resting orders in FIFO order (copy-safe iteration).
+// TotalQuantityExcludingAccount returns the aggregate resting quantity at
+// this level, excluding orders belonging to excludeAccountID (used by the
+// FOK pre-check so it doesn't count liquidity self-trade prevention will
+// actually skip).
+func (pl *PriceLevel) TotalQuantityExcludingAccount(excludeAccountID string) decimal.Decimal {
+	total := decimal.Zero
+	for e := pl.orders.Front(); e != nil; e = e.Next() {
+		o := e.Value.(*models.Order)
+		if excludeAccountID != "" && o.AccountID == excludeAccountID {
+			continue
+		}
+		total = total.Add(o.RemainingQty())
+	}
+	return total
+}
+
+// Orders returns a fresh slice of order pointers (safe against concurrent
+// list mutation), in FIFO order. The pointed-to Order structs are still
+// live and may be mutated by the engine goroutine — callers needing a
+// stable snapshot must call .Copy() per order.
 func (pl *PriceLevel) Orders() []*models.Order {
 	result := make([]*models.Order, 0, pl.orders.Len())
 	for e := pl.orders.Front(); e != nil; e = e.Next() {

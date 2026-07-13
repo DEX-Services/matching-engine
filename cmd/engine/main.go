@@ -88,7 +88,7 @@ func main() {
 	}
 
 	// Phase 2: Registry
-	reg := matching.NewRegistry(bus, settlementFactory)
+	reg := matching.NewRegistry(bus, settlementFactory, checker.Release)
 	defer reg.StopAll()
 
 	// Phase 7: Halt Registry
