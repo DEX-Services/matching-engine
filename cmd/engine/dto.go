@@ -41,6 +41,23 @@ type OrderResponse struct {
 	Trades  int    `json:"trades"`
 }
 
+// OpenOrderDTO is one resting order in a GET /orders response.
+type OpenOrderDTO struct {
+	ID     string `json:"id"`
+	Symbol string `json:"symbol"`
+	Market string `json:"market"`
+	Side   string `json:"side"`
+	Price  string `json:"price"`
+	Qty    string `json:"qty"`
+	Filled string `json:"filled"`
+	Status string `json:"status"`
+}
+
+// OrdersResponse is the payload for GET /orders.
+type OrdersResponse struct {
+	Orders []OpenOrderDTO `json:"orders"`
+}
+
 // BalanceResponse is the payload for GET /admin/balance.
 type BalanceResponse struct {
 	Account   string `json:"account"`

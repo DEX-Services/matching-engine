@@ -87,6 +87,39 @@ func (c *Client) Settle(ctx context.Context, userID, asset, amount string) error
 	return c.call(ctx, "/internal/balance/settle", userID, asset, amount)
 }
 
+// Backfill calls POST /internal/engine-backfill, asking Dex-Backend to push
+// every nonzero Postgres balance into the engine's in-memory ledger. Used on
+// engine startup to self-heal after a restart wipes the in-memory ledger.
+// No-ops (returns zero values, nil error) when the client is disabled.
+func (c *Client) Backfill(ctx context.Context) (synced, failed, total int, err error) {
+	if !c.Enabled() {
+		return 0, 0, 0, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/engine-backfill", nil)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	req.Header.Set("X-Engine-Secret", c.secret)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("backendclient /internal/engine-backfill: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, 0, fmt.Errorf("backendclient /internal/engine-backfill: status %d", resp.StatusCode)
+	}
+	var result struct {
+		Synced int `json:"synced"`
+		Failed int `json:"failed"`
+		Total  int `json:"total"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, 0, 0, fmt.Errorf("backendclient /internal/engine-backfill: decode response: %w", err)
+	}
+	return result.Synced, result.Failed, result.Total, nil
+}
+
 func (c *Client) call(ctx context.Context, path, userID, asset, amount string) error {
 	if !c.Enabled() {
 		return nil

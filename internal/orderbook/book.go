@@ -157,6 +157,15 @@ func (b *Book) OrderByID(orderID string) (*models.Order, bool) {
 	return o, ok
 }
 
+// AllOrders returns every resting order in the book, unordered.
+func (b *Book) AllOrders() []*models.Order {
+	out := make([]*models.Order, 0, len(b.orderIndex))
+	for _, o := range b.orderIndex {
+		out = append(out, o)
+	}
+	return out
+}
+
 // ─── Order processing ────────────────────────────────────────────────────────
 
 func (b *Book) processMarket(order *models.Order) ([]*models.Trade, error) {

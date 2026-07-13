@@ -21,6 +21,7 @@ const (
 	reqSubmit reqKind = iota
 	reqCancel
 	reqModify
+	reqAllOrders
 )
 
 type request struct {
@@ -34,6 +35,7 @@ type request struct {
 
 type result struct {
 	order  *models.Order
+	orders []*models.Order
 	trades []*models.Trade
 	err    error
 }
@@ -125,6 +127,15 @@ func (e *Engine) Modify(orderID string, newPrice, newQty decimal.Decimal) (*mode
 	return r.order, r.err
 }
 
+// AllOrders returns every resting order in this engine's book. Blocks until
+// processed by the engine goroutine, consistent with Submit/Cancel/Modify.
+func (e *Engine) AllOrders() []*models.Order {
+	ch := make(chan result, 1)
+	e.inputCh <- request{kind: reqAllOrders, resultCh: ch}
+	r := <-ch
+	return r.orders
+}
+
 // Halt stops the engine from accepting new orders (symbol-wide circuit breaker, Phase 7).
 func (e *Engine) Halt() { e.halted.Store(true) }
 
@@ -200,6 +211,9 @@ func (e *Engine) handle(req request) {
 		if err == nil {
 			e.publishEvent(models.EventOrderOpen, order, nil)
 		}
+
+	case reqAllOrders:
+		res.orders = e.book.AllOrders()
 	}
 	req.resultCh <- res
 }

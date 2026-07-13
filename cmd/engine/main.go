@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -393,6 +394,33 @@ func main() {
 		writeJSON(w, http.StatusOK, TradesResponse{Symbol: sym, Market: mkt, Trades: dtos})
 	})
 
+	mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+		account := r.URL.Query().Get("account")
+		if account == "" {
+			http.Error(w, "account is required", http.StatusBadRequest)
+			return
+		}
+		out := make([]OpenOrderDTO, 0)
+		for _, key := range reg.Symbols() {
+			eng, err := reg.Get(key.Symbol, key.Market)
+			if err != nil {
+				continue
+			}
+			for _, o := range eng.AllOrders() {
+				if o.AccountID != account {
+					continue
+				}
+				out = append(out, OpenOrderDTO{
+					ID: o.ID, Symbol: o.Symbol, Market: string(o.Market),
+					Side: string(o.Side), Price: o.Price.String(),
+					Qty: o.Quantity.String(), Filled: o.Filled.String(),
+					Status: string(o.Status),
+				})
+			}
+		}
+		writeJSON(w, http.StatusOK, OrdersResponse{Orders: out})
+	})
+
 	mux.HandleFunc("/admin/balance", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		account := q.Get("account")
@@ -535,12 +563,32 @@ func main() {
 	})
 
 	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		slog.Error("failed to bind HTTP listener", "addr", srv.Addr, "error", err)
+		os.Exit(1)
+	}
 	go func() {
 		slog.Info("HTTP server listening", "addr", ":8080")
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("http server", "error", err)
 		}
 	}()
+
+	// Startup ledger backfill: Dex-Backend calls back into this engine's own
+	// /internal/ledger/sync for each nonzero balance, so it must run only
+	// after the listener above is bound (guaranteed by net.Listen returning
+	// above, not by the goroutine having reached Serve yet). Fail-open: an
+	// unreachable Dex-Backend at boot shouldn't block the engine from serving
+	// traffic.
+	if backend.Enabled() {
+		synced, failed, total, err := backend.Backfill(ctx)
+		if err != nil {
+			slog.Error("startup ledger backfill failed", "error", err)
+		} else {
+			slog.Info("startup ledger backfill complete", "synced", synced, "failed", failed, "total", total)
+		}
+	}
 
 	runDemo(reg, ledger)
 

@@ -125,6 +125,40 @@ func TestClient_Unreachable_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestClient_Backfill_SuccessParsesResponse(t *testing.T) {
+	var gotPath, gotSecret string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotSecret = r.Header.Get("X-Engine-Secret")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]int{"synced": 7, "failed": 1, "total": 8})
+	}))
+	defer srv.Close()
+
+	c := &Client{baseURL: srv.URL, secret: "s3cr3t", http: srv.Client()}
+	synced, failed, total, err := c.Backfill(context.Background())
+	if err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+	if synced != 7 || failed != 1 || total != 8 {
+		t.Fatalf("got synced=%d failed=%d total=%d, want 7 1 8", synced, failed, total)
+	}
+	if gotPath != "/internal/engine-backfill" {
+		t.Fatalf("path = %s, want /internal/engine-backfill", gotPath)
+	}
+	if gotSecret != "s3cr3t" {
+		t.Fatalf("X-Engine-Secret = %q, want s3cr3t", gotSecret)
+	}
+}
+
+func TestClient_Backfill_DisabledIsNoop(t *testing.T) {
+	c := &Client{}
+	synced, failed, total, err := c.Backfill(context.Background())
+	if err != nil || synced != 0 || failed != 0 || total != 0 {
+		t.Fatalf("disabled Backfill should no-op, got synced=%d failed=%d total=%d err=%v", synced, failed, total, err)
+	}
+}
+
 func TestAsync_RunsFnWithoutBlockingCaller(t *testing.T) {
 	done := make(chan struct{})
 	start := time.Now()
