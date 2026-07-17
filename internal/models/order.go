@@ -95,6 +95,14 @@ type Order struct {
 	Leverage   int    `json:"leverage,omitempty"`
 	MarginMode string `json:"marginMode,omitempty"` // "ISOLATED" | "CROSS"
 
+	// QuoteCurrency is the settlement currency for the order (e.g. "USDT").
+	// For spot/futures it is derived from the symbol (BASE-QUOTE). For options
+	// it is set by the order handler from the instrument's underlying config,
+	// because option instrument symbols (BASE-STRIKE-EXPIRY-TYPE) do not
+	// encode the quote currency. When empty, risk.assetFor falls back to
+	// parsing the symbol.
+	QuoteCurrency string `json:"quoteCurrency,omitempty"`
+
 	// OptionType, StrikePrice, and Expiry apply to options only; ignored by spot/futures.
 	OptionType  string          `json:"optionType,omitempty"` // "CALL" | "PUT"
 	StrikePrice decimal.Decimal `json:"strikePrice,omitempty"`

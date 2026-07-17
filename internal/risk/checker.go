@@ -171,6 +171,14 @@ func releaseAmountAt(order *models.Order, price decimal.Decimal) (asset string, 
 }
 
 func assetFor(order *models.Order) string {
+	// Options instrument symbols (BASE-STRIKE-EXPIRY-TYPE or
+	// BASE-QUOTE-STRIKE-EXPIRY-TYPE) cannot be split into BASE-QUOTE, so
+	// the quote currency must come from the order itself (set by the
+	// handler from the instrument's underlying config).
+	if order.Market == models.Options && order.QuoteCurrency != "" {
+		return order.QuoteCurrency
+	}
+
 	parts := strings.SplitN(order.Symbol, "-", 2)
 	if len(parts) != 2 {
 		return order.Symbol

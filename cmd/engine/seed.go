@@ -61,7 +61,10 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 		expiry := time.Now().Add(dur)
 		for _, strike := range strikes {
 			for _, optType := range []string{"CALL", "PUT"} {
-				symbol := fmt.Sprintf("BTC-%d-%s-%s", strike, expiry.Format("20060102"), optType)
+				// Instrument symbol encodes BASE-QUOTE-STRIKE-EXPIRY-TYPE so
+				// each contract gets its own order book and the underlying
+				// spot pair can be parsed from the symbol.
+				symbol := fmt.Sprintf("BTC-USDT-%d-%s-%s", strike, expiry.Format("20060102"), optType)
 				_, err := pool.Exec(ctx, `
 					INSERT INTO option_instruments (symbol, underlying_symbol, strike_price, expiry, option_type)
 					VALUES ($1, $2, $3, $4, $5)
@@ -78,6 +81,7 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 // optionInstrument is a discrete listed option contract.
 type optionInstrument struct {
 	Symbol     string
+	Underlying string
 	OptionType string
 	Strike     decimal.Decimal
 	Expiry     time.Time
@@ -90,7 +94,7 @@ func loadOptionInstruments(ctx context.Context, pool *pgxpool.Pool, underlying s
 		return nil, nil
 	}
 	rows, err := pool.Query(ctx, `
-		SELECT symbol, option_type, strike_price, expiry
+		SELECT symbol, underlying_symbol, option_type, strike_price, expiry
 		FROM option_instruments
 		WHERE underlying_symbol = $1 AND active = true
 		ORDER BY expiry, strike_price`, underlying)
@@ -103,11 +107,31 @@ func loadOptionInstruments(ctx context.Context, pool *pgxpool.Pool, underlying s
 	for rows.Next() {
 		var inst optionInstrument
 		var strike string
-		if err := rows.Scan(&inst.Symbol, &inst.OptionType, &strike, &inst.Expiry); err != nil {
+		if err := rows.Scan(&inst.Symbol, &inst.Underlying, &inst.OptionType, &strike, &inst.Expiry); err != nil {
 			return nil, fmt.Errorf("scan option_instrument: %w", err)
 		}
 		inst.Strike, _ = decimal.NewFromString(strike)
 		out = append(out, inst)
 	}
 	return out, rows.Err()
+}
+
+// loadOptionInstrument returns a single active option instrument by its
+// symbol, or nil when Postgres is disabled or the instrument is not found.
+func loadOptionInstrument(ctx context.Context, pool *pgxpool.Pool, symbol string) (*optionInstrument, error) {
+	if pool == nil {
+		return nil, nil
+	}
+	var inst optionInstrument
+	var strike string
+	err := pool.QueryRow(ctx, `
+		SELECT symbol, underlying_symbol, option_type, strike_price, expiry
+		FROM option_instruments
+		WHERE symbol = $1 AND active = true`, symbol).Scan(
+		&inst.Symbol, &inst.Underlying, &inst.OptionType, &strike, &inst.Expiry)
+	if err != nil {
+		return nil, fmt.Errorf("query option_instrument %s: %w", symbol, err)
+	}
+	inst.Strike, _ = decimal.NewFromString(strike)
+	return &inst, nil
 }

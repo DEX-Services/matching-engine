@@ -104,7 +104,10 @@ func main() {
 		}
 	}
 
-	// Register trading pairs
+	// Register trading pairs. Options engines are created lazily per
+	// instrument via GetOrCreate (see validateAndPrepareOption), not
+	// pre-registered here, because each strike/expiry/type contract needs
+	// its own order book.
 	pairs := []struct {
 		symbol string
 		market models.MarketType
@@ -112,7 +115,6 @@ func main() {
 		{"BTC-USDT", models.Spot},
 		{"ETH-USDT", models.Spot},
 		{"BTC-USDC", models.Futures},
-		{"BTC-USDT", models.Options},
 	}
 	for _, p := range pairs {
 		if _, err := reg.Register(p.symbol, p.market); err != nil {
@@ -281,6 +283,17 @@ func main() {
 			Leverage: leverage, MarginMode: q.Get("marginMode"),
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
 		}
+
+		// Options require per-instrument validation and engine creation.
+		// Each option contract (unique strike/expiry/type) gets its own
+		// order book so different instruments never share a book.
+		if o.Market == models.Options {
+			if err := validateAndPrepareOption(ctx, pgPool, symbolRegistry, reg, mdSvc, o); err != nil {
+				http.Error(w, "invalid option order: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
 		if err := validateOrderConfig(symbolRegistry, o); err != nil {
 			http.Error(w, "invalid order: "+err.Error(), http.StatusBadRequest)
 			return
@@ -730,6 +743,91 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 		}
 	}
 	return nil
+}
+
+// validateAndPrepareOption validates option-specific order fields and ensures
+// a dedicated matching engine exists for the instrument. Option contracts
+// (each unique strike/expiry/type combination) must have their own order book
+// so different instruments never match against each other.
+//
+// When Postgres is available, the instrument is looked up by symbol and the
+// order's StrikePrice, Expiry, OptionType, and QuoteCurrency are populated
+// from the database (not trusted from the client). When Postgres is
+// disabled (dev mode), client-provided fields are used after validation, and
+// QuoteCurrency is parsed from the instrument symbol (BASE-QUOTE-...).
+func validateAndPrepareOption(ctx context.Context, pool *pgxpool.Pool, symbols *config.Registry,
+	reg *matching.Registry, mdSvc *marketdata.Service, o *models.Order) error {
+
+	if o.Symbol == "" {
+		return fmt.Errorf("symbol is required")
+	}
+
+	// Try to look up the instrument from Postgres (authoritative source).
+	if pool != nil {
+		inst, err := loadOptionInstrument(ctx, pool, o.Symbol)
+		if err != nil {
+			return fmt.Errorf("instrument lookup: %w", err)
+		}
+		if inst != nil {
+			o.StrikePrice = inst.Strike
+			o.Expiry = inst.Expiry
+			o.OptionType = inst.OptionType
+			if cfg, err := symbols.Get(inst.Underlying, models.Options); err == nil {
+				o.QuoteCurrency = cfg.QuoteCurrency
+			}
+		}
+	}
+
+	// Validate required fields regardless of source.
+	if o.OptionType != "CALL" && o.OptionType != "PUT" {
+		return fmt.Errorf("optionType must be CALL or PUT, got %q", o.OptionType)
+	}
+	if !o.StrikePrice.IsPositive() {
+		return fmt.Errorf("strikePrice must be positive")
+	}
+	if o.Expiry.IsZero() {
+		return fmt.Errorf("expiry is required")
+	}
+	if o.Expiry.Before(time.Now()) {
+		return fmt.Errorf("expiry must be in the future")
+	}
+
+	// Determine quote currency if not already set from config.
+	if o.QuoteCurrency == "" {
+		// Parse from instrument symbol: BASE-QUOTE-STRIKE-EXPIRY-TYPE.
+		parts := splitOptionSymbol(o.Symbol)
+		if len(parts) >= 2 {
+			o.QuoteCurrency = parts[1]
+		}
+		if o.QuoteCurrency == "" {
+			return fmt.Errorf("cannot determine quote currency for option %s; set it via instrument config", o.Symbol)
+		}
+	}
+
+	// Create a dedicated matching engine for this instrument if one does
+	// not already exist. Each option contract gets its own order book.
+	eng := reg.GetOrCreate(o.Symbol, o.Market)
+
+	// Register the engine with market data so /ticker and /depth endpoints
+	// work for option instruments too.
+	mdSvc.Register(o.Symbol, o.Market, eng)
+
+	return nil
+}
+
+// splitOptionSymbol splits an option instrument symbol on "-" into its
+// components (BASE, QUOTE, STRIKE, EXPIRY, TYPE).
+func splitOptionSymbol(symbol string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(symbol); i++ {
+		if symbol[i] == '-' {
+			parts = append(parts, symbol[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, symbol[start:])
+	return parts
 }
 
 func runDemo(reg *matching.Registry, ledger *risk.Ledger) {

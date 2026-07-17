@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,13 +18,14 @@ import (
 
 // OptionsPosition tracks a holding in an options contract.
 type OptionsPosition struct {
-	AccountID   string
-	Symbol      string
-	OptionType  string
-	StrikePrice decimal.Decimal
-	Expiry      time.Time
-	Size        decimal.Decimal // positive = long, negative = short
-	Premium     decimal.Decimal // premium paid/received
+	AccountID     string
+	Symbol        string
+	OptionType    string
+	StrikePrice   decimal.Decimal
+	Expiry        time.Time
+	Size          decimal.Decimal // positive = long, negative = short
+	Premium       decimal.Decimal // premium paid (positive) or received (negative)
+	QuoteCurrency string          // settlement currency (e.g. "USDT")
 }
 
 // OptionsSettlement handles trade settlement for options contracts.
@@ -56,9 +58,13 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 		return fmt.Errorf("options settle: missing order references on trade %s", trade.ID)
 	}
 
-	_, quote, err := parseSymbol(trade.Symbol)
-	if err != nil {
-		return err
+	quote := trade.BuyOrder.QuoteCurrency
+	if quote == "" {
+		_, parsed, err := parseSymbol(trade.Symbol)
+		if err != nil {
+			return err
+		}
+		quote = parsed
 	}
 
 	// Premium = trade price × quantity (the price of an option is its premium).
@@ -66,33 +72,39 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	// Buyer pays premium; seller receives premium.
+	// Buyer pays premium.
 	if err := o.ledger.Debit(buyerID, quote, premium); err != nil {
 		return fmt.Errorf("options settle debit buyer premium: %w", err)
 	}
 	backendclient.Async("settle", func(ctx context.Context) error {
 		return o.backend.Settle(ctx, buyerID, quote, backendclient.ToRawUnits(premium))
 	})
-	o.ledger.Credit(sellerID, quote, premium)
 
-	o.recordPosition(buyerID, trade.Symbol, trade.Quantity, premium, trade.BuyOrder)
-	o.recordPosition(sellerID, trade.Symbol, trade.Quantity.Neg(), premium.Neg(), trade.SellOrder)
+	// Seller receives premium.
+	o.ledger.Credit(sellerID, quote, premium)
+	backendclient.Async("credit", func(ctx context.Context) error {
+		return o.backend.Credit(ctx, sellerID, quote, backendclient.ToRawUnits(premium))
+	})
+
+	o.recordPosition(buyerID, trade.Symbol, trade.Quantity, premium, trade.BuyOrder, quote)
+	o.recordPosition(sellerID, trade.Symbol, trade.Quantity.Neg(), premium.Neg(), trade.SellOrder, quote)
 
 	return nil
 }
 
-func (o *OptionsSettlement) recordPosition(accountID, symbol string, size, premium decimal.Decimal, meta *models.Order) {
+func (o *OptionsSettlement) recordPosition(accountID, symbol string, size, premium decimal.Decimal, meta *models.Order, quote string) {
 	key := positionKey(accountID, symbol, meta.StrikePrice, meta.Expiry, meta.OptionType)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	pos, ok := o.positions[key]
 	if !ok {
 		pos = &OptionsPosition{
-			AccountID:   accountID,
-			Symbol:      symbol,
-			OptionType:  meta.OptionType,
-			StrikePrice: meta.StrikePrice,
-			Expiry:      meta.Expiry,
+			AccountID:     accountID,
+			Symbol:        symbol,
+			OptionType:    meta.OptionType,
+			StrikePrice:   meta.StrikePrice,
+			Expiry:        meta.Expiry,
+			QuoteCurrency: quote,
 		}
 		o.positions[key] = pos
 	}
@@ -178,30 +190,54 @@ func (p *ExpiryProcessor) sweep() {
 }
 
 func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
-	_, quote, err := parseSymbol(pos.Symbol)
-	if err != nil {
-		return
+	quote := pos.QuoteCurrency
+	if quote == "" {
+		_, parsed, err := parseSymbol(pos.Symbol)
+		if err != nil {
+			p.log.Error("expiry: cannot determine quote currency", "symbol", pos.Symbol, "error", err)
+			return
+		}
+		quote = parsed
 	}
-	ticker, err := p.marketdata.Ticker(pos.Symbol, models.Spot)
-	if err != nil || ticker.MidPrice.IsZero() {
-		p.log.Error("expiry: no mark price available", "symbol", pos.Symbol)
+
+	// Use the underlying spot mark price for intrinsic-value computation.
+	// The underlying symbol is the instrument's base pair (e.g. BTC-USDT for
+	// a BTC-USDT-55000-...-CALL instrument). We look up the Spot ticker and
+	// use MarkPrice (manipulation-resistant) rather than raw MidPrice.
+	underlying := underlyingFromSymbol(pos.Symbol, pos.QuoteCurrency)
+	ticker, err := p.marketdata.Ticker(underlying, models.Spot)
+	if err != nil || ticker.MarkPrice.IsZero() {
+		p.log.Error("expiry: no mark price available", "symbol", pos.Symbol, "underlying", underlying)
 		return
 	}
 
+	markPrice := ticker.MarkPrice
 	var intrinsic decimal.Decimal
 	if pos.OptionType == "CALL" {
-		intrinsic = decimal.Max(decimal.Zero, ticker.MidPrice.Sub(pos.StrikePrice))
+		intrinsic = decimal.Max(decimal.Zero, markPrice.Sub(pos.StrikePrice))
 	} else {
-		intrinsic = decimal.Max(decimal.Zero, pos.StrikePrice.Sub(ticker.MidPrice))
+		intrinsic = decimal.Max(decimal.Zero, pos.StrikePrice.Sub(markPrice))
 	}
 
 	if intrinsic.IsPositive() {
 		payout := intrinsic.Mul(pos.Size.Abs())
 		if pos.Size.IsPositive() {
+			// Long ITM: credit the payout.
 			p.ledger.Credit(pos.AccountID, quote, payout)
-		} else if err := p.ledger.Debit(pos.AccountID, quote, payout); err != nil {
-			p.log.Error("expiry exercise debit failed", "account", pos.AccountID, "symbol", pos.Symbol, "error", err)
+			backendclient.Async("credit", func(ctx context.Context) error {
+				return p.backend.Credit(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
+			})
 		} else {
+			// Short ITM: debit the payout from the writer. If the debit
+			// fails (insufficient balance), do NOT remove the position —
+			// leave it for manual reconciliation / retry. Otherwise the
+			// exchange silently eats the loss with no recourse.
+			if err := p.ledger.Debit(pos.AccountID, quote, payout); err != nil {
+				p.log.Error("expiry exercise debit failed; position retained for reconciliation",
+					"account", pos.AccountID, "symbol", pos.Symbol, "payout", payout, "error", err)
+				p.publishExpiryEvent(pos, markPrice)
+				return
+			}
 			backendclient.Async("settle", func(ctx context.Context) error {
 				return p.backend.Settle(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
 			})
@@ -225,5 +261,45 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 		}
 	}
 
+	p.publishExpiryEvent(pos, markPrice)
 	p.options.removePosition(pos.AccountID, pos.Symbol, pos.StrikePrice, pos.Expiry, pos.OptionType)
+}
+
+// publishExpiryEvent publishes an EventOrderExpired for the settled position so
+// downstream consumers (WS, Kafka→Postgres) are notified even when the
+// option expires worthless (OTM, no payout).
+func (p *ExpiryProcessor) publishExpiryEvent(pos *OptionsPosition, markPrice decimal.Decimal) {
+	if p.bus == nil {
+		return
+	}
+	p.bus.Publish(&models.Event{
+		Type:   models.EventOrderExpired,
+		Symbol: pos.Symbol,
+		Market: string(models.Options),
+		Order: &models.Order{
+			AccountID:   pos.AccountID,
+			Symbol:      pos.Symbol,
+			Market:      models.Options,
+			OptionType:  pos.OptionType,
+			StrikePrice: pos.StrikePrice,
+			Expiry:      pos.Expiry,
+		},
+	})
+}
+
+// underlyingFromSymbol extracts the underlying spot symbol from an option
+// instrument symbol. For the new format BASE-QUOTE-STRIKE-EXPIRY-TYPE (5
+// parts), the underlying is the first two segments. For legacy symbols
+// without the quote (e.g. BTC-55000-20250102-CALL, 4 parts), the underlying
+// is reconstructed from the base currency and the position's QuoteCurrency.
+func underlyingFromSymbol(symbol, quoteCurrency string) string {
+	parts := strings.Split(symbol, "-")
+	if len(parts) >= 5 {
+		return parts[0] + "-" + parts[1]
+	}
+	// Legacy or short format: use base + quote currency.
+	if len(parts) >= 1 && quoteCurrency != "" {
+		return parts[0] + "-" + quoteCurrency
+	}
+	return symbol
 }
