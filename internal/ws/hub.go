@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,11 +16,34 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// allowedOrigins is populated from the WS_ALLOWED_ORIGINS env var
+// (comma-separated). When empty, only same-origin requests are accepted so
+// cross-site WebSocket hijacking is not possible by default.
+var allowedOrigins = func() map[string]bool {
+	m := map[string]bool{}
+	for _, o := range strings.Split(os.Getenv("WS_ALLOWED_ORIGINS"), ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			m[o] = true
+		}
+	}
+	return m
+}()
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	// Phase 7: replace with proper origin allowlist.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		if len(allowedOrigins) == 0 {
+			// No allowlist configured: only accept same-origin upgrades.
+			host := r.Host
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // non-browser clients have no Origin header
+			}
+			return strings.HasPrefix(origin, "http://"+host) || strings.HasPrefix(origin, "https://"+host)
+		}
+		return allowedOrigins[r.Header.Get("Origin")]
+	},
 }
 
 // Hub manages all active WebSocket connections and broadcasts events to them.

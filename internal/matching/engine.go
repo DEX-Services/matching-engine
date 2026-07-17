@@ -6,6 +6,7 @@ package matching
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -45,8 +46,8 @@ type result struct {
 	orders        []*models.Order
 	trades        []*models.Trade
 	err           error
-	bids          []*orderbook.PriceLevel
-	asks          []*orderbook.PriceLevel
+	bids          []orderbook.LevelSnapshot
+	asks          []orderbook.LevelSnapshot
 	bestBid       decimal.Decimal
 	bestAsk       decimal.Decimal
 }
@@ -208,9 +209,10 @@ func (e *Engine) BestAsk() decimal.Decimal {
 	return r.bestAsk
 }
 
-// Depth returns up to `levels` price levels for each side. Routed through
-// the engine goroutine so it never races with concurrent book mutation.
-func (e *Engine) Depth(levels int) (bids, asks []*orderbook.PriceLevel) {
+// Depth returns up to `levels` price levels for each side as immutable
+// snapshots. Routed through the engine goroutine so it never races with
+// concurrent book mutation.
+func (e *Engine) Depth(levels int) (bids, asks []orderbook.LevelSnapshot) {
 	ch := make(chan result, 1)
 	e.inputCh <- request{kind: reqDepth, levels: levels, resultCh: ch}
 	r := <-ch
@@ -226,6 +228,26 @@ func (e *Engine) run() {
 		case req := <-e.inputCh:
 			e.handle(req)
 		case <-e.stopCh:
+			// Drain any buffered requests so their callers don't block
+			// forever on resultCh; respond with a shutdown error.
+			e.drain()
+			return
+		}
+	}
+}
+
+// drain empties the input channel, replying to each pending request with a
+// shutdown error so callers waiting on Submit/Cancel/Depth return promptly.
+func (e *Engine) drain() {
+	for {
+		select {
+		case req := <-e.inputCh:
+			res := result{err: fmt.Errorf("engine %s/%s stopped", e.symbol, e.market)}
+			if req.kind == reqSubmit && req.snapshot {
+				res.orderSnapshot = req.order.Copy()
+			}
+			req.resultCh <- res
+		default:
 			return
 		}
 	}
@@ -344,9 +366,12 @@ func (e *Engine) postProcess(order *models.Order, trades []*models.Trade, cancel
 		trade := it.trade
 		// Settlement is synchronous and runs inside the matching goroutine so
 		// that the ledger is always consistent before the event is published.
+		// If settlement fails (e.g. insufficient balance for a debit), the
+		// ledger and the published trade event would diverge, so log it as a
+		// critical error for manual reconciliation rather than swallowing it.
 		if err := e.settlement.Settle(trade); err != nil {
-			// Phase 7 will emit a structured log here.
-			_ = err
+			slog.Error("settlement failed; ledger may be inconsistent with trade event",
+				"tradeId", trade.ID, "symbol", trade.Symbol, "price", trade.Price, "qty", trade.Quantity, "err", err)
 		}
 		e.publishEvent(models.EventTrade, nil, trade)
 

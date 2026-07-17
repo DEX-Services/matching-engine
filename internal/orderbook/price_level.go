@@ -15,6 +15,15 @@ type PriceLevel struct {
 	index  map[string]*list.Element         // orderID -> element for O(1) removal
 }
 
+// LevelSnapshot is an immutable, concurrency-safe snapshot of one price
+// level: the price and the aggregate resting quantity at that price. It is
+// returned by Book.Depth so callers reading it off the engine goroutine can
+// never race concurrent mutation of the live PriceLevel.
+type LevelSnapshot struct {
+	Price         decimal.Decimal
+	TotalQuantity decimal.Decimal
+}
+
 // NewPriceLevel creates an empty price level at the given price.
 func NewPriceLevel(price decimal.Decimal) *PriceLevel {
 	return &PriceLevel{
@@ -85,6 +94,13 @@ func (pl *PriceLevel) TotalQuantityExcludingAccount(excludeAccountID string) dec
 		total = total.Add(o.RemainingQty())
 	}
 	return total
+}
+
+// Snapshot returns an immutable copy of this level's price and aggregate
+// quantity. Safe to call from any goroutine after the matching goroutine has
+// produced the snapshot (Depth builds snapshots inside the engine goroutine).
+func (pl *PriceLevel) Snapshot() LevelSnapshot {
+	return LevelSnapshot{Price: pl.Price, TotalQuantity: pl.TotalQuantity()}
 }
 
 // Orders returns a fresh slice of order pointers (safe against concurrent

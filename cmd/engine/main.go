@@ -72,8 +72,8 @@ func main() {
 	// Futures/Options settlement handlers are shared singletons (not one per
 	// symbol) so the liquidation engine, funding scheduler, and expiry
 	// processor can see every open position across all registered markets.
-	futuresSettlement := settlement.NewFuturesSettlement(ledger)
-	optionsSettlement := settlement.NewOptionsSettlement(ledger)
+	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend)
+	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
 
 	// Phase 6: Settlement factory
 	settlementFactory := func(symbol string, market models.MarketType) matching.SettlementHandler {
@@ -191,7 +191,7 @@ func main() {
 	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus)
 	go fundingScheduler.Run(ctx, time.Minute)
 
-	expiryProcessor := settlement.NewExpiryProcessor(optionsSettlement, ledger, mdSvc, bus)
+	expiryProcessor := settlement.NewExpiryProcessor(optionsSettlement, ledger, mdSvc, bus, backend)
 	go expiryProcessor.Run(ctx, time.Minute)
 
 	// Phase 5: Redis
@@ -219,12 +219,18 @@ func main() {
 	})
 	mux.HandleFunc("/admin/halt", func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
-		haltReg.Halt(sym, mkt, risk_admin.HaltManual, "admin")
+		if err := haltReg.Halt(sym, mkt, risk_admin.HaltManual, "admin"); err != nil {
+			http.Error(w, "halt failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		fmt.Fprintf(w, "halted %s/%s\n", sym, mkt)
 	})
 	mux.HandleFunc("/admin/resume", func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
-		haltReg.Resume(sym, mkt)
+		if err := haltReg.Resume(sym, mkt); err != nil {
+			http.Error(w, "resume failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		fmt.Fprintf(w, "resumed %s/%s\n", sym, mkt)
 	})
 	mux.HandleFunc("/order", func(w http.ResponseWriter, r *http.Request) {
@@ -262,15 +268,60 @@ func main() {
 			Leverage: leverage, MarginMode: q.Get("marginMode"),
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
 		}
+		if err := validateOrderConfig(symbolRegistry, o); err != nil {
+			http.Error(w, "invalid order: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := checker.Check(o); err != nil {
 			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := checker.Reserve(o); err != nil {
-			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
-			return
+
+		// Reservation. Limit/IOC/FOK/PostOnly carry their own price, so the
+		// standard Reserve path knows the exact notional. Market orders have
+		// no price, so reserve a worst-case estimate from the best opposite
+		// quote — otherwise an unfunded account could match and receive base
+		// for free when settlement's debit later fails.
+		var mktResAsset string
+		var mktResAmount decimal.Decimal
+		var mktEstPrice decimal.Decimal
+		if o.Type == models.Market {
+			eng, gerr := reg.Get(o.Symbol, o.Market)
+			if gerr != nil {
+				http.Error(w, "risk: "+gerr.Error(), http.StatusBadRequest)
+				return
+			}
+			if o.IsBuy() {
+				mktEstPrice = eng.BestAsk()
+			} else {
+				mktEstPrice = eng.BestBid()
+			}
+			mktResAsset, mktResAmount = risk.EstimatedRequired(o, mktEstPrice)
+			if mktResAmount.IsPositive() {
+				if err := ledger.Reserve(o.AccountID, mktResAsset, mktResAmount); err != nil {
+					http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				if backend.Enabled() {
+					if err := backend.Lock(r.Context(), o.AccountID, mktResAsset, backendclient.ToRawUnits(mktResAmount)); err != nil {
+						ledger.Release(o.AccountID, mktResAsset, mktResAmount)
+						http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
+						return
+					}
+				}
+			}
+		} else {
+			if err := checker.Reserve(o); err != nil {
+				http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
-		if lockAsset, lockAmount := risk.RequiredFor(o); lockAmount.IsPositive() && backend.Enabled() {
+
+		lockAsset, lockAmount := risk.RequiredFor(o)
+		if o.Type == models.Market {
+			lockAsset, lockAmount = mktResAsset, mktResAmount
+		}
+		if lockAmount.IsPositive() && backend.Enabled() && o.Type != models.Market {
 			// Mirror the reservation into Postgres synchronously: if the real
 			// wallet doesn't have the funds (or Dex-Backend is unreachable),
 			// the in-memory ledger and Postgres must not diverge, so roll
@@ -281,22 +332,52 @@ func main() {
 				return
 			}
 		}
-		trades, err := reg.Submit(o)
+
+		releaseMarket := func(trades []*models.Trade) {
+			// Release the unfilled-remainder estimate plus the price-
+			// improvement over-reservation on the filled portion, so the
+			// worst-case estimate never leaks funds after the order settles.
+			remaining := mktResAmount.Sub(risk.FilledDebit(o, trades))
+			if remaining.IsPositive() {
+				ledger.Release(o.AccountID, mktResAsset, remaining)
+				if backend.Enabled() {
+					backendclient.Async("unlock", func(ctx context.Context) error {
+						return backend.Unlock(ctx, o.AccountID, mktResAsset, backendclient.ToRawUnits(remaining))
+					})
+				}
+			}
+		}
+
+		trades, snap, err := reg.SubmitSnapshot(o)
 		if err != nil {
 			// Nothing filled in any of these rejection paths (halt, FOK-not-
 			// filled, post-only-cross, invalid order) — release the full
 			// reservation we just took.
-			checker.Release(o)
-			if lockAsset, lockAmount := risk.RequiredFor(o); lockAmount.IsPositive() {
-				backendclient.Async("unlock", func(ctx context.Context) error {
-					return backend.Unlock(ctx, o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount))
-				})
+			if o.Type == models.Market {
+				releaseMarket(nil)
+			} else {
+				checker.Release(o)
+				if lockAmount.IsPositive() {
+					backendclient.Async("unlock", func(ctx context.Context) error {
+						return backend.Unlock(ctx, o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount))
+					})
+				}
 			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Release any unused market-order reservation after settlement.
+		if o.Type == models.Market {
+			releaseMarket(trades)
+		}
+		status := o.Status
+		filled := o.Filled
+		if snap != nil {
+			status = snap.Status
+			filled = snap.Filled
+		}
 		writeJSON(w, http.StatusOK, OrderResponse{
-			OrderID: o.ID, Status: string(o.Status), Filled: o.Filled.String(), Trades: len(trades),
+			OrderID: o.ID, Status: string(status), Filled: filled.String(), Trades: len(trades),
 		})
 	})
 
@@ -348,14 +429,14 @@ func main() {
 			return
 		}
 		bidLevels, askLevels := eng.Depth(levels)
-		toDTO := func(levels []*orderbook.PriceLevel) []DepthLevel {
+		toDTO := func(levels []orderbook.LevelSnapshot) []DepthLevel {
 			out := make([]DepthLevel, 0, len(levels))
 			var total decimal.Decimal
 			for _, l := range levels {
-				total = total.Add(l.TotalQuantity())
+				total = total.Add(l.TotalQuantity)
 				out = append(out, DepthLevel{
 					Price: l.Price.String(),
-					Size:  l.TotalQuantity().String(),
+					Size:  l.TotalQuantity.String(),
 					Total: total.String(),
 				})
 			}
@@ -607,6 +688,37 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// validateOrderConfig enforces the per-symbol TickSize, LotSize, MinNotional
+// and MaxPrice rules from the config registry against an incoming order. When
+// no config is registered for the symbol/market (e.g. dev without Postgres),
+// validation is skipped so the engine still accepts orders.
+func validateOrderConfig(reg *config.Registry, o *models.Order) error {
+	cfg, err := reg.Get(o.Symbol, o.Market)
+	if err != nil {
+		return nil // unconfigured symbol: no tick/lot rules to enforce
+	}
+	if cfg.TickSize.IsPositive() && o.Type != models.Market {
+		if remainder := o.Price.Mod(cfg.TickSize); !remainder.IsZero() {
+			return fmt.Errorf("price %s not a multiple of tick size %s", o.Price, cfg.TickSize)
+		}
+	}
+	if cfg.LotSize.IsPositive() {
+		if remainder := o.Quantity.Mod(cfg.LotSize); !remainder.IsZero() {
+			return fmt.Errorf("quantity %s not a multiple of lot size %s", o.Quantity, cfg.LotSize)
+		}
+	}
+	if cfg.MaxPrice.IsPositive() && o.Type != models.Market && o.Price.GreaterThan(cfg.MaxPrice) {
+		return fmt.Errorf("price %s exceeds max price %s", o.Price, cfg.MaxPrice)
+	}
+	if cfg.MinNotional.IsPositive() && o.Type != models.Market {
+		notional := o.Price.Mul(o.Quantity)
+		if notional.LessThan(cfg.MinNotional) {
+			return fmt.Errorf("notional %s below min notional %s", notional, cfg.MinNotional)
+		}
+	}
+	return nil
 }
 
 func runDemo(reg *matching.Registry, ledger *risk.Ledger) {

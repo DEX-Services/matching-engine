@@ -35,6 +35,12 @@ const (
 	GFD TimeInForce = "GFD" // Good-For-Day
 )
 
+// Margin mode constants for futures positions.
+const (
+	MarginIsolated = "ISOLATED"
+	MarginCross    = "CROSS"
+)
+
 // OrderStatus tracks the lifecycle of an order.
 type OrderStatus string
 

@@ -16,7 +16,7 @@ import (
 type BookReader interface {
 	BestBid() decimal.Decimal
 	BestAsk() decimal.Decimal
-	Depth(levels int) (bids, asks []*orderbook.PriceLevel)
+	Depth(levels int) (bids, asks []orderbook.LevelSnapshot)
 }
 
 // Ticker is a snapshot of current market data for one symbol/market.
@@ -70,10 +70,10 @@ func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, erro
 	bids, asks := reader.Depth(5)
 	var bidDepth, askDepth decimal.Decimal
 	for _, l := range bids {
-		bidDepth = bidDepth.Add(l.TotalQuantity())
+		bidDepth = bidDepth.Add(l.TotalQuantity)
 	}
 	for _, l := range asks {
-		askDepth = askDepth.Add(l.TotalQuantity())
+		askDepth = askDepth.Add(l.TotalQuantity)
 	}
 
 	return &Ticker{
@@ -100,7 +100,7 @@ func (s *Service) VWAP(symbol string, market models.MarketType, side models.Orde
 	}
 
 	bids, asks := reader.Depth(maxLevels)
-	var levels []*orderbook.PriceLevel
+	var levels []orderbook.LevelSnapshot
 	if side == models.Buy {
 		levels = asks
 	} else {
@@ -108,13 +108,13 @@ func (s *Service) VWAP(symbol string, market models.MarketType, side models.Orde
 	}
 
 	remaining := qty
-	totalCost := decimal.Zero
+	totalCost := decimal.Decimal{}
 
 	for _, lvl := range levels {
 		if remaining.IsZero() {
 			break
 		}
-		take := decimal.Min(remaining, lvl.TotalQuantity())
+		take := decimal.Min(remaining, lvl.TotalQuantity)
 		totalCost = totalCost.Add(lvl.Price.Mul(take))
 		remaining = remaining.Sub(take)
 	}

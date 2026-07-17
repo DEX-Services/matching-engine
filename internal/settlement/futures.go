@@ -3,6 +3,7 @@ package settlement
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -71,10 +72,15 @@ type FuturesSettlement struct {
 }
 
 // NewFuturesSettlement creates a FuturesSettlement backed by the given ledger.
-func NewFuturesSettlement(ledger *risk.Ledger) *FuturesSettlement {
+// backend is the shared Postgres balance-lock bridge (may be a disabled
+// no-op client); pass the same instance used elsewhere so config is loaded once.
+func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client) *FuturesSettlement {
+	if backend == nil {
+		backend = &backendclient.Client{}
+	}
 	return &FuturesSettlement{
 		ledger:    ledger,
-		backend:   backendclient.New(),
+		backend:   backend,
 		positions: make(map[string]*Position),
 	}
 }
@@ -156,7 +162,9 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
-	if !ok || closeQty.IsZero() {
+	if !ok || closeQty.IsZero() || pos.Size.IsZero() {
+		// No position to close, nothing to close, or a defensive zero-size
+		// position record that would otherwise divide-by-zero below.
 		f.mu.Unlock()
 		return
 	}
@@ -179,16 +187,17 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 // to accountID's balance, in-memory and (best-effort) in Postgres. The net
 // settlement may be negative (a loss exceeding the released margin); this
 // still applies as a debit so the loss is actually collected, unlike a
-// silent no-op.
+// silent no-op. A failed debit is logged as a critical error so the ledger
+// divergence is visible for reconciliation instead of being silently ignored.
 func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margin, pnl decimal.Decimal) {
 	settlement := margin.Add(pnl)
 	if settlement.IsPositive() {
 		f.ledger.Credit(accountID, quoteAsset, settlement)
 	} else if settlement.IsNegative() {
-		// Best-effort: a position's margin is expected to cover its own
-		// losses under normal liquidation thresholds, but guard against the
-		// in-memory ledger going negative from an outsized adverse move.
-		_ = f.ledger.Debit(accountID, quoteAsset, settlement.Neg())
+		if err := f.ledger.Debit(accountID, quoteAsset, settlement.Neg()); err != nil {
+			slog.Error("realizeAndCredit debit failed; ledger balance may go negative",
+				"account", accountID, "asset", quoteAsset, "amount", settlement.Neg(), "err", err)
+		}
 	}
 	backendclient.Async("credit", func(ctx context.Context) error {
 		return f.backend.Credit(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement))

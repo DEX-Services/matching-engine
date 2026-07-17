@@ -109,7 +109,14 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 		return
 	}
 
-	e.settlement.ClosePosition(pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice)
+	// The reduce-only market order above already closes the filled portion of
+	// the position through Settle/applyFill at the actual fill prices. Only
+	// force-close the remainder at the mark price if the position still exists
+	// (i.e. the market order did not fully fill it). This avoids realizing PnL
+	// twice or at inconsistent prices for the same quantity.
+	if remaining := e.settlement.GetPosition(pos.AccountID, pos.Symbol); remaining != nil && !remaining.Size.IsZero() {
+		e.settlement.ClosePosition(pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice)
+	}
 
 	e.log.Warn("position liquidated", "account", pos.AccountID, "symbol", pos.Symbol, "size", pos.Size.String())
 	if e.bus != nil {

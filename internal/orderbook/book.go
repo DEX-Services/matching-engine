@@ -6,7 +6,9 @@ package orderbook
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/dex/matching-engine/internal/models"
@@ -144,19 +146,25 @@ func (b *Book) BestAsk() decimal.Decimal {
 	return b.askPrices[0]
 }
 
-// Depth returns up to `levels` price levels per side.
-func (b *Book) Depth(levels int) (bids, asks []*PriceLevel) {
+// Depth returns up to `levels` price levels per side as immutable snapshots.
+// Snapshots are returned (not live *PriceLevel pointers) so callers reading
+// them off the engine goroutine cannot race concurrent book mutation.
+func (b *Book) Depth(levels int) (bids, asks []LevelSnapshot) {
 	for i, p := range b.bidPrices {
 		if i >= levels {
 			break
 		}
-		bids = append(bids, b.bids[p.String()])
+		if lvl := b.bids[priceKey(p)]; lvl != nil {
+			bids = append(bids, lvl.Snapshot())
+		}
 	}
 	for i, p := range b.askPrices {
 		if i >= levels {
 			break
 		}
-		asks = append(asks, b.asks[p.String()])
+		if lvl := b.asks[priceKey(p)]; lvl != nil {
+			asks = append(asks, lvl.Snapshot())
+		}
 	}
 	return
 }
@@ -326,10 +334,9 @@ func (b *Book) canFillFully(order *models.Order) bool {
 
 	levels := b.oppositeLevels(order)
 	for _, level := range levels {
-		if order.Type == models.FOK || order.Type == models.Limit {
-			if !b.priceAcceptable(order, level.Price) {
-				break
-			}
+		// FOK is price-limited: stop once the next level crosses the limit.
+		if !b.priceAcceptable(order, level.Price) {
+			break
 		}
 		remaining = remaining.Sub(level.TotalQuantityExcludingAccount(order.AccountID))
 		if remaining.IsNegative() || remaining.IsZero() {
@@ -349,7 +356,7 @@ func (b *Book) restOrder(order *models.Order) ([]*models.Trade, error) {
 }
 
 func (b *Book) addToBook(order *models.Order) {
-	key := order.Price.String()
+	key := priceKey(order.Price)
 	if order.IsBuy() {
 		if _, exists := b.bids[key]; !exists {
 			b.bids[key] = NewPriceLevel(order.Price)
@@ -367,7 +374,7 @@ func (b *Book) addToBook(order *models.Order) {
 }
 
 func (b *Book) removeFromBook(order *models.Order) {
-	key := order.Price.String()
+	key := priceKey(order.Price)
 	if order.IsBuy() {
 		if level, ok := b.bids[key]; ok {
 			level.Remove(order.ID)
@@ -394,12 +401,12 @@ func (b *Book) bestOppositeLevel(order *models.Order) *PriceLevel {
 		if len(b.askPrices) == 0 {
 			return nil
 		}
-		return b.asks[b.askPrices[0].String()]
+		return b.asks[priceKey(b.askPrices[0])]
 	}
 	if len(b.bidPrices) == 0 {
 		return nil
 	}
-	return b.bids[b.bidPrices[0].String()]
+	return b.bids[priceKey(b.bidPrices[0])]
 }
 
 // oppositeLevels returns all levels on the opposite side in matching order.
@@ -407,11 +414,11 @@ func (b *Book) oppositeLevels(order *models.Order) []*PriceLevel {
 	var levels []*PriceLevel
 	if order.IsBuy() {
 		for _, p := range b.askPrices {
-			levels = append(levels, b.asks[p.String()])
+			levels = append(levels, b.asks[priceKey(p)])
 		}
 	} else {
 		for _, p := range b.bidPrices {
-			levels = append(levels, b.bids[p.String()])
+			levels = append(levels, b.bids[priceKey(p)])
 		}
 	}
 	return levels
@@ -444,6 +451,33 @@ func (b *Book) updateStatus(order *models.Order) {
 }
 
 // ─── Price key management ────────────────────────────────────────────────────
+
+// priceKey returns a canonical map key for a decimal price so that the same
+// numeric value is never split across multiple levels regardless of how it
+// was constructed. shopspring/decimal preserves the input exponent, so
+// "100" (coeff=100, exp=0) and "100.0" (coeff=1000, exp=-1) would otherwise
+// produce distinct String() keys. We canonicalize by reducing the
+// coefficient/exponent pair to its minimal form.
+func priceKey(p decimal.Decimal) string {
+	coeff := new(big.Int).Set(p.Coefficient())
+	exp := p.Exponent()
+	// Absorb positive exponents into the coefficient (e.g. 1e2 -> 100e0).
+	for exp > 0 {
+		coeff.Mul(coeff, big.NewInt(10))
+		exp--
+	}
+	// Strip trailing zeros while the exponent is negative (e.g. 1000e-1 -> 100e0).
+	ten := big.NewInt(10)
+	for exp < 0 {
+		q, r := new(big.Int).DivMod(coeff, ten, new(big.Int))
+		if r.Sign() != 0 {
+			break
+		}
+		coeff = q
+		exp++
+	}
+	return coeff.String() + "e" + strconv.FormatInt(int64(exp), 10)
+}
 
 func (b *Book) insertBidPrice(price decimal.Decimal) {
 	b.bidPrices = append(b.bidPrices, price)

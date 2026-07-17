@@ -1,2 +1,5 @@
 .env
 kafka-ca.pem
+engine
+/engine
+*.exe

@@ -38,10 +38,14 @@ type OptionsSettlement struct {
 }
 
 // NewOptionsSettlement creates an OptionsSettlement backed by the given ledger.
-func NewOptionsSettlement(ledger *risk.Ledger) *OptionsSettlement {
+// backend is the shared Postgres balance-lock bridge (may be a disabled no-op).
+func NewOptionsSettlement(ledger *risk.Ledger, backend *backendclient.Client) *OptionsSettlement {
+	if backend == nil {
+		backend = &backendclient.Client{}
+	}
 	return &OptionsSettlement{
 		ledger:    ledger,
-		backend:   backendclient.New(),
+		backend:   backend,
 		positions: make(map[string]*OptionsPosition),
 	}
 }
@@ -142,8 +146,11 @@ type ExpiryProcessor struct {
 }
 
 // NewExpiryProcessor creates an ExpiryProcessor.
-func NewExpiryProcessor(options *OptionsSettlement, ledger *risk.Ledger, md *marketdata.Service, bus *events.Bus) *ExpiryProcessor {
-	return &ExpiryProcessor{options: options, ledger: ledger, backend: backendclient.New(), marketdata: md, bus: bus, log: slog.Default()}
+func NewExpiryProcessor(options *OptionsSettlement, ledger *risk.Ledger, md *marketdata.Service, bus *events.Bus, backend *backendclient.Client) *ExpiryProcessor {
+	if backend == nil {
+		backend = &backendclient.Client{}
+	}
+	return &ExpiryProcessor{options: options, ledger: ledger, backend: backend, marketdata: md, bus: bus, log: slog.Default()}
 }
 
 // Run starts the expiry sweep loop; call in a goroutine. Stops when ctx is cancelled.
@@ -197,6 +204,23 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 		} else {
 			backendclient.Async("settle", func(ctx context.Context) error {
 				return p.backend.Settle(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
+			})
+		}
+	}
+
+	// Release the writer's cash-secured collateral (strike × |size|) that was
+	// reserved at order time. For ITM shorts the exercise Debit above already
+	// released reservation up to the payout; the residual here returns the
+	// remainder. For OTM shorts (intrinsic == 0) this releases the full
+	// collateral. Without this, expired option collateral stays locked forever.
+	if pos.Size.IsNegative() {
+		collateral := pos.StrikePrice.Mul(pos.Size.Abs())
+		payout := intrinsic.Mul(pos.Size.Abs()) // 0 for OTM
+		residual := collateral.Sub(payout)
+		if residual.IsPositive() {
+			p.ledger.Release(pos.AccountID, quote, residual)
+			backendclient.Async("unlock", func(ctx context.Context) error {
+				return p.backend.Unlock(ctx, pos.AccountID, quote, backendclient.ToRawUnits(residual))
 			})
 		}
 	}

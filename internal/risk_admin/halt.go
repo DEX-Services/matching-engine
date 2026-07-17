@@ -1,8 +1,9 @@
 // Package risk_admin implements the symbol-wide halt mechanism (circuit breaker).
 //
 // This is deliberately separate from per-order risk rejection (Section 6 of spec).
-// A halt stops the matching goroutine from consuming its input channel entirely.
-// It is controlled via an admin API, not via risk rules.
+// A halt rejects incoming orders via the engine's atomic halted flag while the
+// engine goroutine keeps draining its input channel (so cancel/depth requests
+// still resolve). It is controlled via an admin API, not via risk rules.
 package risk_admin
 
 import (

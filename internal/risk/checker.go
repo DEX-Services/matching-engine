@@ -36,9 +36,15 @@ func (c *Checker) Check(order *models.Order) error {
 	}
 
 	// Market orders cannot be checked for exact notional without a mark price.
-	// Phase 7 adds mark-price checks here. For now, verify the account exists
-	// and has at least some balance in the required asset.
+	// A worst-case estimate is reserved later via ReserveMarket in the order
+	// handler, once the best opposite quote is known. Here we only verify the
+	// account has a positive available balance in the required asset so a
+	// totally unfunded account cannot submit market orders either.
 	if order.Type == models.Market {
+		asset := assetFor(order)
+		if c.ledger.Available(order.AccountID, asset).LessThanOrEqual(decimal.Zero) {
+			return fmt.Errorf("insufficient %s: available=0", asset)
+		}
 		return nil
 	}
 
@@ -59,6 +65,22 @@ func (c *Checker) Reserve(order *models.Order) error {
 	}
 	asset, notional := required(order)
 	return c.ledger.Reserve(order.AccountID, asset, notional)
+}
+
+// ReserveMarket reserves funds for a market order using an estimated
+// worst-case price (typically the best opposite quote), since market orders
+// carry no price of their own. Returns the asset and amount reserved so the
+// caller can release the unused residual after the order fills, or the full
+// amount if it is rejected/unfilled.
+func (c *Checker) ReserveMarket(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal, err error) {
+	asset, amount = requiredAt(order, estPrice)
+	if amount.IsZero() {
+		return asset, amount, nil
+	}
+	if err := c.ledger.Reserve(order.AccountID, asset, amount); err != nil {
+		return asset, amount, err
+	}
+	return asset, amount, nil
 }
 
 // Release frees whatever remains reserved for the order's unfilled quantity
@@ -90,6 +112,26 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 	return required(order)
 }
 
+// EstimatedRequired returns the asset and worst-case amount to reserve for a
+// market order given an estimated (best opposite) price, since market orders
+// carry no price of their own. Used by the order handler to reserve funds
+// before a market order matches so an unfunded account can't receive base for
+// free when settlement's debit later fails.
+func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal) {
+	return requiredAt(order, estPrice)
+}
+
+// FilledDebit returns the total amount settlement will debit for the filled
+// portion of order across the given trades, using the same notional rules as
+// Reserve so a residual release is always consistent with what was reserved.
+func FilledDebit(order *models.Order, trades []*models.Trade) decimal.Decimal {
+	total := decimal.Zero
+	for _, t := range trades {
+		total = total.Add(notionalFor(order, t.Quantity, t.Price))
+	}
+	return total
+}
+
 // ReleaseAmountFor exposes the asset and amount that Release would free for
 // order, for callers outside this package that must mirror the same release
 // externally. Mirrors Release's market-order skip.
@@ -106,13 +148,26 @@ func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal
 // Symbol format: "BASE-QUOTE" (e.g. "BTC-USDT").
 // Buyers lock quote currency (price × qty); sellers lock base currency (qty).
 func required(order *models.Order) (asset string, amount decimal.Decimal) {
-	return assetFor(order), notionalFor(order, order.Quantity)
+	return assetFor(order), notionalFor(order, order.Quantity, order.Price)
+}
+
+// requiredAt is like required but evaluates the notional at an explicit price,
+// used for market orders whose own Price is zero (the caller passes the best
+// opposite quote as a worst-case estimate).
+func requiredAt(order *models.Order, price decimal.Decimal) (asset string, amount decimal.Decimal) {
+	return assetFor(order), notionalFor(order, order.Quantity, price)
 }
 
 // releaseAmount returns the asset and amount that should be released for an
 // order being cancelled or rejected, based on the UNFILLED remainder only.
 func releaseAmount(order *models.Order) (asset string, amount decimal.Decimal) {
-	return assetFor(order), notionalFor(order, order.RemainingQty())
+	return assetFor(order), notionalFor(order, order.RemainingQty(), order.Price)
+}
+
+// releaseAmountAt is like releaseAmount but evaluates at an explicit price,
+// for market orders whose own Price is zero.
+func releaseAmountAt(order *models.Order, price decimal.Decimal) (asset string, amount decimal.Decimal) {
+	return assetFor(order), notionalFor(order, order.RemainingQty(), price)
 }
 
 func assetFor(order *models.Order) string {
@@ -146,22 +201,22 @@ func MarginRequired(notional decimal.Decimal, leverage int) decimal.Decimal {
 	return notional.Div(decimal.NewFromInt(int64(leverage)))
 }
 
-func notionalFor(order *models.Order, qty decimal.Decimal) decimal.Decimal {
+func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decimal {
 	switch order.Market {
 	case models.Futures:
-		notional := order.Price.Mul(qty)
+		notional := price.Mul(qty)
 		return MarginRequired(notional, order.Leverage)
 	case models.Options:
 		if order.IsBuy() {
 			// Premium owed by the buyer.
-			return order.Price.Mul(qty)
+			return price.Mul(qty)
 		}
 		// Cash-secured collateral for the writer (both CALL and PUT): lock
 		// strike*qty in quote currency. No physical covered-call support yet.
 		return order.StrikePrice.Mul(qty)
 	default:
 		if order.IsBuy() {
-			return order.Price.Mul(qty)
+			return price.Mul(qty)
 		}
 		return qty
 	}
