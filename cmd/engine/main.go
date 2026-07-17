@@ -129,6 +129,19 @@ func main() {
 		mdSvc.Register(p.symbol, p.market, eng)
 	}
 
+	// Record last trade prices for mark-price computation. The mark price
+	// blends the book mid-price with the most recent trade (capped to ±1%
+	// deviation) so a thin book cannot be manipulated to trigger spurious
+	// liquidations or skew funding.
+	priceCh := bus.Subscribe(10_000)
+	go func() {
+		for evt := range priceCh {
+			if evt.Type == models.EventTrade && evt.Trade != nil {
+				mdSvc.RecordTrade(evt.Symbol, models.MarketType(evt.Market), evt.Trade.Price)
+			}
+		}
+	}()
+
 	// Phase 4: WebSocket
 	hub := ws.NewHub(wsCh)
 	go hub.Run()
@@ -185,10 +198,10 @@ func main() {
 	}
 
 	// Futures liquidation, funding, and options expiry background loops.
-	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus)
+	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)
 	go liqEngine.Run(ctx, time.Second)
 
-	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus)
+	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus, pgPool)
 	go fundingScheduler.Run(ctx, time.Minute)
 
 	expiryProcessor := settlement.NewExpiryProcessor(optionsSettlement, ledger, mdSvc, bus, backend)
@@ -277,72 +290,74 @@ func main() {
 			return
 		}
 
-		// Reservation. Limit/IOC/FOK/PostOnly carry their own price, so the
-		// standard Reserve path knows the exact notional. Market orders have
-		// no price, so reserve a worst-case estimate from the best opposite
-		// quote — otherwise an unfunded account could match and receive base
-		// for free when settlement's debit later fails.
-		var mktResAsset string
-		var mktResAmount decimal.Decimal
-		var mktEstPrice decimal.Decimal
+		// Reservation. Compute the worst-case margin/notional to reserve so
+		// that settlement's debit (at actual fill prices) never exceeds the
+		// reservation — which would either fail the debit (inconsistent
+		// ledger) or leak permanently-locked funds.
+		//
+		//   Market orders:   best opposite quote (no own price).
+		//   Futures sell limit: max(limit, bestBid) — margin scales with fill
+		//     price, and the worst case for a short is filling at the best bid.
+		//   Buy limits / spot: the limit price (a buyer never pays more).
+		var resAsset string
+		var resAmount decimal.Decimal
 		if o.Type == models.Market {
 			eng, gerr := reg.Get(o.Symbol, o.Market)
 			if gerr != nil {
 				http.Error(w, "risk: "+gerr.Error(), http.StatusBadRequest)
 				return
 			}
+			var estPrice decimal.Decimal
 			if o.IsBuy() {
-				mktEstPrice = eng.BestAsk()
+				estPrice = eng.BestAsk()
 			} else {
-				mktEstPrice = eng.BestBid()
+				estPrice = eng.BestBid()
 			}
-			mktResAsset, mktResAmount = risk.EstimatedRequired(o, mktEstPrice)
-			if mktResAmount.IsPositive() {
-				if err := ledger.Reserve(o.AccountID, mktResAsset, mktResAmount); err != nil {
-					http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-				if backend.Enabled() {
-					if err := backend.Lock(r.Context(), o.AccountID, mktResAsset, backendclient.ToRawUnits(mktResAmount)); err != nil {
-						ledger.Release(o.AccountID, mktResAsset, mktResAmount)
-						http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
-						return
-					}
+			resAsset, resAmount = risk.EstimatedRequired(o, estPrice)
+		} else if o.Market == models.Futures && o.Side == models.Sell {
+			resAsset, resAmount = risk.RequiredFor(o)
+			if eng, gerr := reg.Get(o.Symbol, o.Market); gerr == nil {
+				if bestBid := eng.BestBid(); bestBid.GreaterThan(o.Price) {
+					resAsset, resAmount = risk.EstimatedRequired(o, bestBid)
 				}
 			}
 		} else {
-			if err := checker.Reserve(o); err != nil {
+			resAsset, resAmount = risk.RequiredFor(o)
+		}
+
+		if resAmount.IsPositive() {
+			if err := ledger.Reserve(o.AccountID, resAsset, resAmount); err != nil {
 				http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-		}
-
-		lockAsset, lockAmount := risk.RequiredFor(o)
-		if o.Type == models.Market {
-			lockAsset, lockAmount = mktResAsset, mktResAmount
-		}
-		if lockAmount.IsPositive() && backend.Enabled() && o.Type != models.Market {
 			// Mirror the reservation into Postgres synchronously: if the real
 			// wallet doesn't have the funds (or Dex-Backend is unreachable),
 			// the in-memory ledger and Postgres must not diverge, so roll
 			// back the local reservation and reject the order.
-			if err := backend.Lock(r.Context(), o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount)); err != nil {
-				checker.Release(o)
-				http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
-				return
+			if backend.Enabled() {
+				if err := backend.Lock(r.Context(), o.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+					ledger.Release(o.AccountID, resAsset, resAmount)
+					http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 		}
 
-		releaseMarket := func(trades []*models.Trade) {
-			// Release the unfilled-remainder estimate plus the price-
-			// improvement over-reservation on the filled portion, so the
-			// worst-case estimate never leaks funds after the order settles.
-			remaining := mktResAmount.Sub(risk.FilledDebit(o, trades))
-			if remaining.IsPositive() {
-				ledger.Release(o.AccountID, mktResAsset, remaining)
+		// releaseOverReservation releases the difference between what was
+		// reserved (at the worst-case price) and what settlement actually
+		// debited (at fill prices), minus the reservation still needed for
+		// any resting remainder (at the limit price, since a resting maker
+		// fills at its own price). This fixes the price-improvement leak for
+		// limit orders and generalises the market-order release to all types.
+		releaseOverReservation := func(trades []*models.Trade) {
+			filledDebit := risk.FilledDebit(o, trades)
+			_, restingReserved := risk.ReleaseAmountFor(o)
+			overReserved := resAmount.Sub(filledDebit).Sub(restingReserved)
+			if overReserved.IsPositive() {
+				ledger.Release(o.AccountID, resAsset, overReserved)
 				if backend.Enabled() {
 					backendclient.Async("unlock", func(ctx context.Context) error {
-						return backend.Unlock(ctx, o.AccountID, mktResAsset, backendclient.ToRawUnits(remaining))
+						return backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(overReserved))
 					})
 				}
 			}
@@ -350,26 +365,22 @@ func main() {
 
 		trades, snap, err := reg.SubmitSnapshot(o)
 		if err != nil {
-			// Nothing filled in any of these rejection paths (halt, FOK-not-
-			// filled, post-only-cross, invalid order) — release the full
-			// reservation we just took.
-			if o.Type == models.Market {
-				releaseMarket(nil)
-			} else {
-				checker.Release(o)
-				if lockAmount.IsPositive() {
+			// Nothing filled in rejection paths (halt, FOK-not-filled,
+			// post-only-cross, invalid order) — release the full reservation.
+			if resAmount.IsPositive() {
+				ledger.Release(o.AccountID, resAsset, resAmount)
+				if backend.Enabled() {
 					backendclient.Async("unlock", func(ctx context.Context) error {
-						return backend.Unlock(ctx, o.AccountID, lockAsset, backendclient.ToRawUnits(lockAmount))
+						return backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount))
 					})
 				}
 			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		// Release any unused market-order reservation after settlement.
-		if o.Type == models.Market {
-			releaseMarket(trades)
-		}
+		// Release any unused reservation after settlement (price improvement
+		// on the filled portion + unfilled remainder for market/IOC orders).
+		releaseOverReservation(trades)
 		status := o.Status
 		filled := o.Filled
 		if snap != nil {
@@ -576,7 +587,7 @@ func main() {
 			}
 			mark := decimal.Zero
 			if ticker, err := mdSvc.Ticker(p.Symbol, models.Futures); err == nil {
-				mark = ticker.MidPrice
+				mark = ticker.MarkPrice
 			}
 			out.Futures = append(out.Futures, FuturesPositionDTO{
 				Symbol: p.Symbol, Side: string(p.Side), Size: p.Size.String(),
@@ -611,7 +622,7 @@ func main() {
 		}
 		spot, _ := spotTicker.MidPrice.Float64()
 
-		const assumedVol = 0.6  // annualized IV assumption until a real vol surface exists
+		const assumedVol = 0.6 // annualized IV assumption until a real vol surface exists
 		const riskFreeRate = 0.03
 
 		instruments, err := loadOptionInstruments(ctx, pgPool, underlying)

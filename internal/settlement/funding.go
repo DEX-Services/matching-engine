@@ -9,6 +9,7 @@ import (
 	"github.com/dex/matching-engine/internal/events"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
@@ -23,16 +24,19 @@ type FundingScheduler struct {
 	marketdata *marketdata.Service
 	symbols    *config.Registry
 	bus        *events.Bus
+	pool       *pgxpool.Pool // optional: used to persist/load last-run times
 	log        *slog.Logger
 }
 
-// NewFundingScheduler creates a FundingScheduler.
-func NewFundingScheduler(futures *FuturesSettlement, md *marketdata.Service, symbols *config.Registry, bus *events.Bus) *FundingScheduler {
+// NewFundingScheduler creates a FundingScheduler. pool may be nil when
+// Postgres is disabled (funding run-times then start fresh on every restart).
+func NewFundingScheduler(futures *FuturesSettlement, md *marketdata.Service, symbols *config.Registry, bus *events.Bus, pool *pgxpool.Pool) *FundingScheduler {
 	return &FundingScheduler{
 		futures:    futures,
 		marketdata: md,
 		symbols:    symbols,
 		bus:        bus,
+		pool:       pool,
 		log:        slog.Default(),
 	}
 }
@@ -41,7 +45,7 @@ func NewFundingScheduler(futures *FuturesSettlement, md *marketdata.Service, sym
 // interval is the wall-clock tick rate for checking whether a symbol's funding
 // interval has elapsed (typically much shorter than the funding interval itself).
 func (f *FundingScheduler) Run(ctx context.Context, checkInterval time.Duration) {
-	lastRun := make(map[string]time.Time)
+	lastRun := f.loadLastRun(ctx)
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 	for {
@@ -52,6 +56,34 @@ func (f *FundingScheduler) Run(ctx context.Context, checkInterval time.Duration)
 			return
 		}
 	}
+}
+
+// loadLastRun retrieves the most recent funding settlement timestamp per
+// symbol from Postgres so that a restart does not reset the funding clock
+// (which would either skip or double-apply an interval boundary). Returns an
+// empty map (all symbols "due") when Postgres is unavailable.
+func (f *FundingScheduler) loadLastRun(ctx context.Context) map[string]time.Time {
+	out := make(map[string]time.Time)
+	if f.pool == nil {
+		return out
+	}
+	rows, err := f.pool.Query(ctx, `
+		SELECT symbol, MAX(created_at) AS last_run
+		FROM funding_payments
+		GROUP BY symbol`)
+	if err != nil {
+		f.log.Error("load funding last-run from DB; starting fresh", "error", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var symbol string
+		var lastRun time.Time
+		if err := rows.Scan(&symbol, &lastRun); err == nil && !lastRun.IsZero() {
+			out[symbol] = lastRun
+		}
+	}
+	return out
 }
 
 func (f *FundingScheduler) tick(lastRun map[string]time.Time) {
@@ -70,16 +102,16 @@ func (f *FundingScheduler) tick(lastRun map[string]time.Time) {
 
 func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 	ticker, err := f.marketdata.Ticker(cfg.Symbol, models.Futures)
-	if err != nil || ticker.MidPrice.IsZero() {
+	if err != nil || ticker.MarkPrice.IsZero() {
 		return
 	}
 	indexTicker, err := f.marketdata.Ticker(cfg.UnderlyingSymbol, models.Spot)
-	indexPrice := ticker.MidPrice
-	if err == nil && !indexTicker.MidPrice.IsZero() {
-		indexPrice = indexTicker.MidPrice
+	indexPrice := ticker.MarkPrice
+	if err == nil && !indexTicker.MarkPrice.IsZero() {
+		indexPrice = indexTicker.MarkPrice
 	}
 
-	rate := ticker.MidPrice.Sub(indexPrice).Div(indexPrice)
+	rate := ticker.MarkPrice.Sub(indexPrice).Div(indexPrice)
 	if rate.GreaterThan(fundingRateCap) {
 		rate = fundingRateCap
 	} else if rate.LessThan(fundingRateCap.Neg()) {
@@ -93,7 +125,7 @@ func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 		if pos.Symbol != cfg.Symbol || pos.Size.IsZero() {
 			continue
 		}
-		notional := ticker.MidPrice.Mul(pos.Size.Abs())
+		notional := ticker.MarkPrice.Mul(pos.Size.Abs())
 		payment := notional.Mul(rate)
 		// Longs pay shorts when rate is positive (mark > index); shorts pay longs when negative.
 		if pos.Side == models.Buy {

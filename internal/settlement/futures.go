@@ -26,7 +26,13 @@ type Position struct {
 	EntryPrice decimal.Decimal // volume-weighted average entry
 	Margin     decimal.Decimal // initial margin held in the ledger
 	Leverage   int
+	MarginMode string // models.MarginIsolated | models.MarginCross
 	UpdatedAt  time.Time
+}
+
+// IsCrossMargin reports whether the position uses cross margin.
+func (p *Position) IsCrossMargin() bool {
+	return p.MarginMode == models.MarginCross
 }
 
 // MaintenanceMargin returns the minimum margin (in quote currency) the
@@ -98,14 +104,16 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 
 	buyerLeverage := effectiveLeverage(trade.BuyOrder.Leverage)
 	sellerLeverage := effectiveLeverage(trade.SellOrder.Leverage)
+	buyerMarginMode := effectiveMarginMode(trade.BuyOrder.MarginMode)
+	sellerMarginMode := effectiveMarginMode(trade.SellOrder.MarginMode)
 
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage); err != nil {
+	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode); err != nil {
 		return fmt.Errorf("futures: apply buyer fill: %w", err)
 	}
-	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage); err != nil {
+	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode); err != nil {
 		return fmt.Errorf("futures: apply seller fill: %w", err)
 	}
 
@@ -119,7 +127,7 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 // realizing PnL and releasing margin) and, on overfill, opens a new position
 // in the new direction with the remaining quantity.
 func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side models.OrderSide,
-	qty, price decimal.Decimal, leverage int) error {
+	qty, price decimal.Decimal, leverage int, marginMode string) error {
 	existing := f.GetPosition(accountID, symbol)
 
 	if existing == nil || existing.Side == side {
@@ -131,7 +139,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 		backendclient.Async("settle", func(ctx context.Context) error {
 			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
 		})
-		f.updatePosition(accountID, symbol, side, qty, price, margin, leverage)
+		f.updatePosition(accountID, symbol, side, qty, price, margin, leverage, marginMode)
 		return nil
 	}
 
@@ -149,7 +157,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 		backendclient.Async("settle", func(ctx context.Context) error {
 			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
 		})
-		f.updatePosition(accountID, symbol, side, openQty, price, margin, leverage)
+		f.updatePosition(accountID, symbol, side, openQty, price, margin, leverage, marginMode)
 	}
 	return nil
 }
@@ -171,6 +179,7 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 
 	pnl := pos.PnL(price).Mul(closeQty).Div(pos.Size)
 	releaseMargin := pos.Margin.Mul(closeQty).Div(pos.Size)
+	crossMargin := pos.IsCrossMargin()
 
 	pos.Size = pos.Size.Sub(closeQty)
 	pos.Margin = pos.Margin.Sub(releaseMargin)
@@ -180,17 +189,31 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 	}
 	f.mu.Unlock()
 
-	f.realizeAndCredit(accountID, quoteAsset, releaseMargin, pnl)
+	f.realizeAndCredit(accountID, quoteAsset, releaseMargin, pnl, !crossMargin)
 }
 
 // realizeAndCredit settles a released margin amount plus realized PnL back
-// to accountID's balance, in-memory and (best-effort) in Postgres. The net
-// settlement may be negative (a loss exceeding the released margin); this
-// still applies as a debit so the loss is actually collected, unlike a
-// silent no-op. A failed debit is logged as a critical error so the ledger
-// divergence is visible for reconciliation instead of being silently ignored.
-func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margin, pnl decimal.Decimal) {
+// to accountID's balance, in-memory and (best-effort) in Postgres.
+//
+// For isolated-margin positions the realized loss is capped at the released
+// margin: the position's margin is the maximum the trader can lose, so the
+// settlement is floored at zero instead of debiting the account beyond the
+// posted collateral. The socialised shortfall is logged for reconciliation.
+//
+// For cross-margin positions the entire account balance is at risk, so a net
+// loss beyond the released margin is applied as a real debit. A failed debit
+// is logged as a critical error so the ledger divergence is visible for
+// reconciliation instead of being silently ignored.
+func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margin, pnl decimal.Decimal, isolated bool) {
 	settlement := margin.Add(pnl)
+	if isolated && settlement.IsNegative() {
+		// Isolated margin: loss is capped at the position's margin.
+		// The shortfall (excess loss beyond the margin) is socialised.
+		slog.Warn("isolated margin loss exceeds position margin; capping loss at posted margin",
+			"account", accountID, "asset", quoteAsset,
+			"margin", margin, "pnl", pnl, "shortfall", settlement.Neg())
+		settlement = decimal.Zero
+	}
 	if settlement.IsPositive() {
 		f.ledger.Credit(accountID, quoteAsset, settlement)
 	} else if settlement.IsNegative() {
@@ -198,6 +221,9 @@ func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margi
 			slog.Error("realizeAndCredit debit failed; ledger balance may go negative",
 				"account", accountID, "asset", quoteAsset, "amount", settlement.Neg(), "err", err)
 		}
+	}
+	if settlement.IsZero() {
+		return
 	}
 	backendclient.Async("credit", func(ctx context.Context) error {
 		return f.backend.Credit(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement))
@@ -212,15 +238,23 @@ func effectiveLeverage(orderLeverage int) int {
 	return orderLeverage
 }
 
+// effectiveMarginMode returns the order's margin mode, defaulting to isolated.
+func effectiveMarginMode(mode string) string {
+	if mode == models.MarginCross {
+		return models.MarginCross
+	}
+	return models.MarginIsolated
+}
+
 func (f *FuturesSettlement) updatePosition(accountID, symbol string, side models.OrderSide,
-	qty, price, margin decimal.Decimal, leverage int) {
+	qty, price, margin decimal.Decimal, leverage int, marginMode string) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	pos, ok := f.positions[key]
 	if !ok {
-		pos = &Position{AccountID: accountID, Symbol: symbol, Side: side}
+		pos = &Position{AccountID: accountID, Symbol: symbol, Side: side, MarginMode: marginMode}
 		f.positions[key] = pos
 	}
 
@@ -252,11 +286,17 @@ func (f *FuturesSettlement) AllPositions() []*Position {
 
 // ApplyFunding credits/debits the ledger for a funding payment on an existing
 // position and records the new margin. Called by the funding scheduler.
+//
+// The position lock is held for the entire operation (including the ledger
+// debit/credit) so that a concurrent close cannot delete the position
+// between the lookup and the margin update, which would apply the funding
+// payment to a detached struct. The ledger has its own mutex; the lock order
+// is always FuturesSettlement.mu → Ledger.mu, which is deadlock-free.
 func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decimal.Decimal, quoteAsset string) error {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	pos, ok := f.positions[key]
-	f.mu.Unlock()
 	if !ok {
 		return nil
 	}
@@ -267,9 +307,8 @@ func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decim
 	} else if payment.IsPositive() {
 		f.ledger.Credit(accountID, quoteAsset, payment)
 	}
-	f.mu.Lock()
 	pos.Margin = pos.Margin.Add(payment)
-	f.mu.Unlock()
+	pos.UpdatedAt = time.Now()
 	return nil
 }
 
@@ -287,10 +326,11 @@ func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, 
 	}
 	pnl := pos.PnL(markPrice)
 	margin := pos.Margin
+	crossMargin := pos.IsCrossMargin()
 	delete(f.positions, key)
 	f.mu.Unlock()
 
-	f.realizeAndCredit(accountID, quoteAsset, margin, pnl)
+	f.realizeAndCredit(accountID, quoteAsset, margin, pnl, !crossMargin)
 }
 
 // GetPosition returns the current position for an account/symbol, or nil.

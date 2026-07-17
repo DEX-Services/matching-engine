@@ -26,6 +26,7 @@ type Ticker struct {
 	BestBid   decimal.Decimal
 	BestAsk   decimal.Decimal
 	MidPrice  decimal.Decimal
+	MarkPrice decimal.Decimal // blended mark price for liquidation/funding
 	Spread    decimal.Decimal
 	BidDepth  decimal.Decimal // total qty on bid side (top 5 levels)
 	AskDepth  decimal.Decimal // total qty on ask side (top 5 levels)
@@ -33,13 +34,14 @@ type Ticker struct {
 
 // Service aggregates market data across all registered symbols.
 type Service struct {
-	mu     sync.RWMutex
-	books  map[string]BookReader // key: symbol+":"+market
+	mu         sync.RWMutex
+	books      map[string]BookReader      // key: symbol+":"+market
+	lastPrices map[string]decimal.Decimal // key: symbol+":"+market
 }
 
 // NewService creates an empty Service.
 func NewService() *Service {
-	return &Service{books: make(map[string]BookReader)}
+	return &Service{books: make(map[string]BookReader), lastPrices: make(map[string]decimal.Decimal)}
 }
 
 // Register adds a book reader for the given symbol/market.
@@ -49,10 +51,23 @@ func (s *Service) Register(symbol string, market models.MarketType, reader BookR
 	s.mu.Unlock()
 }
 
+// RecordTrade records the last trade price for a symbol/market, used to
+// compute a manipulation-resistant mark price. Called from the trade-event
+// subscriber goroutine in main.go.
+func (s *Service) RecordTrade(symbol string, market models.MarketType, price decimal.Decimal) {
+	if price.IsZero() || price.IsNegative() {
+		return
+	}
+	s.mu.Lock()
+	s.lastPrices[symbol+":"+string(market)] = price
+	s.mu.Unlock()
+}
+
 // Ticker returns a market data snapshot for symbol/market.
 func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, error) {
 	s.mu.RLock()
 	reader, ok := s.books[symbol+":"+string(market)]
+	lastPrice := s.lastPrices[symbol+":"+string(market)]
 	s.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("no market data for %s/%s", symbol, market)
@@ -76,17 +91,50 @@ func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, erro
 		askDepth = askDepth.Add(l.TotalQuantity)
 	}
 
+	mark := computeMarkPrice(mid, lastPrice)
+
 	return &Ticker{
-		Symbol:   symbol,
-		Market:   market,
-		BestBid:  bestBid,
-		BestAsk:  bestAsk,
-		MidPrice: mid,
-		Spread:   spread,
-		BidDepth: bidDepth,
-		AskDepth: askDepth,
+		Symbol:    symbol,
+		Market:    market,
+		BestBid:   bestBid,
+		BestAsk:   bestAsk,
+		MidPrice:  mid,
+		MarkPrice: mark,
+		Spread:    spread,
+		BidDepth:  bidDepth,
+		AskDepth:  askDepth,
 	}, nil
 }
+
+// computeMarkPrice blends the mid-price with the last trade price to reduce
+// manipulation risk from a thin book. If both are available, use a simple
+// average but cap the deviation from mid to ±1% so a single wash trade
+// cannot skew the mark beyond the band. If only one source is available,
+// use it directly.
+func computeMarkPrice(mid, lastPrice decimal.Decimal) decimal.Decimal {
+	if mid.IsZero() {
+		return lastPrice
+	}
+	if lastPrice.IsZero() {
+		return mid
+	}
+	blended := mid.Add(lastPrice).Div(decimal.NewFromInt(2))
+	cap := mid.Mul(markDeviationCap)
+	upper := mid.Add(cap)
+	lower := mid.Sub(cap)
+	if blended.GreaterThan(upper) {
+		return upper
+	}
+	if blended.LessThan(lower) {
+		return lower
+	}
+	return blended
+}
+
+// markDeviationCap bounds how far the blended mark price may deviate from the
+// mid-price, preventing a single manipulated/wash trade from moving the mark
+// more than this fraction.
+var markDeviationCap = decimal.NewFromFloat(0.01) // 1%
 
 // VWAP computes the volume-weighted average price for a hypothetical order of
 // `qty` on the given side, sweeping through the top `maxLevels` price levels.

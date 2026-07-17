@@ -21,8 +21,8 @@ const (
 	Limit    OrderType = "LIMIT"
 	Market   OrderType = "MARKET"
 	Stop     OrderType = "STOP"
-	IOC      OrderType = "IOC"   // Immediate-Or-Cancel
-	FOK      OrderType = "FOK"   // Fill-Or-Kill
+	IOC      OrderType = "IOC" // Immediate-Or-Cancel
+	FOK      OrderType = "FOK" // Fill-Or-Kill
 	PostOnly OrderType = "POST_ONLY"
 )
 

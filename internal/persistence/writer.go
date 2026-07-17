@@ -148,6 +148,18 @@ func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
 		}
 	}
 
+	// Insert funding payment if the event carries one.
+	if evt.Funding != nil {
+		f := evt.Funding
+		_, err = tx.Exec(ctx, `
+			INSERT INTO funding_payments (account_id, symbol, rate, amount)
+			VALUES ($1, $2, $3, $4)`,
+			f.AccountID, f.Symbol, f.Rate, f.Payment)
+		if err != nil {
+			return fmt.Errorf("insert funding payment: %w", err)
+		}
+	}
+
 	return tx.Commit(ctx)
 }
 
