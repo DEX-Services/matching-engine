@@ -16,10 +16,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// allowedOrigins is populated from the WS_ALLOWED_ORIGINS env var
-// (comma-separated). When empty, only same-origin requests are accepted so
-// cross-site WebSocket hijacking is not possible by default.
-var allowedOrigins = func() map[string]bool {
+// loadAllowedOrigins reads WS_ALLOWED_ORIGINS from the environment lazily.
+// It MUST be called after godotenv.Load() (i.e. from main, not package init),
+// otherwise values defined in .env would not be visible yet.
+func loadAllowedOrigins() map[string]bool {
 	m := map[string]bool{}
 	for _, o := range strings.Split(os.Getenv("WS_ALLOWED_ORIGINS"), ",") {
 		if o = strings.TrimSpace(o); o != "" {
@@ -27,13 +27,25 @@ var allowedOrigins = func() map[string]bool {
 		}
 	}
 	return m
-}()
+}
+
+var allowedOriginsOnce sync.Once
+var allowedOrigins map[string]bool
+
+// origins returns the allowlist, building it on first use (after godotenv has
+// loaded .env). When empty, only same-origin requests are accepted so
+// cross-site WebSocket hijacking is not possible by default.
+func origins() map[string]bool {
+	allowedOriginsOnce.Do(func() { allowedOrigins = loadAllowedOrigins() })
+	return allowedOrigins
+}
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
-		if len(allowedOrigins) == 0 {
+		allowed := origins()
+		if len(allowed) == 0 {
 			// No allowlist configured: only accept same-origin upgrades.
 			host := r.Host
 			origin := r.Header.Get("Origin")
@@ -42,7 +54,7 @@ var upgrader = websocket.Upgrader{
 			}
 			return strings.HasPrefix(origin, "http://"+host) || strings.HasPrefix(origin, "https://"+host)
 		}
-		return allowedOrigins[r.Header.Get("Origin")]
+		return allowed[r.Header.Get("Origin")]
 	},
 }
 
