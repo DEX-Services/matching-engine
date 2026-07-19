@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -75,7 +76,21 @@ func main() {
 	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend)
 	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
 
-	// Phase 6: Settlement factory
+	// Phase 6: Settlement factory. Fee lookup is late-bound: symbolRegistry is
+	// loaded further down (after Postgres init), so the closure reads it at
+	// settle time rather than capturing a nil value now.
+	var symbolRegistryRef atomic.Pointer[config.Registry]
+	feeLookup := func(symbol string, market models.MarketType) (maker, taker decimal.Decimal) {
+		reg := symbolRegistryRef.Load()
+		if reg == nil {
+			return decimal.Zero, decimal.Zero
+		}
+		cfg, err := reg.Get(symbol, market)
+		if err != nil {
+			return decimal.Zero, decimal.Zero
+		}
+		return cfg.MakerFee, cfg.TakerFee
+	}
 	settlementFactory := func(symbol string, market models.MarketType) matching.SettlementHandler {
 		switch market {
 		case models.Futures:
@@ -83,7 +98,7 @@ func main() {
 		case models.Options:
 			return optionsSettlement
 		default:
-			return settlement.NewSpotSettlement(ledger)
+			return settlement.NewSpotSettlement(ledger, feeLookup)
 		}
 	}
 
@@ -198,6 +213,7 @@ func main() {
 		// simply reads as "not configured" instead of nil-panicking.
 		symbolRegistry = config.NewInMemoryRegistry()
 	}
+	symbolRegistryRef.Store(symbolRegistry)
 
 	// Futures liquidation, funding, and options expiry background loops.
 	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)

@@ -19,6 +19,11 @@ type Trade struct {
 	Quantity     decimal.Decimal `json:"quantity"`
 	ExecutedAt   time.Time       `json:"executedAt"`
 
+	// Fees charged at settlement, denominated in the quote currency.
+	// Zero when the symbol has no fee configuration.
+	MakerFeePaid decimal.Decimal `json:"makerFeePaid"`
+	TakerFeePaid decimal.Decimal `json:"takerFeePaid"`
+
 	// SequenceNumber is assigned by the matching goroutine before publishing.
 	// It is monotonically increasing per symbol and used by downstream
 	// consumers to detect gaps and reorder events.
