@@ -26,6 +26,7 @@ const (
 	reqCancel
 	reqModify
 	reqAllOrders
+	reqOrderByID
 	reqDepth
 )
 
@@ -46,6 +47,7 @@ type result struct {
 	orders        []*models.Order
 	trades        []*models.Trade
 	err           error
+	found         bool
 	bids          []orderbook.LevelSnapshot
 	asks          []orderbook.LevelSnapshot
 	bestBid       decimal.Decimal
@@ -177,6 +179,17 @@ func (e *Engine) AllOrders() []*models.Order {
 	return r.orders
 }
 
+// OrderByID returns a copy of a resting order by ID and whether it was found in
+// the live book. A terminal order (FILLED/CANCELLED) has already been removed
+// from the book, so found=false means "not currently resting" — callers must
+// consult the durable Postgres record to distinguish a fill from a cancel.
+func (e *Engine) OrderByID(orderID string) (*models.Order, bool) {
+	ch := make(chan result, 1)
+	e.inputCh <- request{kind: reqOrderByID, orderID: orderID, resultCh: ch}
+	r := <-ch
+	return r.order, r.found
+}
+
 // Halt stops the engine from accepting new orders (symbol-wide circuit breaker, Phase 7).
 func (e *Engine) Halt() { e.halted.Store(true) }
 
@@ -301,6 +314,11 @@ func (e *Engine) handle(req request) {
 
 	case reqAllOrders:
 		res.orders = e.book.AllOrders()
+
+	case reqOrderByID:
+		order, ok := e.book.OrderByID(req.orderID)
+		res.order = order
+		res.found = ok
 
 	case reqDepth:
 		res.bids, res.asks = e.book.Depth(req.levels)

@@ -41,6 +41,18 @@ type OrderResponse struct {
 	Trades  int    `json:"trades"`
 }
 
+// OrderStatusResponse is the payload for GET /order/status. Found reports
+// whether the order is known at all (live book or durable record); resting is
+// true only while it is still in the live book. Callers use Filled to account
+// the real filled quantity instead of assuming a vanished order filled in full.
+type OrderStatusResponse struct {
+	OrderID string `json:"orderId"`
+	Found   bool   `json:"found"`
+	Resting bool   `json:"resting"`
+	Status  string `json:"status"`
+	Filled  string `json:"filled"`
+}
+
 // OpenOrderDTO is one resting order in a GET /orders response.
 type OpenOrderDTO struct {
 	ID     string `json:"id"`
