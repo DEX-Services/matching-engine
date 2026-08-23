@@ -18,9 +18,19 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		maxLeverage, fundingIntervalHours       int
 		maintenanceMarginRate, contractMult     string
 	}{
+		// UnderlyingSymbol on a FUTURES row must be a real registered SPOT
+		// symbol — the funding scheduler and the /ticker handler both look
+		// up Ticker(UnderlyingSymbol, Spot) to get the "index" price funding
+		// is computed against. BTC-USDC's row previously pointed at itself
+		// ("BTC-USDC"), which isn't a registered spot market at all — every
+		// funding tick silently fell back to indexPrice == markPrice (zero
+		// drift, zero rate, nothing ever paid) instead of erroring loudly.
+		// Fixed to point at the real BTC-USDT spot market.
 		{"BTC-USDT", "SPOT", "BTC", "USDT", "", 0, 0, "0", "0"},
 		{"ETH-USDT", "SPOT", "ETH", "USDT", "", 0, 0, "0", "0"},
-		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDC", 100, 8, "0.005", "0"},
+		{"SOL-USDT", "SPOT", "SOL", "USDT", "", 0, 0, "0", "0"},
+		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDT", 100, 8, "0.005", "0"},
+		{"ETH-USDC", "FUTURES", "ETH", "USDC", "ETH-USDT", 75, 8, "0.0075", "0"},
 		{"BTC-USDT", "OPTIONS", "BTC", "USDT", "BTC-USDT", 0, 0, "0", "1"},
 	}
 	for _, r := range rows {
@@ -44,14 +54,27 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 }
 
 // seedOptionInstruments inserts a small BTC-USDT option chain (a handful of
-// strikes at two expiries) if the table is empty, so /option-chain has data.
+// strikes at two expiries) whenever there are no unexpired contracts left,
+// so /option-chain always has data instead of going empty forever once the
+// first seeded batch expires.
+//
+// Previously this checked `count(*) > 0` (any row ever, expired or not),
+// which is idempotent on the FIRST boot but never fires again — the
+// 7-day/30-day contracts seeded once eventually all expire, /option-chain's
+// tYears<=0 filter drops every one of them, and the chain silently goes
+// empty with no error and no path back to non-empty short of a manual DB
+// edit. Checking unexpired count instead makes this genuinely self-healing:
+// any boot (or the periodic re-check below) that finds nothing live re-seeds
+// a fresh batch of expiries relative to "now".
 func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
-	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM option_instruments WHERE underlying_symbol = 'BTC-USDT'`).Scan(&count); err != nil {
-		slog.Error("count option_instruments", "error", err)
+	var liveCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM option_instruments
+		WHERE underlying_symbol = 'BTC-USDT' AND active = true AND expiry > now()`).Scan(&liveCount); err != nil {
+		slog.Error("count live option_instruments", "error", err)
 		return
 	}
-	if count > 0 {
+	if liveCount > 0 {
 		return
 	}
 

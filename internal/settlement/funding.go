@@ -16,6 +16,26 @@ import (
 // fundingRateCap bounds the funding rate per interval to avoid runaway payments.
 var fundingRateCap = decimal.NewFromFloat(0.0075) // 0.75%
 
+// CurrentFundingRate computes the funding rate that WOULD be applied at the
+// next settlement given the current mark/index spread, without applying
+// anything. Exported so callers outside this package (e.g. the /ticker
+// handler, for display) use the exact same formula and cap that
+// settleFunding actually pays out — computing this independently anywhere
+// else risks the displayed rate silently drifting from the real one.
+func CurrentFundingRate(markPrice, indexPrice decimal.Decimal) decimal.Decimal {
+	if indexPrice.IsZero() {
+		return decimal.Zero
+	}
+	rate := markPrice.Sub(indexPrice).Div(indexPrice)
+	if rate.GreaterThan(fundingRateCap) {
+		return fundingRateCap
+	}
+	if rate.LessThan(fundingRateCap.Neg()) {
+		return fundingRateCap.Neg()
+	}
+	return rate
+}
+
 // FundingScheduler periodically applies funding payments between longs and
 // shorts on every registered futures market, based on the premium of mark
 // price over index (spot) price.
@@ -111,12 +131,7 @@ func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 		indexPrice = indexTicker.MarkPrice
 	}
 
-	rate := ticker.MarkPrice.Sub(indexPrice).Div(indexPrice)
-	if rate.GreaterThan(fundingRateCap) {
-		rate = fundingRateCap
-	} else if rate.LessThan(fundingRateCap.Neg()) {
-		rate = fundingRateCap.Neg()
-	}
+	rate := CurrentFundingRate(ticker.MarkPrice, indexPrice)
 	if rate.IsZero() {
 		return
 	}

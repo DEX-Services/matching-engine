@@ -129,7 +129,9 @@ func main() {
 	}{
 		{"BTC-USDT", models.Spot},
 		{"ETH-USDT", models.Spot},
+		{"SOL-USDT", models.Spot},
 		{"BTC-USDC", models.Futures},
+		{"ETH-USDC", models.Futures},
 	}
 	for _, p := range pairs {
 		if _, err := reg.Register(p.symbol, p.market); err != nil {
@@ -198,6 +200,22 @@ func main() {
 			} else {
 				seedSymbolConfigs(ctx, pool)
 				seedOptionInstruments(ctx, pool)
+				// Re-check periodically, not just at boot: a long-lived
+				// process can outlive its seeded contracts' expiries (the
+				// shortest is 7 days) without ever restarting to trigger the
+				// boot-time reseed above.
+				go func() {
+					ticker := time.NewTicker(6 * time.Hour)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							seedOptionInstruments(ctx, pool)
+						}
+					}
+				}()
 				if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
 					slog.Error("load symbol config registry", "error", err)
 				} else {
@@ -237,6 +255,12 @@ func main() {
 	// HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.ServeWS)
+	// /ticker returns real JSON (was plain-text bid/ask/mid/spread with no
+	// mark price, funding, fee, or MMR — insufficient for the trade page's
+	// header, which was previously falling back to fabricated ±0.01%
+	// mark/index numbers and a hardcoded MMR because there was nothing real
+	// to fetch). Futures-only fields (index price, funding rate, MMR) are
+	// omitted for spot/options.
 	mux.HandleFunc("/ticker", func(w http.ResponseWriter, r *http.Request) {
 		sym := r.URL.Query().Get("symbol")
 		mkt := models.MarketType(r.URL.Query().Get("market"))
@@ -245,8 +269,27 @@ func main() {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, "symbol=%s market=%s bid=%s ask=%s mid=%s spread=%s\n",
-			ticker.Symbol, ticker.Market, ticker.BestBid, ticker.BestAsk, ticker.MidPrice, ticker.Spread)
+		resp := TickerResponse{
+			Symbol: ticker.Symbol, Market: string(ticker.Market),
+			BestBid: ticker.BestBid.String(), BestAsk: ticker.BestAsk.String(),
+			MidPrice: ticker.MidPrice.String(), MarkPrice: ticker.MarkPrice.String(),
+			Spread: ticker.Spread.String(),
+		}
+		if cfg, cerr := symbolRegistry.Get(sym, mkt); cerr == nil {
+			resp.MakerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
+			resp.TakerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+			if mkt == models.Futures {
+				resp.MaintenanceMarginRatePct = cfg.MaintenanceMarginRate.Mul(decimal.NewFromInt(100)).String()
+				if cfg.UnderlyingSymbol != "" {
+					if indexTicker, ierr := mdSvc.Ticker(cfg.UnderlyingSymbol, models.Spot); ierr == nil && indexTicker.MarkPrice.IsPositive() {
+						resp.IndexPrice = indexTicker.MarkPrice.String()
+						resp.FundingRatePct = settlement.CurrentFundingRate(ticker.MarkPrice, indexTicker.MarkPrice).
+							Mul(decimal.NewFromInt(100)).String()
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 	mux.HandleFunc("/admin/halt", func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
@@ -846,7 +889,15 @@ func main() {
 		}
 	}
 
-	runDemo(reg, ledger)
+	// The integration-test demo seeder injects fake orders (buy@99-100,
+	// sell@102-103) straight into the real BTC-USDT SPOT book on every boot.
+	// That's fine for a local smoke test but was previously unconditional —
+	// running it against a real deployment silently corrupts the one spot
+	// market with orders nowhere near the real price, and skews the options
+	// chain's underlying spot ticker along with it. Opt-in only now.
+	if os.Getenv("ENGINE_DEMO_SEED") == "true" {
+		runDemo(reg, ledger)
+	}
 
 	<-ctx.Done()
 	slog.Info("shutting down")
