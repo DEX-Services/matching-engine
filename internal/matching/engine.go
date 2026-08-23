@@ -26,6 +26,7 @@ const (
 	reqCancel
 	reqModify
 	reqAllOrders
+	reqOrderByID
 	reqDepth
 )
 
@@ -46,6 +47,7 @@ type result struct {
 	orders        []*models.Order
 	trades        []*models.Trade
 	err           error
+	found         bool
 	bids          []orderbook.LevelSnapshot
 	asks          []orderbook.LevelSnapshot
 	bestBid       decimal.Decimal
@@ -58,7 +60,8 @@ type ReleaseFunc func(order *models.Order)
 
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
-// EventPublisher receives outbound events non-blocking. Satisfied by events.Bus.
+// EventPublisher receives outbound events. Satisfied by events.Bus, which
+// applies backpressure (blocks) rather than dropping events.
 type EventPublisher interface {
 	Publish(e *models.Event)
 }
@@ -174,6 +177,17 @@ func (e *Engine) AllOrders() []*models.Order {
 	e.inputCh <- request{kind: reqAllOrders, resultCh: ch}
 	r := <-ch
 	return r.orders
+}
+
+// OrderByID returns a copy of a resting order by ID and whether it was found in
+// the live book. A terminal order (FILLED/CANCELLED) has already been removed
+// from the book, so found=false means "not currently resting" — callers must
+// consult the durable Postgres record to distinguish a fill from a cancel.
+func (e *Engine) OrderByID(orderID string) (*models.Order, bool) {
+	ch := make(chan result, 1)
+	e.inputCh <- request{kind: reqOrderByID, orderID: orderID, resultCh: ch}
+	r := <-ch
+	return r.order, r.found
 }
 
 // Halt stops the engine from accepting new orders (symbol-wide circuit breaker, Phase 7).
@@ -301,6 +315,11 @@ func (e *Engine) handle(req request) {
 	case reqAllOrders:
 		res.orders = e.book.AllOrders()
 
+	case reqOrderByID:
+		order, ok := e.book.OrderByID(req.orderID)
+		res.order = order
+		res.found = ok
+
 	case reqDepth:
 		res.bids, res.asks = e.book.Depth(req.levels)
 		res.bestBid = e.book.BestBid()
@@ -314,6 +333,22 @@ func (e *Engine) handle(req request) {
 // interleaving all events in chronological (UpdatedAt/ExecutedAt) order.
 func (e *Engine) postProcessAndCancel(order *models.Order, trades []*models.Trade, cancelled []*models.Order) {
 	e.postProcess(order, trades, cancelled)
+	// Stop orders triggered by these trades became live market/limit orders;
+	// publish their resulting state so clients see the activation.
+	for _, activated := range e.book.DrainActivated() {
+		switch activated.Status {
+		case models.StatusOpen:
+			e.publishEvent(models.EventOrderOpen, activated, nil)
+		case models.StatusPartiallyFilled:
+			e.publishEvent(models.EventOrderPartial, activated, nil)
+		case models.StatusFilled:
+			e.publishEvent(models.EventOrderFilled, activated, nil)
+		case models.StatusCancelled:
+			e.publishEvent(models.EventOrderCancelled, activated, nil)
+		case models.StatusRejected:
+			e.publishEvent(models.EventOrderRejected, activated, nil)
+		}
+	}
 	for _, c := range cancelled {
 		e.release(c)
 	}
@@ -365,13 +400,19 @@ func (e *Engine) postProcess(order *models.Order, trades []*models.Trade, cancel
 		}
 		trade := it.trade
 		// Settlement is synchronous and runs inside the matching goroutine so
-		// that the ledger is always consistent before the event is published.
-		// If settlement fails (e.g. insufficient balance for a debit), the
-		// ledger and the published trade event would diverge, so log it as a
-		// critical error for manual reconciliation rather than swallowing it.
+		// that the ledger is always consistent before the trade event is
+		// published. Settle FIRST and only publish EventTrade if it succeeds.
+		// If settlement fails (e.g. insufficient balance for a debit), we must
+		// NOT publish a successful trade: doing so would permanently desync
+		// balances, order state, trade history, and downstream consumers.
+		// Instead we publish EventTradeSettlementFailed and halt the symbol so
+		// no further matching occurs until an operator reconciles the ledger.
 		if err := e.settlement.Settle(trade); err != nil {
-			slog.Error("settlement failed; ledger may be inconsistent with trade event",
+			slog.Error("settlement failed; halting symbol, trade NOT published as successful",
 				"tradeId", trade.ID, "symbol", trade.Symbol, "price", trade.Price, "qty", trade.Quantity, "err", err)
+			e.publishEvent(models.EventTradeSettlementFailed, nil, trade)
+			e.halted.Store(true)
+			return
 		}
 		e.publishEvent(models.EventTrade, nil, trade)
 
@@ -398,7 +439,8 @@ func (e *Engine) publishEvent(typ models.EventType, order *models.Order, trade *
 		Order:          order.Copy(),
 		Trade:          trade.Copy(),
 	}
-	// Non-blocking: if the publisher is backed up, the event is dropped.
-	// The publisher (events.Bus) handles backpressure with a buffered channel.
+	// Blocking: events.Bus applies backpressure rather than dropping, so
+	// downstream sequence numbers stay gapless. A stuck consumer stalls
+	// matching for this symbol by design (stall, don't desync).
 	e.pub.Publish(evt)
 }

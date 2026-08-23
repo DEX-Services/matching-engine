@@ -35,12 +35,15 @@ func (c *Checker) Check(order *models.Order) error {
 		return fmt.Errorf("order quantity must be positive")
 	}
 
-	// Market orders cannot be checked for exact notional without a mark price.
-	// A worst-case estimate is reserved later via ReserveMarket in the order
-	// handler, once the best opposite quote is known. Here we only verify the
-	// account has a positive available balance in the required asset so a
-	// totally unfunded account cannot submit market orders either.
-	if order.Type == models.Market {
+	// Market orders (and stop-market orders, i.e. a STOP with no limit Price)
+	// cannot be checked for exact notional without a mark price: both have
+	// order.Price == 0, so notionalFor would otherwise compute a zero
+	// requirement and let a fully unfunded account through. A worst-case
+	// estimate is reserved later via ReserveMarket/the /order handler's
+	// slippage-bounded conversion once the best opposite quote is known;
+	// here we only verify the account has a positive available balance in
+	// the required asset.
+	if order.Type == models.Market || (order.Type == models.Stop && !order.Price.IsPositive()) {
 		asset := assetFor(order)
 		if c.ledger.Available(order.AccountID, asset).LessThanOrEqual(decimal.Zero) {
 			return fmt.Errorf("insufficient %s: available=0", asset)
@@ -94,6 +97,15 @@ func (c *Checker) Release(order *models.Order) {
 	if order.Type == models.Market {
 		return
 	}
+	if order.Type == models.Stop && !order.Price.IsPositive() {
+		// Stop-market orders are reserved at the worst-case estimated price
+		// computed at submission time (see the /order handler), not at
+		// order.Price (which is zero) — releaseAmount can't reconstruct that
+		// estimate from the order alone, so a cancelled/never-triggered
+		// stop-market's reservation must be released by the caller using the
+		// same estimated amount it reserved, not through this generic path.
+		return
+	}
 	asset, amount := releaseAmount(order)
 	if amount.IsPositive() {
 		c.ledger.Release(order.AccountID, asset, amount)
@@ -106,7 +118,7 @@ func (c *Checker) Release(order *models.Order) {
 // order skip: market orders have no known notional at submission time, so no
 // amount is returned.
 func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
-	if order.Type == models.Market {
+	if order.Type == models.Market || (order.Type == models.Stop && !order.Price.IsPositive()) {
 		return "", decimal.Zero
 	}
 	return required(order)
@@ -137,6 +149,15 @@ func FilledDebit(order *models.Order, trades []*models.Trade) decimal.Decimal {
 // externally. Mirrors Release's market-order skip.
 func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal) {
 	if order.Type == models.Market {
+		return "", decimal.Zero
+	}
+	if order.Type == models.Stop && !order.Price.IsPositive() {
+		// An untriggered stop-market order still holds its worst-case
+		// reservation (see the /order handler) until it either triggers and
+		// fills, or is cancelled — there is no fixed limit price to compute
+		// a resting-notional release amount from, so nothing is released
+		// here. The full reservation is freed on cancel via the normal
+		// order-cancellation path instead.
 		return "", decimal.Zero
 	}
 	return releaseAmount(order)

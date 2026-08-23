@@ -43,6 +43,19 @@ type Book struct {
 	// orderIndex maps orderID -> *models.Order for O(1) cancel/lookup.
 	orderIndex map[string]*models.Order
 
+	// stopOrders holds untriggered stop orders keyed by ID. They are NOT part
+	// of the matchable book: they activate (convert to market/limit) when the
+	// last trade price crosses their StopPrice.
+	stopOrders map[string]*models.Order
+
+	// lastTradePrice is the price of the most recent fill, used to evaluate
+	// stop triggers. Zero until the first trade.
+	lastTradePrice decimal.Decimal
+
+	// activated accumulates stop orders triggered during the current Submit;
+	// drained by the engine via DrainActivated for event publication.
+	activated []*models.Order
+
 	// tradeIDFunc generates unique trade IDs.
 	tradeIDFunc func() string
 }
@@ -57,6 +70,7 @@ func New(symbol string, market models.MarketType) *Book {
 		bidPrices:  nil,
 		askPrices:  nil,
 		orderIndex: make(map[string]*models.Order),
+		stopOrders: make(map[string]*models.Order),
 		tradeIDFunc: func() string { return uuid.NewString() },
 	}
 }
@@ -65,7 +79,19 @@ func New(symbol string, market models.MarketType) *Book {
 
 // Submit processes an incoming order against the book and returns generated
 // trades plus any resting maker orders cancelled by self-trade prevention.
+// Trades executed by the incoming order may trigger resting stop orders;
+// their executions are appended to the returned slices, and the activated
+// stop orders themselves are retrievable via DrainActivated.
 func (b *Book) Submit(order *models.Order) ([]*models.Trade, []*models.Order, error) {
+	trades, cancelled, err := b.submitCore(order)
+	if err != nil {
+		return trades, cancelled, err
+	}
+	stopTrades, stopCancelled := b.processStopTriggers()
+	return append(trades, stopTrades...), append(cancelled, stopCancelled...), nil
+}
+
+func (b *Book) submitCore(order *models.Order) ([]*models.Trade, []*models.Order, error) {
 	if err := validateOrder(order); err != nil {
 		order.Status = models.StatusRejected
 		order.UpdatedAt = time.Now()
@@ -91,12 +117,7 @@ func (b *Book) Submit(order *models.Order) ([]*models.Trade, []*models.Order, er
 		trades, err := b.processPostOnly(order)
 		return trades, nil, err
 	case models.Stop:
-		// Phase 1: stop orders are accepted and rested; activation logic in Phase 2.
-		// Resting never calls matchAggressively, so nil is correct today. If
-		// Phase 2 activation later routes triggered stop orders through
-		// matchAggressively, this must return the real cancelled-makers slice.
-		trades, err := b.restOrder(order)
-		return trades, nil, err
+		return nil, nil, b.restStopOrder(order)
 	default:
 		order.Status = models.StatusRejected
 		return nil, nil, fmt.Errorf("%w: unknown order type %s", ErrInvalidOrder, order.Type)
@@ -105,6 +126,12 @@ func (b *Book) Submit(order *models.Order) ([]*models.Trade, []*models.Order, er
 
 // Cancel removes a resting order by ID.
 func (b *Book) Cancel(orderID string) (*models.Order, error) {
+	if stop, ok := b.stopOrders[orderID]; ok {
+		delete(b.stopOrders, orderID)
+		stop.Status = models.StatusCancelled
+		stop.UpdatedAt = time.Now()
+		return stop, nil
+	}
 	order, ok := b.orderIndex[orderID]
 	if !ok {
 		return nil, ErrOrderNotFound
@@ -175,10 +202,14 @@ func (b *Book) OrderByID(orderID string) (*models.Order, bool) {
 	return o.Copy(), ok
 }
 
-// AllOrders returns a copy of every resting order in the book, unordered.
+// AllOrders returns a copy of every resting order in the book, unordered,
+// including untriggered stop orders.
 func (b *Book) AllOrders() []*models.Order {
-	out := make([]*models.Order, 0, len(b.orderIndex))
+	out := make([]*models.Order, 0, len(b.orderIndex)+len(b.stopOrders))
 	for _, o := range b.orderIndex {
+		out = append(out, o.Copy())
+	}
+	for _, o := range b.stopOrders {
 		out = append(out, o.Copy())
 	}
 	return out
@@ -311,6 +342,7 @@ func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*m
 			SellOrder:    sellOrder,
 		}
 		trades = append(trades, trade)
+		b.lastTradePrice = fillPrice
 
 		// Remove fully-filled maker from the book.
 		if maker.RemainingQty().IsZero() {
@@ -347,6 +379,75 @@ func (b *Book) canFillFully(order *models.Order) bool {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// restStopOrder parks an untriggered stop order in the stop store.
+func (b *Book) restStopOrder(order *models.Order) error {
+	if !order.StopPrice.IsPositive() {
+		order.Status = models.StatusRejected
+		return fmt.Errorf("%w: stop order requires a positive stopPrice", ErrInvalidOrder)
+	}
+	order.Status = models.StatusOpen
+	order.UpdatedAt = time.Now()
+	b.stopOrders[order.ID] = order
+	return nil
+}
+
+// triggered reports whether a stop order should activate at the given price.
+// Stop-buy triggers when the last trade price rises to/above StopPrice;
+// stop-sell when it falls to/below StopPrice.
+func triggered(stop *models.Order, lastPrice decimal.Decimal) bool {
+	if stop.IsBuy() {
+		return lastPrice.GreaterThanOrEqual(stop.StopPrice)
+	}
+	return lastPrice.LessThanOrEqual(stop.StopPrice)
+}
+
+// processStopTriggers activates every stop order whose trigger price has been
+// crossed by the current lastTradePrice, converting it to a market order (or
+// a limit order when a limit Price is set) and matching it immediately.
+// Activations can cascade: a triggered stop's fills move lastTradePrice,
+// which may trigger further stops — the loop runs until quiescent.
+func (b *Book) processStopTriggers() (trades []*models.Trade, cancelled []*models.Order) {
+	for {
+		if b.lastTradePrice.IsZero() || len(b.stopOrders) == 0 {
+			return
+		}
+		var fired *models.Order
+		for _, stop := range b.stopOrders {
+			if triggered(stop, b.lastTradePrice) {
+				fired = stop
+				break
+			}
+		}
+		if fired == nil {
+			return
+		}
+		delete(b.stopOrders, fired.ID)
+		if fired.Price.IsPositive() {
+			fired.Type = models.Limit // stop-limit
+		} else {
+			fired.Type = models.Market // stop-market
+		}
+		fired.UpdatedAt = time.Now()
+		b.activated = append(b.activated, fired)
+		t, c, err := b.submitCore(fired)
+		if err != nil {
+			fired.Status = models.StatusRejected
+			continue
+		}
+		trades = append(trades, t...)
+		cancelled = append(cancelled, c...)
+	}
+}
+
+// DrainActivated returns stop orders activated during the last Submit call
+// (in activation order) and clears the list. The engine publishes order
+// events for them so clients learn their stop became a live order.
+func (b *Book) DrainActivated() []*models.Order {
+	out := b.activated
+	b.activated = nil
+	return out
+}
 
 func (b *Book) restOrder(order *models.Order) ([]*models.Trade, error) {
 	order.Status = models.StatusOpen

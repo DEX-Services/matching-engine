@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -75,7 +76,21 @@ func main() {
 	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend)
 	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
 
-	// Phase 6: Settlement factory
+	// Phase 6: Settlement factory. Fee lookup is late-bound: symbolRegistry is
+	// loaded further down (after Postgres init), so the closure reads it at
+	// settle time rather than capturing a nil value now.
+	var symbolRegistryRef atomic.Pointer[config.Registry]
+	feeLookup := func(symbol string, market models.MarketType) (maker, taker decimal.Decimal) {
+		reg := symbolRegistryRef.Load()
+		if reg == nil {
+			return decimal.Zero, decimal.Zero
+		}
+		cfg, err := reg.Get(symbol, market)
+		if err != nil {
+			return decimal.Zero, decimal.Zero
+		}
+		return cfg.MakerFee, cfg.TakerFee
+	}
 	settlementFactory := func(symbol string, market models.MarketType) matching.SettlementHandler {
 		switch market {
 		case models.Futures:
@@ -83,7 +98,7 @@ func main() {
 		case models.Options:
 			return optionsSettlement
 		default:
-			return settlement.NewSpotSettlement(ledger)
+			return settlement.NewSpotSettlement(ledger, feeLookup)
 		}
 	}
 
@@ -114,7 +129,9 @@ func main() {
 	}{
 		{"BTC-USDT", models.Spot},
 		{"ETH-USDT", models.Spot},
+		{"SOL-USDT", models.Spot},
 		{"BTC-USDC", models.Futures},
+		{"ETH-USDC", models.Futures},
 	}
 	for _, p := range pairs {
 		if _, err := reg.Register(p.symbol, p.market); err != nil {
@@ -183,6 +200,22 @@ func main() {
 			} else {
 				seedSymbolConfigs(ctx, pool)
 				seedOptionInstruments(ctx, pool)
+				// Re-check periodically, not just at boot: a long-lived
+				// process can outlive its seeded contracts' expiries (the
+				// shortest is 7 days) without ever restarting to trigger the
+				// boot-time reseed above.
+				go func() {
+					ticker := time.NewTicker(6 * time.Hour)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							seedOptionInstruments(ctx, pool)
+						}
+					}
+				}()
 				if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
 					slog.Error("load symbol config registry", "error", err)
 				} else {
@@ -198,6 +231,7 @@ func main() {
 		// simply reads as "not configured" instead of nil-panicking.
 		symbolRegistry = config.NewInMemoryRegistry()
 	}
+	symbolRegistryRef.Store(symbolRegistry)
 
 	// Futures liquidation, funding, and options expiry background loops.
 	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)
@@ -221,6 +255,12 @@ func main() {
 	// HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.ServeWS)
+	// /ticker returns real JSON (was plain-text bid/ask/mid/spread with no
+	// mark price, funding, fee, or MMR — insufficient for the trade page's
+	// header, which was previously falling back to fabricated ±0.01%
+	// mark/index numbers and a hardcoded MMR because there was nothing real
+	// to fetch). Futures-only fields (index price, funding rate, MMR) are
+	// omitted for spot/options.
 	mux.HandleFunc("/ticker", func(w http.ResponseWriter, r *http.Request) {
 		sym := r.URL.Query().Get("symbol")
 		mkt := models.MarketType(r.URL.Query().Get("market"))
@@ -229,8 +269,27 @@ func main() {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, "symbol=%s market=%s bid=%s ask=%s mid=%s spread=%s\n",
-			ticker.Symbol, ticker.Market, ticker.BestBid, ticker.BestAsk, ticker.MidPrice, ticker.Spread)
+		resp := TickerResponse{
+			Symbol: ticker.Symbol, Market: string(ticker.Market),
+			BestBid: ticker.BestBid.String(), BestAsk: ticker.BestAsk.String(),
+			MidPrice: ticker.MidPrice.String(), MarkPrice: ticker.MarkPrice.String(),
+			Spread: ticker.Spread.String(),
+		}
+		if cfg, cerr := symbolRegistry.Get(sym, mkt); cerr == nil {
+			resp.MakerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
+			resp.TakerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+			if mkt == models.Futures {
+				resp.MaintenanceMarginRatePct = cfg.MaintenanceMarginRate.Mul(decimal.NewFromInt(100)).String()
+				if cfg.UnderlyingSymbol != "" {
+					if indexTicker, ierr := mdSvc.Ticker(cfg.UnderlyingSymbol, models.Spot); ierr == nil && indexTicker.MarkPrice.IsPositive() {
+						resp.IndexPrice = indexTicker.MarkPrice.String()
+						resp.FundingRatePct = settlement.CurrentFundingRate(ticker.MarkPrice, indexTicker.MarkPrice).
+							Mul(decimal.NewFromInt(100)).String()
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 	mux.HandleFunc("/admin/halt", func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
@@ -266,11 +325,17 @@ func main() {
 			orderType = models.IOC
 		case "FOK":
 			orderType = models.FOK
+		case "POST_ONLY":
+			orderType = models.PostOnly
+		case "STOP":
+			orderType = models.Stop
 		}
 		price, _ := decimal.NewFromString(q.Get("price"))
 		qty, _ := decimal.NewFromString(q.Get("qty"))
 		leverage, _ := strconv.Atoi(q.Get("leverage"))
 		strike, _ := decimal.NewFromString(q.Get("strike"))
+		stopPrice, _ := decimal.NewFromString(q.Get("stopPrice"))
+		reduceOnly := q.Get("reduceOnly") == "true"
 		var expiry time.Time
 		if exp := q.Get("expiry"); exp != "" {
 			expiry, _ = time.Parse(time.RFC3339, exp)
@@ -280,8 +345,61 @@ func main() {
 			Symbol: q.Get("symbol"), Market: models.MarketType(q.Get("market")),
 			Side: side, Type: orderType, Price: price, Quantity: qty,
 			TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
-			Leverage: leverage, MarginMode: q.Get("marginMode"),
+			Leverage: leverage, MarginMode: q.Get("marginMode"), ReduceOnly: reduceOnly,
+			StopPrice: stopPrice,
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
+		}
+
+		// Market-order slippage protection: an optional slippageBps query
+		// param caps how far a market order may walk the book from the best
+		// opposite quote at submission time. Without this, a market order
+		// against a thin book can execute at an arbitrarily bad price
+		// (matchAggressively applies no price limit to Market orders).
+		// Implemented here (rather than inside the matching core) by
+		// converting the order to an equivalent marketable LIMIT at the
+		// slippage-bounded price — this reuses the existing, well-tested
+		// price-limited matching path instead of adding a second code path.
+		if o.Type == models.Market {
+			if bpsStr := q.Get("slippageBps"); bpsStr != "" {
+				bps, berr := decimal.NewFromString(bpsStr)
+				if berr != nil || bps.IsNegative() {
+					http.Error(w, "invalid slippageBps", http.StatusBadRequest)
+					return
+				}
+				eng, gerr := reg.Get(o.Symbol, o.Market)
+				if gerr != nil {
+					http.Error(w, "invalid order: "+gerr.Error(), http.StatusBadRequest)
+					return
+				}
+				var refPrice decimal.Decimal
+				if o.IsBuy() {
+					refPrice = eng.BestAsk()
+				} else {
+					refPrice = eng.BestBid()
+				}
+				if refPrice.IsPositive() {
+					factor := bps.Div(decimal.NewFromInt(10000))
+					if o.IsBuy() {
+						o.Price = refPrice.Mul(decimal.NewFromInt(1).Add(factor))
+					} else {
+						o.Price = refPrice.Mul(decimal.NewFromInt(1).Sub(factor))
+					}
+					o.Type = models.IOC // marketable limit: fill up to the cap, cancel remainder, never rests
+				}
+			}
+		}
+
+		// Reduce-only enforcement (futures only): reject an order that would
+		// increase or flip the account's position instead of only shrinking
+		// it. Checked against the position as it stands at order-entry time;
+		// this is a pre-trade guard, not a per-fill clamp, consistent with
+		// how the reservation sizing below is also computed at entry time.
+		if o.ReduceOnly && o.Market == models.Futures && !o.InternalLiquidation {
+			pos := futuresSettlement.GetPosition(o.AccountID, o.Symbol)
+			if err := checkReduceOnly(o, pos); err != nil {
+				http.Error(w, "invalid order: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 
 		// Options require per-instrument validation and engine creation.
@@ -309,12 +427,17 @@ func main() {
 		// ledger) or leak permanently-locked funds.
 		//
 		//   Market orders:   best opposite quote (no own price).
+		//   Stop-market orders (STOP with no limit Price): same worst-case
+		//     estimate as Market — the order rests untriggered but will
+		//     execute as a market order the instant it fires, so funds must
+		//     be reserved now, not at trigger time (the account could spend
+		//     the balance elsewhere in between otherwise).
 		//   Futures sell limit: max(limit, bestBid) — margin scales with fill
 		//     price, and the worst case for a short is filling at the best bid.
 		//   Buy limits / spot: the limit price (a buyer never pays more).
 		var resAsset string
 		var resAmount decimal.Decimal
-		if o.Type == models.Market {
+		if o.Type == models.Market || (o.Type == models.Stop && !o.Price.IsPositive()) {
 			eng, gerr := reg.Get(o.Symbol, o.Market)
 			if gerr != nil {
 				http.Error(w, "risk: "+gerr.Error(), http.StatusBadRequest)
@@ -426,11 +549,41 @@ func main() {
 		// Release whatever remains reserved for the unfilled portion. Safe
 		// for partial fills: order.Filled reflects everything settled before
 		// cancel, so RemainingQty() is exactly what's still held.
-		checker.Release(order)
-		if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
-			backendclient.Async("unlock", func(ctx context.Context) error {
-				return backend.Unlock(ctx, order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount))
-			})
+		if order.Type == models.Stop && !order.Price.IsPositive() {
+			// Stop-market orders were reserved at submission time against an
+			// estimated worst-case price (best opposite quote then), which
+			// the order itself doesn't retain. Re-estimate at cancel time —
+			// this is at least as conservative as the original reservation
+			// in a typical market and avoids leaving funds permanently
+			// locked for a cancelled, never-triggered stop.
+			asset := ""
+			if eng, gerr := reg.Get(order.Symbol, order.Market); gerr == nil {
+				var estPrice decimal.Decimal
+				if order.IsBuy() {
+					estPrice = eng.BestAsk()
+				} else {
+					estPrice = eng.BestBid()
+				}
+				if estPrice.IsPositive() {
+					var amount decimal.Decimal
+					asset, amount = risk.EstimatedRequired(order, estPrice)
+					if amount.IsPositive() {
+						ledger.Release(order.AccountID, asset, amount)
+						if backend.Enabled() {
+							backendclient.Async("unlock", func(ctx context.Context) error {
+								return backend.Unlock(ctx, order.AccountID, asset, backendclient.ToRawUnits(amount))
+							})
+						}
+					}
+				}
+			}
+		} else {
+			checker.Release(order)
+			if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
+				backendclient.Async("unlock", func(ctx context.Context) error {
+					return backend.Unlock(ctx, order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount))
+				})
+			}
 		}
 		writeJSON(w, http.StatusOK, OrderResponse{
 			OrderID: order.ID, Status: string(order.Status), Filled: order.Filled.String(),
@@ -524,6 +677,47 @@ func main() {
 			}
 		}
 		writeJSON(w, http.StatusOK, OrdersResponse{Orders: out})
+	})
+
+	// /order/status reports the real state of a single order so a maker bot can
+	// tell an actual (possibly partial) fill apart from a self-trade-prevention
+	// cancel or an order lost to an engine restart. The live book is the
+	// synchronous source of truth for resting orders; once an order leaves the
+	// book we fall back to the durable Postgres record. When neither knows the
+	// order (e.g. the async writer hasn't flushed it yet), found=false and the
+	// caller accounts nothing rather than assuming a full fill.
+	mux.HandleFunc("/order/status", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		orderID := q.Get("id")
+		symbol := q.Get("symbol")
+		market := models.MarketType(q.Get("market"))
+		if orderID == "" {
+			http.Error(w, "id is required", http.StatusBadRequest)
+			return
+		}
+		if symbol != "" {
+			if o, resting, err := reg.OrderByID(symbol, market, orderID); err == nil && resting {
+				writeJSON(w, http.StatusOK, OrderStatusResponse{
+					OrderID: orderID, Found: true, Resting: true,
+					Status: string(o.Status), Filled: o.Filled.String(),
+				})
+				return
+			}
+		}
+		// Not resting: consult the durable record for its terminal state.
+		st, err := persistence.OrderStatusByID(r.Context(), pgPool, orderID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !st.Found {
+			writeJSON(w, http.StatusOK, OrderStatusResponse{OrderID: orderID, Found: false})
+			return
+		}
+		writeJSON(w, http.StatusOK, OrderStatusResponse{
+			OrderID: orderID, Found: true, Resting: false,
+			Status: st.Status, Filled: st.Filled.String(),
+		})
 	})
 
 	mux.HandleFunc("/admin/balance", func(w http.ResponseWriter, r *http.Request) {
@@ -695,7 +889,15 @@ func main() {
 		}
 	}
 
-	runDemo(reg, ledger)
+	// The integration-test demo seeder injects fake orders (buy@99-100,
+	// sell@102-103) straight into the real BTC-USDT SPOT book on every boot.
+	// That's fine for a local smoke test but was previously unconditional —
+	// running it against a real deployment silently corrupts the one spot
+	// market with orders nowhere near the real price, and skews the options
+	// chain's underlying spot ticker along with it. Opt-in only now.
+	if os.Getenv("ENGINE_DEMO_SEED") == "true" {
+		runDemo(reg, ledger)
+	}
 
 	<-ctx.Done()
 	slog.Info("shutting down")
@@ -712,6 +914,24 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// checkReduceOnly rejects a reduce-only order that would open a new
+// position, flip an existing one, or close more than is currently open.
+// pos may be nil (no open position). Extracted as a pure function so the
+// decision logic is unit-testable without standing up the HTTP handler.
+func checkReduceOnly(o *models.Order, pos *settlement.Position) error {
+	if pos == nil || pos.Size.IsZero() {
+		return fmt.Errorf("reduceOnly order rejected, no open position")
+	}
+	sameDirection := (pos.Side == models.Buy && o.IsBuy()) || (pos.Side == models.Sell && !o.IsBuy())
+	if sameDirection {
+		return fmt.Errorf("reduceOnly order would increase the position")
+	}
+	if o.Quantity.GreaterThan(pos.Size) {
+		return fmt.Errorf("reduceOnly order quantity exceeds open position size")
+	}
+	return nil
 }
 
 // validateOrderConfig enforces the per-symbol TickSize, LotSize, MinNotional

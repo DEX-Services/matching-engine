@@ -333,11 +333,19 @@ func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, 
 	f.realizeAndCredit(accountID, quoteAsset, margin, pnl, !crossMargin)
 }
 
-// GetPosition returns the current position for an account/symbol, or nil.
+// GetPosition returns a copy of the current position for an account/symbol,
+// or nil. A copy is returned (not the live pointer) so callers outside the
+// settlement package's own lock (e.g. the HTTP order handler's reduce-only
+// check) cannot race a concurrent position update.
 func (f *FuturesSettlement) GetPosition(accountID, symbol string) *Position {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return f.positions[accountID+":"+symbol]
+	pos, ok := f.positions[accountID+":"+symbol]
+	if !ok {
+		return nil
+	}
+	cp := *pos
+	return &cp
 }
 
 var _ Handler = (*FuturesSettlement)(nil)

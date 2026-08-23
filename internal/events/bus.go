@@ -9,10 +9,17 @@ import (
 	"github.com/dex/matching-engine/internal/models"
 )
 
-// Bus is a non-blocking fan-out publisher. The matching goroutine calls
-// Publish; each registered subscriber receives events on its own buffered
-// channel. If a subscriber's channel is full the event is dropped for that
-// subscriber — the matching goroutine must never block.
+// Bus is a blocking fan-out publisher. The matching goroutine calls Publish;
+// each registered subscriber receives every event on its own buffered channel.
+// Events are NEVER silently dropped: these events (fills, trades, cancels,
+// liquidations, balance changes) carry per-symbol monotonic sequence numbers
+// that downstream consumers (Postgres, WebSocket) rely on to be gapless. If a
+// subscriber's channel is full, Publish blocks until the subscriber drains it,
+// applying backpressure to matching rather than corrupting downstream state.
+//
+// Consumers MUST therefore keep up (drain promptly into their own durable
+// buffer). A pathologically stuck consumer will back-pressure matching for its
+// symbol — that is the intended failure mode: stall, don't desync.
 type Bus struct {
 	mu   sync.RWMutex
 	subs []chan *models.Event
@@ -22,7 +29,7 @@ type Bus struct {
 func NewBus() *Bus { return &Bus{} }
 
 // Subscribe registers a consumer and returns its receive channel.
-// bufSize controls how many events can be queued before drops occur.
+// bufSize controls how many events can be queued before Publish blocks.
 func (b *Bus) Subscribe(bufSize int) <-chan *models.Event {
 	ch := make(chan *models.Event, bufSize)
 	b.mu.Lock()
@@ -31,16 +38,13 @@ func (b *Bus) Subscribe(bufSize int) <-chan *models.Event {
 	return ch
 }
 
-// Publish sends evt to all subscribers without blocking.
+// Publish sends evt to all subscribers, blocking on any full channel so that
+// no event is ever dropped and sequence numbers stay gapless.
 func (b *Bus) Publish(evt *models.Event) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for _, sub := range b.subs {
-		select {
-		case sub <- evt:
-		default:
-			// Slow subscriber — drop; Phase 7 adds a metric counter here.
-		}
+		sub <- evt
 	}
 }
 

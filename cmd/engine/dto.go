@@ -41,6 +41,18 @@ type OrderResponse struct {
 	Trades  int    `json:"trades"`
 }
 
+// OrderStatusResponse is the payload for GET /order/status. Found reports
+// whether the order is known at all (live book or durable record); resting is
+// true only while it is still in the live book. Callers use Filled to account
+// the real filled quantity instead of assuming a vanished order filled in full.
+type OrderStatusResponse struct {
+	OrderID string `json:"orderId"`
+	Found   bool   `json:"found"`
+	Resting bool   `json:"resting"`
+	Status  string `json:"status"`
+	Filled  string `json:"filled"`
+}
+
 // OpenOrderDTO is one resting order in a GET /orders response.
 type OpenOrderDTO struct {
 	ID     string `json:"id"`
@@ -117,4 +129,41 @@ type OptionChainResponse struct {
 	Underlying string             `json:"underlying"`
 	Spot       string             `json:"spot"`
 	Chain      []OptionChainEntry `json:"chain"`
+}
+
+// TickerResponse is the payload for GET /ticker. All price fields are
+// order-book-derived (best bid/ask/mid) or settlement-derived (mark price,
+// funding) — there is no 24h high/low/volume here, since the engine doesn't
+// track rolling windows; the frontend gets those from the price-fetcher's
+// Redis-backed index feed instead (see bots' /index/{base} endpoint).
+type TickerResponse struct {
+	Symbol   string `json:"symbol"`
+	Market   string `json:"market"`
+	BestBid  string `json:"bestBid"`
+	BestAsk  string `json:"bestAsk"`
+	MidPrice string `json:"midPrice"`
+	// MarkPrice is the blended price liquidation and funding are computed
+	// against — order-book mid for spot, exchange-standard blend for
+	// futures. Equal to MidPrice for markets where no separate blend exists.
+	MarkPrice string `json:"markPrice"`
+	// IndexPrice is only populated for FUTURES: the underlying spot market's
+	// own mark price, i.e. what funding is computed against. Empty for
+	// SPOT/OPTIONS, where there is no separate index.
+	IndexPrice string `json:"indexPrice,omitempty"`
+	Spread     string `json:"spread"`
+	// FundingRatePct is only populated for FUTURES: the rate that WOULD be
+	// applied at the next funding settlement given the current mark/index
+	// spread (mirrors settlement/funding.go's own computation and cap, but
+	// does not apply anything — this is a preview, not a payment). Empty for
+	// SPOT/OPTIONS.
+	FundingRatePct string `json:"fundingRatePct,omitempty"`
+	// MakerFeePct / TakerFeePct come straight from the symbol's real fee
+	// config (symbol_configs.maker_fee/taker_fee) rather than being
+	// approximated client-side.
+	MakerFeePct string `json:"makerFeePct,omitempty"`
+	TakerFeePct string `json:"takerFeePct,omitempty"`
+	// MaintenanceMarginRatePct is only populated for FUTURES — the real,
+	// live MMR from symbol_configs, so the frontend's liquidation-price
+	// preview can stop hardcoding it.
+	MaintenanceMarginRatePct string `json:"maintenanceMarginRatePct,omitempty"`
 }

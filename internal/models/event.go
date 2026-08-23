@@ -15,6 +15,11 @@ const (
 	EventOrderRejected EventType = "ORDER_REJECTED"
 	EventOrderExpired  EventType = "ORDER_EXPIRED"
 	EventTrade         EventType = "TRADE"
+	// EventTradeSettlementFailed is published instead of EventTrade when the
+	// settlement handler returns an error. Downstream consumers must NOT treat
+	// the trade as successful; the engine also halts the symbol for manual
+	// reconciliation.
+	EventTradeSettlementFailed EventType = "TRADE_SETTLEMENT_FAILED"
 	EventBookDelta     EventType = "BOOK_DELTA"
 	EventLiquidation   EventType = "LIQUIDATION"
 	EventFunding       EventType = "FUNDING"

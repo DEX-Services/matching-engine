@@ -116,6 +116,17 @@ func (r *Registry) Cancel(symbol string, market models.MarketType, orderID strin
 	return eng.Cancel(orderID)
 }
 
+// OrderByID looks up a resting order in a symbol's live book, returning whether
+// it is currently resting. Terminal orders are no longer in the book.
+func (r *Registry) OrderByID(symbol string, market models.MarketType, orderID string) (*models.Order, bool, error) {
+	eng, err := r.Get(symbol, market)
+	if err != nil {
+		return nil, false, err
+	}
+	o, ok := eng.OrderByID(orderID)
+	return o, ok, nil
+}
+
 // Symbols returns all registered SymbolKeys.
 func (r *Registry) Symbols() []SymbolKey {
 	r.mu.RLock()

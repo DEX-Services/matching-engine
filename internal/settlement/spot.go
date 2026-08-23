@@ -6,7 +6,13 @@ import (
 
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
+	"github.com/shopspring/decimal"
 )
+
+// FeeLookup returns the maker/taker fee fractions for a symbol/market.
+// Returning zeros means no fees are charged. Satisfied by a closure over
+// config.Registry.
+type FeeLookup func(symbol string, market models.MarketType) (maker, taker decimal.Decimal)
 
 // SpotSettlement transfers base and quote assets between buyer and seller
 // immediately upon trade execution.
@@ -14,13 +20,19 @@ import (
 // For a BTC-USDT trade:
 //   - Buyer  pays  price × qty USDT, receives qty BTC.
 //   - Seller pays  qty BTC,          receives price × qty USDT.
+//
+// Fees (when configured) are charged in the quote currency: the maker and
+// taker are each debited notional × fee-rate on top of / out of their quote
+// flow, recorded on the trade as MakerFeePaid / TakerFeePaid.
 type SpotSettlement struct {
 	ledger *risk.Ledger
+	fees   FeeLookup
 }
 
 // NewSpotSettlement constructs a SpotSettlement backed by the given ledger.
-func NewSpotSettlement(ledger *risk.Ledger) *SpotSettlement {
-	return &SpotSettlement{ledger: ledger}
+// fees may be nil (no fees charged).
+func NewSpotSettlement(ledger *risk.Ledger, fees FeeLookup) *SpotSettlement {
+	return &SpotSettlement{ledger: ledger, fees: fees}
 }
 
 // Settle debits and credits both sides of the trade atomically in the ledger.
@@ -39,17 +51,40 @@ func (s *SpotSettlement) Settle(trade *models.Trade) error {
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	// Buyer: pays quote, receives base.
-	if err := s.ledger.Debit(buyerID, quote, notional); err != nil {
+	// Resolve fees. Maker fee applies to the resting side, taker to the aggressor.
+	var makerFee, takerFee decimal.Decimal
+	if s.fees != nil {
+		makerRate, takerRate := s.fees(trade.Symbol, trade.Market)
+		makerFee = notional.Mul(makerRate)
+		takerFee = notional.Mul(takerRate)
+	}
+	buyerFee, sellerFee := takerFee, makerFee
+	if trade.MakerSide == models.Buy {
+		buyerFee, sellerFee = makerFee, takerFee
+	}
+
+	// Buyer: pays quote (notional + fee), receives base.
+	if err := s.ledger.Debit(buyerID, quote, notional.Add(buyerFee)); err != nil {
 		return fmt.Errorf("spot settle debit buyer quote: %w", err)
 	}
 	s.ledger.Credit(buyerID, base, trade.Quantity)
 
-	// Seller: pays base, receives quote.
+	// Seller: pays base, receives quote net of fee.
 	if err := s.ledger.Debit(sellerID, base, trade.Quantity); err != nil {
+		// Roll back the buyer leg so a failed settle leaves the ledger unchanged.
+		s.ledger.Credit(buyerID, quote, notional.Add(buyerFee))
+		if derr := s.ledger.Debit(buyerID, base, trade.Quantity); derr != nil {
+			return fmt.Errorf("spot settle debit seller base: %w (rollback of buyer leg also failed: %v)", err, derr)
+		}
 		return fmt.Errorf("spot settle debit seller base: %w", err)
 	}
-	s.ledger.Credit(sellerID, quote, notional)
+	s.ledger.Credit(sellerID, quote, notional.Sub(sellerFee))
+
+	if trade.MakerSide == models.Buy {
+		trade.MakerFeePaid, trade.TakerFeePaid = buyerFee, sellerFee
+	} else {
+		trade.MakerFeePaid, trade.TakerFeePaid = sellerFee, buyerFee
+	}
 
 	return nil
 }
