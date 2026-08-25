@@ -982,6 +982,9 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 			return fmt.Errorf("quantity %s not a multiple of lot size %s", o.Quantity, cfg.LotSize)
 		}
 	}
+	if cfg.MaxQuantity.IsPositive() && o.Quantity.GreaterThan(cfg.MaxQuantity) {
+		return fmt.Errorf("quantity %s exceeds maximum quantity %s", o.Quantity, cfg.MaxQuantity)
+	}
 	if cfg.MaxPrice.IsPositive() && o.Type != models.Market && o.Price.GreaterThan(cfg.MaxPrice) {
 		return fmt.Errorf("price %s exceeds max price %s", o.Price, cfg.MaxPrice)
 	}

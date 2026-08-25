@@ -39,6 +39,7 @@ type MarketMetadata struct {
 	LotSize           string   `json:"lotSize"`
 	MinNotional       string   `json:"minNotional"`
 	MaxPrice          string   `json:"maxPrice"`
+	MaxQuantity       string   `json:"maxQuantity"`
 	MakerFeePct       string   `json:"makerFeePct"`
 	TakerFeePct       string   `json:"takerFeePct"`
 	MaintenanceMargin string   `json:"maintenanceMarginRatePct,omitempty"`
@@ -50,14 +51,14 @@ func marketMetadata(def marketDefinition, cfg *config.SymbolConfig) MarketMetada
 	// The defaults are the schema defaults used when a local engine runs without
 	// Postgres. Production values come from symbol_configs and replace them.
 	tickSize, lotSize := decimal.RequireFromString("0.01"), decimal.RequireFromString("0.00001")
-	minNotional, maxPrice := decimal.NewFromInt(1), decimal.NewFromInt(1_000_000)
+	minNotional, maxPrice, maxQuantity := decimal.NewFromInt(1), decimal.NewFromInt(1_000_000), decimal.NewFromInt(1_000_000)
 	makerFee, takerFee := decimal.RequireFromString("0.001"), decimal.RequireFromString("0.001")
 	base, quote := def.base, def.quote
 	maxLeverage := 0
 	mmr := decimal.Zero
 	if cfg != nil {
 		tickSize, lotSize = cfg.TickSize, cfg.LotSize
-		minNotional, maxPrice = cfg.MinNotional, cfg.MaxPrice
+		minNotional, maxPrice, maxQuantity = cfg.MinNotional, cfg.MaxPrice, cfg.MaxQuantity
 		makerFee, takerFee = cfg.MakerFee, cfg.TakerFee
 		base, quote = cfg.BaseCurrency, cfg.QuoteCurrency
 		maxLeverage, mmr = cfg.MaxLeverage, cfg.MaintenanceMarginRate
@@ -66,7 +67,7 @@ func marketMetadata(def marketDefinition, cfg *config.SymbolConfig) MarketMetada
 		DisplaySymbol: def.displaySymbol, Symbol: def.symbol, Market: string(def.market),
 		BaseCurrency: base, QuoteCurrency: quote,
 		TickSize: tickSize.String(), LotSize: lotSize.String(),
-		MinNotional: minNotional.String(), MaxPrice: maxPrice.String(),
+		MinNotional: minNotional.String(), MaxPrice: maxPrice.String(), MaxQuantity: maxQuantity.String(),
 		MakerFeePct:       makerFee.Mul(decimal.NewFromInt(100)).String(),
 		TakerFeePct:       takerFee.Mul(decimal.NewFromInt(100)).String(),
 		MaintenanceMargin: mmr.Mul(decimal.NewFromInt(100)).String(),

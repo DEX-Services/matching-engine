@@ -16,17 +16,18 @@ import (
 
 // SymbolConfig holds the static parameters for a single trading pair.
 type SymbolConfig struct {
-	Symbol      string
-	Market      models.MarketType
+	Symbol        string
+	Market        models.MarketType
 	BaseCurrency  string
 	QuoteCurrency string
-	TickSize    decimal.Decimal // minimum price increment
-	LotSize     decimal.Decimal // minimum quantity increment
-	MinNotional decimal.Decimal // minimum order value
-	MaxPrice    decimal.Decimal // upper price limit
-	MakerFee    decimal.Decimal // fraction (e.g. 0.001 = 0.1%)
-	TakerFee    decimal.Decimal
-	Active      bool
+	TickSize      decimal.Decimal // minimum price increment
+	LotSize       decimal.Decimal // minimum quantity increment
+	MinNotional   decimal.Decimal // minimum order value
+	MaxPrice      decimal.Decimal // upper price limit
+	MaxQuantity   decimal.Decimal // upper quantity limit per order
+	MakerFee      decimal.Decimal // fraction (e.g. 0.001 = 0.1%)
+	TakerFee      decimal.Decimal
+	Active        bool
 
 	// Futures-only. Zero/unset for Spot and Options.
 	MaxLeverage           int             // maximum leverage an account may select
@@ -112,7 +113,7 @@ func (r *Registry) StartHotReload(ctx context.Context, interval time.Duration) {
 func (r *Registry) reload(ctx context.Context) error {
 	rows, err := r.pool.Query(ctx, `
 		SELECT symbol, market, base_currency, quote_currency,
-		       tick_size, lot_size, min_notional, max_price,
+		       tick_size, lot_size, min_notional, max_price, max_quantity,
 		       maker_fee, taker_fee, active,
 		       max_leverage, maintenance_margin_rate, funding_interval_hours,
 		       contract_multiplier, underlying_symbol
@@ -127,10 +128,10 @@ func (r *Registry) reload(ctx context.Context) error {
 	for rows.Next() {
 		var c SymbolConfig
 		var market string
-		var tickSize, lotSize, minNotional, maxPrice, makerFee, takerFee string
+		var tickSize, lotSize, minNotional, maxPrice, maxQuantity, makerFee, takerFee string
 		var maintenanceMarginRate, contractMultiplier string
 		if err := rows.Scan(&c.Symbol, &market, &c.BaseCurrency, &c.QuoteCurrency,
-			&tickSize, &lotSize, &minNotional, &maxPrice,
+			&tickSize, &lotSize, &minNotional, &maxPrice, &maxQuantity,
 			&makerFee, &takerFee, &c.Active,
 			&c.MaxLeverage, &maintenanceMarginRate, &c.FundingIntervalHours,
 			&contractMultiplier, &c.UnderlyingSymbol); err != nil {
@@ -141,6 +142,7 @@ func (r *Registry) reload(ctx context.Context) error {
 		c.LotSize, _ = decimal.NewFromString(lotSize)
 		c.MinNotional, _ = decimal.NewFromString(minNotional)
 		c.MaxPrice, _ = decimal.NewFromString(maxPrice)
+		c.MaxQuantity, _ = decimal.NewFromString(maxQuantity)
 		c.MakerFee, _ = decimal.NewFromString(makerFee)
 		c.TakerFee, _ = decimal.NewFromString(takerFee)
 		c.MaintenanceMarginRate, _ = decimal.NewFromString(maintenanceMarginRate)
@@ -170,6 +172,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		    lot_size       NUMERIC     NOT NULL DEFAULT '0.00001',
 		    min_notional   NUMERIC     NOT NULL DEFAULT '1',
 		    max_price      NUMERIC     NOT NULL DEFAULT '1000000',
+		    max_quantity   NUMERIC     NOT NULL DEFAULT '1000000',
 		    maker_fee      NUMERIC     NOT NULL DEFAULT '0.001',
 		    taker_fee      NUMERIC     NOT NULL DEFAULT '0.001',
 		    active         BOOLEAN     NOT NULL DEFAULT true,
@@ -185,6 +188,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	_, err = pool.Exec(ctx, `
 		ALTER TABLE symbol_configs
+		    ADD COLUMN IF NOT EXISTS max_quantity NUMERIC NOT NULL DEFAULT '1000000',
 		    ADD COLUMN IF NOT EXISTS max_leverage INTEGER NOT NULL DEFAULT 0,
 		    ADD COLUMN IF NOT EXISTS maintenance_margin_rate NUMERIC NOT NULL DEFAULT '0',
 		    ADD COLUMN IF NOT EXISTS funding_interval_hours INTEGER NOT NULL DEFAULT 0,
