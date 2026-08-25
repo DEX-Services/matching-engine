@@ -548,8 +548,8 @@ func main() {
 			http.Error(w, "order not found", http.StatusNotFound)
 			return
 		}
-		if order.AccountID != accountID {
-			http.Error(w, "not authorized to cancel this order", http.StatusForbidden)
+		if err := requireOrderOwner(order, accountID); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
 		order, err := reg.Cancel(symbol, market, orderID)
@@ -941,6 +941,13 @@ func requireEngineServiceAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func requireOrderOwner(order *models.Order, accountID string) error {
+	if order == nil || order.AccountID != accountID {
+		return fmt.Errorf("not authorized to cancel this order")
+	}
+	return nil
 }
 
 // checkReduceOnly rejects a reduce-only order that would open a new
