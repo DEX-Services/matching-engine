@@ -118,6 +118,12 @@ type Order struct {
 	// listener knows which sibling to cancel when this one fills/triggers.
 	GroupID   string `json:"groupId,omitempty"`
 	GroupRole string `json:"groupRole,omitempty"` // "TP" | "SL"
+
+	// RejectReason explains why the order ended in StatusRejected or
+	// StatusCancelled (self-trade prevention, FOK not fillable, post-only
+	// crossing, halted symbol, IOC/market unfilled remainder, explicit user
+	// cancel, etc). Empty for orders that are still open/filled normally.
+	RejectReason string `json:"rejectReason,omitempty"`
 }
 
 // RemainingQty returns the unfilled portion of the order.

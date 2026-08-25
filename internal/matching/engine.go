@@ -273,6 +273,7 @@ func (e *Engine) handle(req request) {
 	case reqSubmit:
 		if e.halted.Load() {
 			req.order.Status = models.StatusRejected
+			req.order.RejectReason = fmt.Sprintf("symbol %s/%s is halted", e.symbol, e.market)
 			res.err = fmt.Errorf("symbol %s/%s is halted", e.symbol, e.market)
 			res.order = req.order
 			if req.snapshot {

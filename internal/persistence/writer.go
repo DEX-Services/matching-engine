@@ -119,15 +119,16 @@ func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
 		o := evt.Order
 		_, err = tx.Exec(ctx, `
 			INSERT INTO orders (id, client_order_id, account_id, symbol, market, side, type,
-			                    time_in_force, price, quantity, filled, status, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			                    time_in_force, price, quantity, filled, status, reject_reason, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 			ON CONFLICT (id) DO UPDATE SET
-			    filled     = EXCLUDED.filled,
-			    status     = EXCLUDED.status,
-			    updated_at = EXCLUDED.updated_at`,
+			    filled        = EXCLUDED.filled,
+			    status        = EXCLUDED.status,
+			    reject_reason = EXCLUDED.reject_reason,
+			    updated_at    = EXCLUDED.updated_at`,
 			o.ID, o.ClientOrderID, o.AccountID, o.Symbol, string(o.Market),
 			string(o.Side), string(o.Type), string(o.TimeInForce),
-			o.Price, o.Quantity, o.Filled, string(o.Status), o.CreatedAt, o.UpdatedAt)
+			o.Price, o.Quantity, o.Filled, string(o.Status), nullableString(o.RejectReason), o.CreatedAt, o.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("upsert order: %w", err)
 		}
@@ -138,11 +139,11 @@ func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
 		t := evt.Trade
 		_, err = tx.Exec(ctx, `
 			INSERT INTO trades (id, symbol, market, maker_order_id, taker_order_id,
-			                    maker_side, price, quantity, executed_at, sequence_number)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			                    maker_side, price, quantity, maker_fee_paid, taker_fee_paid, executed_at, sequence_number)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			ON CONFLICT (id) DO NOTHING`,
 			t.ID, t.Symbol, string(t.Market), t.MakerOrderID, t.TakerOrderID,
-			string(t.MakerSide), t.Price, t.Quantity, t.ExecutedAt, t.SequenceNumber)
+			string(t.MakerSide), t.Price, t.Quantity, t.MakerFeePaid, t.TakerFeePaid, t.ExecutedAt, t.SequenceNumber)
 		if err != nil {
 			return fmt.Errorf("insert trade: %w", err)
 		}
@@ -166,4 +167,13 @@ func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
 // Close shuts down the Kafka reader.
 func (w *Writer) Close() error {
 	return w.reader.Close()
+}
+
+// nullableString maps an empty Go string to a real SQL NULL rather than
+// writing an empty-string reject_reason for an order that succeeded.
+func nullableString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

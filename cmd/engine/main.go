@@ -544,23 +544,74 @@ func main() {
 		writeJSON(w, http.StatusOK, OrdersResponse{Orders: out})
 	}))
 	mux.HandleFunc("/order-history", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
-		account := r.URL.Query().Get("account")
+		q := r.URL.Query()
+		account := q.Get("account")
 		if account == "" {
 			http.Error(w, "account is required", http.StatusBadRequest)
 			return
 		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		before, _ := time.Parse(time.RFC3339Nano, r.URL.Query().Get("before"))
-		items, err := persistence.OrderHistory(r.Context(), pgPool, account, limit, before)
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		before, _ := time.Parse(time.RFC3339Nano, q.Get("before"))
+		after, _ := time.Parse(time.RFC3339Nano, q.Get("after"))
+		items, err := persistence.OrderHistory(r.Context(), pgPool, persistence.OrderHistoryFilter{
+			Account: account, Symbol: q.Get("symbol"), Market: q.Get("market"),
+			After: after, Before: before, Limit: limit,
+		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		out := make([]OrderHistoryDTO, 0, len(items))
 		for _, o := range items {
-			out = append(out, OrderHistoryDTO{ID: o.ID, Symbol: o.Symbol, Market: o.Market, Side: o.Side, Type: o.Type, Price: o.Price.String(), Quantity: o.Quantity.String(), Filled: o.Filled.String(), Status: o.Status, CreatedAt: o.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: o.UpdatedAt.UTC().Format(time.RFC3339Nano)})
+			out = append(out, OrderHistoryDTO{
+				ID: o.ID, Symbol: o.Symbol, Market: o.Market, Side: o.Side, Type: o.Type,
+				Price: o.Price.String(), Quantity: o.Quantity.String(), Filled: o.Filled.String(),
+				Status: o.Status, RejectReason: o.RejectReason,
+				AvgFillPrice: o.AvgFillPrice.String(), FeePaid: o.FeePaid.String(),
+				CreatedAt: o.CreatedAt.UTC().Format(time.RFC3339Nano), UpdatedAt: o.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			})
 		}
-		writeJSON(w, http.StatusOK, OrderHistoryResponse{Orders: out})
+		resp := OrderHistoryResponse{Orders: out}
+		if len(out) > 0 {
+			resp.NextCursor = out[len(out)-1].CreatedAt
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
+
+	// /fills is the fill-level complement to /order-history: individual trade
+	// executions rather than per-order aggregates, for a "recent fills" or
+	// "trade history" view that shows each execution as its own row.
+	mux.HandleFunc("/fills", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		account := q.Get("account")
+		if account == "" {
+			http.Error(w, "account is required", http.StatusBadRequest)
+			return
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		before, _ := time.Parse(time.RFC3339Nano, q.Get("before"))
+		after, _ := time.Parse(time.RFC3339Nano, q.Get("after"))
+		items, err := persistence.Fills(r.Context(), pgPool, persistence.FillsFilter{
+			Account: account, Symbol: q.Get("symbol"), Market: q.Get("market"),
+			After: after, Before: before, Limit: limit,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out := make([]FillDTO, 0, len(items))
+		for _, f := range items {
+			out = append(out, FillDTO{
+				TradeID: f.TradeID, OrderID: f.OrderID, Symbol: f.Symbol, Market: f.Market, Side: f.Side,
+				Price: f.Price.String(), Quantity: f.Quantity.String(), FeePaid: f.FeePaid.String(),
+				ExecutedAt: f.ExecutedAt.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		resp := FillsResponse{Fills: out}
+		if len(out) > 0 {
+			resp.NextCursor = out[len(out)-1].ExecutedAt
+		}
+		writeJSON(w, http.StatusOK, resp)
 	}))
 
 	// /order/status reports the real state of a single order so a maker bot can

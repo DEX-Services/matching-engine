@@ -94,6 +94,7 @@ func (b *Book) Submit(order *models.Order) ([]*models.Trade, []*models.Order, er
 func (b *Book) submitCore(order *models.Order) ([]*models.Trade, []*models.Order, error) {
 	if err := validateOrder(order); err != nil {
 		order.Status = models.StatusRejected
+		order.RejectReason = err.Error()
 		order.UpdatedAt = time.Now()
 		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidOrder, err)
 	}
@@ -120,6 +121,7 @@ func (b *Book) submitCore(order *models.Order) ([]*models.Trade, []*models.Order
 		return nil, nil, b.restStopOrder(order)
 	default:
 		order.Status = models.StatusRejected
+		order.RejectReason = fmt.Sprintf("unknown order type %s", order.Type)
 		return nil, nil, fmt.Errorf("%w: unknown order type %s", ErrInvalidOrder, order.Type)
 	}
 }
@@ -129,6 +131,7 @@ func (b *Book) Cancel(orderID string) (*models.Order, error) {
 	if stop, ok := b.stopOrders[orderID]; ok {
 		delete(b.stopOrders, orderID)
 		stop.Status = models.StatusCancelled
+		stop.RejectReason = "cancelled by user"
 		stop.UpdatedAt = time.Now()
 		return stop, nil
 	}
@@ -138,6 +141,7 @@ func (b *Book) Cancel(orderID string) (*models.Order, error) {
 	}
 	b.removeFromBook(order)
 	order.Status = models.StatusCancelled
+	order.RejectReason = "cancelled by user"
 	order.UpdatedAt = time.Now()
 	return order, nil
 }
@@ -222,6 +226,7 @@ func (b *Book) processMarket(order *models.Order) ([]*models.Trade, []*models.Or
 	if order.RemainingQty().IsPositive() {
 		// Market orders cannot rest; cancel any unfilled remainder.
 		order.Status = models.StatusCancelled
+		order.RejectReason = "insufficient opposing liquidity to fill remainder"
 	}
 	order.UpdatedAt = time.Now()
 	return trades, cancelled, nil
@@ -243,6 +248,7 @@ func (b *Book) processIOC(order *models.Order) ([]*models.Trade, []*models.Order
 	if order.RemainingQty().IsPositive() {
 		// IOC: cancel remainder immediately; never rests.
 		order.Status = models.StatusCancelled
+		order.RejectReason = "IOC remainder cancelled: insufficient opposing liquidity"
 	}
 	order.UpdatedAt = time.Now()
 	return trades, cancelled, nil
@@ -252,6 +258,7 @@ func (b *Book) processFOK(order *models.Order) ([]*models.Trade, []*models.Order
 	// Check whether the full quantity can be filled before touching the book.
 	if !b.canFillFully(order) {
 		order.Status = models.StatusCancelled
+		order.RejectReason = ErrFOKNotFilled.Error()
 		return nil, nil, ErrFOKNotFilled
 	}
 	trades, cancelled := b.matchAggressively(order)
@@ -262,6 +269,7 @@ func (b *Book) processPostOnly(order *models.Order) ([]*models.Trade, error) {
 	// Post-only orders must not cross the book; reject if they would.
 	if b.wouldCross(order) {
 		order.Status = models.StatusRejected
+		order.RejectReason = ErrPostOnlyCrossing.Error()
 		return nil, ErrPostOnlyCrossing
 	}
 	return b.restOrder(order)
@@ -292,6 +300,7 @@ func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*m
 		// this price level (or the next level, once this one empties out).
 		if aggressor.AccountID != "" && maker.AccountID == aggressor.AccountID {
 			maker.Status = models.StatusCancelled
+			maker.RejectReason = "cancelled: self-trade prevention"
 			maker.UpdatedAt = time.Now()
 			b.removeFromBook(maker)
 			cancelledMakers = append(cancelledMakers, maker)
@@ -384,6 +393,7 @@ func (b *Book) canFillFully(order *models.Order) bool {
 func (b *Book) restStopOrder(order *models.Order) error {
 	if !order.StopPrice.IsPositive() {
 		order.Status = models.StatusRejected
+		order.RejectReason = "stop order requires a positive stopPrice"
 		return fmt.Errorf("%w: stop order requires a positive stopPrice", ErrInvalidOrder)
 	}
 	order.Status = models.StatusOpen
@@ -433,6 +443,9 @@ func (b *Book) processStopTriggers() (trades []*models.Trade, cancelled []*model
 		t, c, err := b.submitCore(fired)
 		if err != nil {
 			fired.Status = models.StatusRejected
+			if fired.RejectReason == "" {
+				fired.RejectReason = err.Error()
+			}
 			continue
 		}
 		trades = append(trades, t...)

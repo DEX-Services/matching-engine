@@ -62,9 +62,18 @@ CREATE TABLE IF NOT EXISTS orders (
     quantity       NUMERIC     NOT NULL,
     filled         NUMERIC     NOT NULL DEFAULT 0,
     status         TEXT        NOT NULL,
+    reject_reason  TEXT,
     created_at     TIMESTAMPTZ NOT NULL,
     updated_at     TIMESTAMPTZ NOT NULL
 );
+
+-- reject_reason is added via ALTER for deployments whose orders table
+-- already exists from before this column was introduced; CREATE TABLE IF
+-- NOT EXISTS above is a no-op on an existing table, so new columns need
+-- their own idempotent migration statement.
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS reject_reason TEXT;
+
+CREATE INDEX IF NOT EXISTS orders_account_symbol_market ON orders (account_id, symbol, market, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS trades (
     id              TEXT PRIMARY KEY,
@@ -75,11 +84,19 @@ CREATE TABLE IF NOT EXISTS trades (
     maker_side      TEXT        NOT NULL,
     price           NUMERIC     NOT NULL,
     quantity        NUMERIC     NOT NULL,
+    maker_fee_paid  NUMERIC     NOT NULL DEFAULT 0,
+    taker_fee_paid  NUMERIC     NOT NULL DEFAULT 0,
     executed_at     TIMESTAMPTZ NOT NULL,
     sequence_number BIGINT      NOT NULL
 );
 
+-- See the orders table's reject_reason comment above: ALTER..IF NOT EXISTS
+-- covers deployments where the trades table predates these fee columns.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS maker_fee_paid NUMERIC NOT NULL DEFAULT 0;
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS taker_fee_paid NUMERIC NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS trades_symbol_seq ON trades (symbol, sequence_number);
+CREATE INDEX IF NOT EXISTS trades_orders ON trades (maker_order_id, taker_order_id);
 
 CREATE TABLE IF NOT EXISTS events (
     id             BIGSERIAL   PRIMARY KEY,

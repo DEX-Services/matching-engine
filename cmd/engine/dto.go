@@ -81,17 +81,44 @@ type OrderHistoryResponse struct {
 	NextCursor string            `json:"nextCursor,omitempty"`
 }
 type OrderHistoryDTO struct {
-	ID        string `json:"id"`
-	Symbol    string `json:"symbol"`
-	Market    string `json:"market"`
-	Side      string `json:"side"`
-	Type      string `json:"type"`
-	Price     string `json:"price"`
-	Quantity  string `json:"quantity"`
-	Filled    string `json:"filled"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	ID           string `json:"id"`
+	Symbol       string `json:"symbol"`
+	Market       string `json:"market"`
+	Side         string `json:"side"`
+	Type         string `json:"type"`
+	Price        string `json:"price"`
+	Quantity     string `json:"quantity"`
+	Filled       string `json:"filled"`
+	Status       string `json:"status"`
+	RejectReason string `json:"rejectReason,omitempty"`
+	// AvgFillPrice/FeePaid are aggregated across every fill that settled this
+	// order (an order can be partially filled at several prices, each with
+	// its own maker/taker fee). Both are "0" for an order with no fills.
+	AvgFillPrice string `json:"avgFillPrice"`
+	FeePaid      string `json:"feePaid"`
+	CreatedAt    string `json:"createdAt"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+// FillsResponse is the payload for GET /fills.
+type FillsResponse struct {
+	Fills      []FillDTO `json:"fills"`
+	NextCursor string    `json:"nextCursor,omitempty"`
+}
+
+// FillDTO is one individual trade execution belonging to the caller's
+// account — the fill-level complement to OrderHistoryDTO's per-order
+// aggregates.
+type FillDTO struct {
+	TradeID    string `json:"tradeId"`
+	OrderID    string `json:"orderId"`
+	Symbol     string `json:"symbol"`
+	Market     string `json:"market"`
+	Side       string `json:"side"`
+	Price      string `json:"price"`
+	Quantity   string `json:"quantity"`
+	FeePaid    string `json:"feePaid"`
+	ExecutedAt string `json:"executedAt"`
 }
 
 // BalanceResponse is the payload for GET /admin/balance.
