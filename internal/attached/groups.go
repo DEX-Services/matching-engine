@@ -22,10 +22,10 @@ type Group struct {
 	ID, AccountID, Symbol, ParentOrderID string
 	// EntrySide is the entry order's side. Both protective legs close the
 	// position, so they submit on the opposite side (entry BUY -> legs SELL).
-	EntrySide             models.OrderSide
-	ProtectedQty          decimal.Decimal
-	TakeProfit, StopLoss  *Leg
-	TriggeredLeg          string
+	EntrySide            models.OrderSide
+	ProtectedQty         decimal.Decimal
+	TakeProfit, StopLoss *Leg
+	TriggeredLeg         string
 }
 
 type Registry struct {

@@ -7,22 +7,22 @@ import "github.com/shopspring/decimal"
 type EventType string
 
 const (
-	EventOrderAccepted EventType = "ORDER_ACCEPTED"
-	EventOrderOpen     EventType = "ORDER_OPEN"
-	EventOrderFilled   EventType = "ORDER_FILLED"
-	EventOrderPartial  EventType = "ORDER_PARTIALLY_FILLED"
+	EventOrderAccepted  EventType = "ORDER_ACCEPTED"
+	EventOrderOpen      EventType = "ORDER_OPEN"
+	EventOrderFilled    EventType = "ORDER_FILLED"
+	EventOrderPartial   EventType = "ORDER_PARTIALLY_FILLED"
 	EventOrderCancelled EventType = "ORDER_CANCELLED"
-	EventOrderRejected EventType = "ORDER_REJECTED"
-	EventOrderExpired  EventType = "ORDER_EXPIRED"
-	EventTrade         EventType = "TRADE"
+	EventOrderRejected  EventType = "ORDER_REJECTED"
+	EventOrderExpired   EventType = "ORDER_EXPIRED"
+	EventTrade          EventType = "TRADE"
 	// EventTradeSettlementFailed is published instead of EventTrade when the
 	// settlement handler returns an error. Downstream consumers must NOT treat
 	// the trade as successful; the engine also halts the symbol for manual
 	// reconciliation.
 	EventTradeSettlementFailed EventType = "TRADE_SETTLEMENT_FAILED"
-	EventBookDelta     EventType = "BOOK_DELTA"
-	EventLiquidation   EventType = "LIQUIDATION"
-	EventFunding       EventType = "FUNDING"
+	EventBookDelta             EventType = "BOOK_DELTA"
+	EventLiquidation           EventType = "LIQUIDATION"
+	EventFunding               EventType = "FUNDING"
 	// EventRealizedPnl is published whenever a futures position is (fully or
 	// partially) closed, carrying the authoritative realized PnL/fee/margin
 	// figures for that close so they can be persisted and queried later —
@@ -69,10 +69,10 @@ type Funding struct {
 // normal reduce-only close that pays the same taker fee as any other trade,
 // so no separate fee field exists here beyond what trades already record.
 type RealizedPnl struct {
-	AccountID     string          `json:"accountId"`
-	Symbol        string          `json:"symbol"`
-	ClosedQty     decimal.Decimal `json:"closedQty"`
-	Pnl           decimal.Decimal `json:"pnl"`
+	AccountID      string          `json:"accountId"`
+	Symbol         string          `json:"symbol"`
+	ClosedQty      decimal.Decimal `json:"closedQty"`
+	Pnl            decimal.Decimal `json:"pnl"`
 	MarginReturned decimal.Decimal `json:"marginReturned"`
-	IsLiquidation bool            `json:"isLiquidation"`
+	IsLiquidation  bool            `json:"isLiquidation"`
 }

@@ -38,7 +38,7 @@ func TestListenerOCOCancelsSiblingOnFill(t *testing.T) {
 
 	// TP leg fills.
 	l.handle(&models.Event{
-		Type: models.EventOrderFilled,
+		Type:  models.EventOrderFilled,
 		Order: &models.Order{ID: "tp", GroupID: "g", GroupRole: "TP", AccountID: "acct", Symbol: "BTC-USDC"},
 	})
 

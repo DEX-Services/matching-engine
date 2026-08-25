@@ -359,7 +359,7 @@ func main() {
 		snap, trades, status, err := submitOrderPipeline(r.Context(), submitDeps{
 			reg: reg, ledger: ledger, backend: backend, checker: checker,
 			symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
-			pgPool: pgPool, mdSvc: mdSvc,
+			pgPool: pgPool, mdSvc: mdSvc, bus: bus,
 		}, o, q.Get("slippageBps"))
 		if err != nil {
 			http.Error(w, err.Error(), status)
@@ -379,7 +379,7 @@ func main() {
 	mux.HandleFunc("/attached-order", attachedOrderHandler(submitDeps{
 		reg: reg, ledger: ledger, backend: backend, checker: checker,
 		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
-		pgPool: pgPool, mdSvc: mdSvc,
+		pgPool: pgPool, mdSvc: mdSvc, bus: bus,
 	}, attachedReg))
 
 	mux.HandleFunc("/cancel", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
@@ -536,7 +536,7 @@ func main() {
 					ID: o.ID, Symbol: o.Symbol, Market: string(o.Market),
 					Side: string(o.Side), Price: o.Price.String(),
 					Qty: o.Quantity.String(), Filled: o.Filled.String(),
-					Status: string(o.Status),
+					Status:  string(o.Status),
 					GroupID: o.GroupID, GroupRole: o.GroupRole,
 				})
 			}

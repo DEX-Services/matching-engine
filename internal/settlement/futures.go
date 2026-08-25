@@ -198,9 +198,10 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 
 	if f.bus != nil {
 		f.bus.Publish(&models.Event{
-			Type:   models.EventRealizedPnl,
-			Symbol: symbol,
-			Market: string(models.Futures),
+			Type:           models.EventRealizedPnl,
+			Symbol:         symbol,
+			Market:         string(models.Futures),
+			SequenceNumber: f.bus.NextOutOfBandSequence(),
 			RealizedPnl: &models.RealizedPnl{
 				AccountID: accountID, Symbol: symbol,
 				ClosedQty: closeQty, Pnl: pnl, MarginReturned: releaseMargin,

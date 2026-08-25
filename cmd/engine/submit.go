@@ -7,6 +7,7 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/events"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
@@ -29,6 +30,36 @@ type submitDeps struct {
 	futuresSettlement *settlement.FuturesSettlement
 	pgPool            *pgxpool.Pool
 	mdSvc             *marketdata.Service
+	// bus publishes an EventOrderRejected for every order that fails before
+	// reaching reg.SubmitSnapshot (invalid slippageBps, reduce-only
+	// violation, option validation, config/tick/lot validation, risk check,
+	// reservation/lock failure). These orders have a real ID (assigned by
+	// the caller) but previously never reached the matching engine, so no
+	// event was ever published and no row was ever persisted for them - a
+	// rejected order at this stage was invisible to order history entirely.
+	// bus may be nil (e.g. in tests); rejectPipeline simply skips publishing.
+	bus *events.Bus
+}
+
+// rejectPipeline marks o rejected with reason, publishes an
+// EventOrderRejected (so the persistence writer records it exactly like any
+// other order event), and returns the (nil, nil, status, err) tuple every
+// early-return site in submitOrderPipeline needs. Centralized here so every
+// pre-book rejection path is persisted identically instead of some being
+// remembered and others not.
+func rejectPipeline(d submitDeps, o *models.Order, reason string, status int, err error) (*models.Order, []*models.Trade, int, error) {
+	o.Status = models.StatusRejected
+	o.RejectReason = reason
+	if d.bus != nil {
+		d.bus.Publish(&models.Event{
+			Type:           models.EventOrderRejected,
+			Symbol:         o.Symbol,
+			Market:         string(o.Market),
+			SequenceNumber: d.bus.NextOutOfBandSequence(),
+			Order:          o.Copy(),
+		})
+	}
+	return nil, nil, status, err
 }
 
 // submitOrderPipeline runs the exact validation/reservation/matching/release
@@ -49,11 +80,11 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	if o.Type == models.Market && slippageBps != "" {
 		bps, berr := decimal.NewFromString(slippageBps)
 		if berr != nil || bps.IsNegative() {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("invalid slippageBps")
+			return rejectPipeline(d, o, "invalid slippageBps", http.StatusBadRequest, fmt.Errorf("invalid slippageBps"))
 		}
 		eng, gerr := d.reg.Get(o.Symbol, o.Market)
 		if gerr != nil {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("invalid order: %w", gerr)
+			return rejectPipeline(d, o, gerr.Error(), http.StatusBadRequest, fmt.Errorf("invalid order: %w", gerr))
 		}
 		var refPrice decimal.Decimal
 		if o.IsBuy() {
@@ -80,7 +111,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	if o.ReduceOnly && o.Market == models.Futures && !o.InternalLiquidation {
 		pos := d.futuresSettlement.GetPosition(o.AccountID, o.Symbol)
 		if err := checkReduceOnly(o, pos); err != nil {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("invalid order: %w", err)
+			return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid order: %w", err))
 		}
 	}
 
@@ -89,15 +120,15 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	// different instruments never share a book.
 	if o.Market == models.Options {
 		if err := validateAndPrepareOption(ctx, d.pgPool, d.symbolRegistry, d.reg, d.mdSvc, o); err != nil {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("invalid option order: %w", err)
+			return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid option order: %w", err))
 		}
 	}
 
 	if err := validateOrderConfig(d.symbolRegistry, o); err != nil {
-		return nil, nil, http.StatusBadRequest, fmt.Errorf("invalid order: %w", err)
+		return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid order: %w", err))
 	}
 	if err := d.checker.Check(o); err != nil {
-		return nil, nil, http.StatusBadRequest, fmt.Errorf("risk: %w", err)
+		return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("risk: %w", err))
 	}
 
 	// Reservation. Compute the worst-case margin/notional to reserve so that
@@ -119,7 +150,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	if o.Type == models.Market || (o.Type == models.Stop && !o.Price.IsPositive()) {
 		eng, gerr := d.reg.Get(o.Symbol, o.Market)
 		if gerr != nil {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("risk: %w", gerr)
+			return rejectPipeline(d, o, gerr.Error(), http.StatusBadRequest, fmt.Errorf("risk: %w", gerr))
 		}
 		var estPrice decimal.Decimal
 		if o.IsBuy() {
@@ -141,7 +172,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 
 	if resAmount.IsPositive() {
 		if err := d.ledger.Reserve(o.AccountID, resAsset, resAmount); err != nil {
-			return nil, nil, http.StatusBadRequest, fmt.Errorf("risk: %w", err)
+			return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("risk: %w", err))
 		}
 		// Mirror the reservation into Postgres synchronously: if the real
 		// wallet doesn't have the funds (or Dex-Backend is unreachable), the
@@ -150,7 +181,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		if d.backend.Enabled() {
 			if err := d.backend.Lock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
 				d.ledger.Release(o.AccountID, resAsset, resAmount)
-				return nil, nil, http.StatusBadRequest, fmt.Errorf("risk: balance lock failed: %w", err)
+				return rejectPipeline(d, o, "balance lock failed: "+err.Error(), http.StatusBadRequest, fmt.Errorf("risk: balance lock failed: %w", err))
 			}
 		}
 	}

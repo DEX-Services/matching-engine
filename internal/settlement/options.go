@@ -273,9 +273,10 @@ func (p *ExpiryProcessor) publishExpiryEvent(pos *OptionsPosition, markPrice dec
 		return
 	}
 	p.bus.Publish(&models.Event{
-		Type:   models.EventOrderExpired,
-		Symbol: pos.Symbol,
-		Market: string(models.Options),
+		Type:           models.EventOrderExpired,
+		Symbol:         pos.Symbol,
+		Market:         string(models.Options),
+		SequenceNumber: p.bus.NextOutOfBandSequence(),
 		Order: &models.Order{
 			AccountID:   pos.AccountID,
 			Symbol:      pos.Symbol,

@@ -63,14 +63,14 @@ type Book struct {
 // New constructs an empty order book for the given symbol and market type.
 func New(symbol string, market models.MarketType) *Book {
 	return &Book{
-		symbol:     symbol,
-		market:     market,
-		bids:       make(map[string]*PriceLevel),
-		asks:       make(map[string]*PriceLevel),
-		bidPrices:  nil,
-		askPrices:  nil,
-		orderIndex: make(map[string]*models.Order),
-		stopOrders: make(map[string]*models.Order),
+		symbol:      symbol,
+		market:      market,
+		bids:        make(map[string]*PriceLevel),
+		asks:        make(map[string]*PriceLevel),
+		bidPrices:   nil,
+		askPrices:   nil,
+		orderIndex:  make(map[string]*models.Order),
+		stopOrders:  make(map[string]*models.Order),
 		tradeIDFunc: func() string { return uuid.NewString() },
 	}
 }

@@ -290,9 +290,10 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 	e.log.Warn("position liquidated", "account", pos.AccountID, "symbol", pos.Symbol, "size", closedSize.String())
 	if e.bus != nil {
 		e.bus.Publish(&models.Event{
-			Type:   models.EventLiquidation,
-			Symbol: pos.Symbol,
-			Market: string(models.Futures),
+			Type:           models.EventLiquidation,
+			Symbol:         pos.Symbol,
+			Market:         string(models.Futures),
+			SequenceNumber: e.bus.NextOutOfBandSequence(),
 			Liquidation: &models.Liquidation{
 				AccountID: pos.AccountID,
 				Symbol:    pos.Symbol,

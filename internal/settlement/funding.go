@@ -156,9 +156,10 @@ func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 		}
 		if f.bus != nil {
 			f.bus.Publish(&models.Event{
-				Type:   models.EventFunding,
-				Symbol: pos.Symbol,
-				Market: string(models.Futures),
+				Type:           models.EventFunding,
+				Symbol:         pos.Symbol,
+				Market:         string(models.Futures),
+				SequenceNumber: f.bus.NextOutOfBandSequence(),
 				Funding: &models.Funding{
 					AccountID: pos.AccountID,
 					Symbol:    pos.Symbol,
