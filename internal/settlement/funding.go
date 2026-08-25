@@ -126,10 +126,14 @@ func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 		return
 	}
 	indexTicker, err := f.marketdata.Ticker(cfg.UnderlyingSymbol, models.Spot)
-	indexPrice := ticker.MarkPrice
-	if err == nil && !indexTicker.MarkPrice.IsZero() {
-		indexPrice = indexTicker.MarkPrice
+	// Funding needs an independent index. Do not silently substitute the
+	// futures mark when the underlying spot/index market is unavailable: that
+	// makes the rate artificially zero and misrepresents a real settlement.
+	if err != nil || indexTicker.MarkPrice.IsZero() {
+		f.log.Warn("funding skipped: independent index unavailable", "symbol", cfg.Symbol, "underlying", cfg.UnderlyingSymbol)
+		return
 	}
+	indexPrice := indexTicker.MarkPrice
 
 	rate := CurrentFundingRate(ticker.MarkPrice, indexPrice)
 	if rate.IsZero() {
