@@ -111,6 +111,13 @@ type Order struct {
 	// InternalLiquidation marks an order forced by the liquidation engine;
 	// such orders bypass pre-trade risk checks (the position is already open).
 	InternalLiquidation bool `json:"-"`
+
+	// GroupID links a take-profit or stop-loss order back to the attached
+	// order group it protects (see internal/attached). Empty for ordinary
+	// orders. GroupRole distinguishes which leg this order is, so the OCO
+	// listener knows which sibling to cancel when this one fills/triggers.
+	GroupID   string `json:"groupId,omitempty"`
+	GroupRole string `json:"groupRole,omitempty"` // "TP" | "SL"
 }
 
 // RemainingQty returns the unfilled portion of the order.

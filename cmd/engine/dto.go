@@ -63,6 +63,12 @@ type OpenOrderDTO struct {
 	Qty    string `json:"qty"`
 	Filled string `json:"filled"`
 	Status string `json:"status"`
+	// GroupID/GroupRole are set only for a take-profit or stop-loss leg
+	// belonging to an attached order group (see internal/attached), so the
+	// frontend can show its TP/SL lifecycle instead of listing it as an
+	// ordinary standalone order. Empty for regular orders.
+	GroupID   string `json:"groupId,omitempty"`
+	GroupRole string `json:"groupRole,omitempty"` // "TP" | "SL"
 }
 
 // OrdersResponse is the payload for GET /orders.

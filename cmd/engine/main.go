@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dex/matching-engine/internal/attached"
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/cache"
 	"github.com/dex/matching-engine/internal/config"
@@ -224,6 +225,15 @@ func main() {
 	}
 	symbolRegistryRef.Store(symbolRegistry)
 
+	// Attached (TP/SL) order groups: OCO cancel-sibling-on-fill and
+	// fill/exposure-aware resize live outside the matching goroutine, as an
+	// event-bus subscriber - the same pattern as the ws hub and trade
+	// history writer above - so the matching core stays untouched.
+	attachedReg := attached.NewRegistry()
+	attachedCh := bus.Subscribe(10_000)
+	attachedListener := attached.NewListener(attachedReg, reg, reg, futuresSettlement)
+	go attachedListener.Run(attachedCh)
+
 	// Futures liquidation, funding, and options expiry background loops.
 	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)
 	go liqEngine.Run(ctx, time.Second)
@@ -346,183 +356,31 @@ func main() {
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
 		}
 
-		// Market-order slippage protection: an optional slippageBps query
-		// param caps how far a market order may walk the book from the best
-		// opposite quote at submission time. Without this, a market order
-		// against a thin book can execute at an arbitrarily bad price
-		// (matchAggressively applies no price limit to Market orders).
-		// Implemented here (rather than inside the matching core) by
-		// converting the order to an equivalent marketable LIMIT at the
-		// slippage-bounded price — this reuses the existing, well-tested
-		// price-limited matching path instead of adding a second code path.
-		if o.Type == models.Market {
-			if bpsStr := q.Get("slippageBps"); bpsStr != "" {
-				bps, berr := decimal.NewFromString(bpsStr)
-				if berr != nil || bps.IsNegative() {
-					http.Error(w, "invalid slippageBps", http.StatusBadRequest)
-					return
-				}
-				eng, gerr := reg.Get(o.Symbol, o.Market)
-				if gerr != nil {
-					http.Error(w, "invalid order: "+gerr.Error(), http.StatusBadRequest)
-					return
-				}
-				var refPrice decimal.Decimal
-				if o.IsBuy() {
-					refPrice = eng.BestAsk()
-				} else {
-					refPrice = eng.BestBid()
-				}
-				if refPrice.IsPositive() {
-					factor := bps.Div(decimal.NewFromInt(10000))
-					if o.IsBuy() {
-						o.Price = refPrice.Mul(decimal.NewFromInt(1).Add(factor))
-					} else {
-						o.Price = refPrice.Mul(decimal.NewFromInt(1).Sub(factor))
-					}
-					o.Type = models.IOC // marketable limit: fill up to the cap, cancel remainder, never rests
-				}
-			}
-		}
-
-		// Reduce-only enforcement (futures only): reject an order that would
-		// increase or flip the account's position instead of only shrinking
-		// it. Checked against the position as it stands at order-entry time;
-		// this is a pre-trade guard, not a per-fill clamp, consistent with
-		// how the reservation sizing below is also computed at entry time.
-		if o.ReduceOnly && o.Market == models.Futures && !o.InternalLiquidation {
-			pos := futuresSettlement.GetPosition(o.AccountID, o.Symbol)
-			if err := checkReduceOnly(o, pos); err != nil {
-				http.Error(w, "invalid order: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-
-		// Options require per-instrument validation and engine creation.
-		// Each option contract (unique strike/expiry/type) gets its own
-		// order book so different instruments never share a book.
-		if o.Market == models.Options {
-			if err := validateAndPrepareOption(ctx, pgPool, symbolRegistry, reg, mdSvc, o); err != nil {
-				http.Error(w, "invalid option order: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-		}
-
-		if err := validateOrderConfig(symbolRegistry, o); err != nil {
-			http.Error(w, "invalid order: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := checker.Check(o); err != nil {
-			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		// Reservation. Compute the worst-case margin/notional to reserve so
-		// that settlement's debit (at actual fill prices) never exceeds the
-		// reservation — which would either fail the debit (inconsistent
-		// ledger) or leak permanently-locked funds.
-		//
-		//   Market orders:   best opposite quote (no own price).
-		//   Stop-market orders (STOP with no limit Price): same worst-case
-		//     estimate as Market — the order rests untriggered but will
-		//     execute as a market order the instant it fires, so funds must
-		//     be reserved now, not at trigger time (the account could spend
-		//     the balance elsewhere in between otherwise).
-		//   Futures sell limit: max(limit, bestBid) — margin scales with fill
-		//     price, and the worst case for a short is filling at the best bid.
-		//   Buy limits / spot: the limit price (a buyer never pays more).
-		var resAsset string
-		var resAmount decimal.Decimal
-		if o.Type == models.Market || (o.Type == models.Stop && !o.Price.IsPositive()) {
-			eng, gerr := reg.Get(o.Symbol, o.Market)
-			if gerr != nil {
-				http.Error(w, "risk: "+gerr.Error(), http.StatusBadRequest)
-				return
-			}
-			var estPrice decimal.Decimal
-			if o.IsBuy() {
-				estPrice = eng.BestAsk()
-			} else {
-				estPrice = eng.BestBid()
-			}
-			resAsset, resAmount = risk.EstimatedRequired(o, estPrice)
-		} else if o.Market == models.Futures && o.Side == models.Sell {
-			resAsset, resAmount = risk.RequiredFor(o)
-			if eng, gerr := reg.Get(o.Symbol, o.Market); gerr == nil {
-				if bestBid := eng.BestBid(); bestBid.GreaterThan(o.Price) {
-					resAsset, resAmount = risk.EstimatedRequired(o, bestBid)
-				}
-			}
-		} else {
-			resAsset, resAmount = risk.RequiredFor(o)
-		}
-
-		if resAmount.IsPositive() {
-			if err := ledger.Reserve(o.AccountID, resAsset, resAmount); err != nil {
-				http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			// Mirror the reservation into Postgres synchronously: if the real
-			// wallet doesn't have the funds (or Dex-Backend is unreachable),
-			// the in-memory ledger and Postgres must not diverge, so roll
-			// back the local reservation and reject the order.
-			if backend.Enabled() {
-				if err := backend.Lock(r.Context(), o.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
-					ledger.Release(o.AccountID, resAsset, resAmount)
-					http.Error(w, "risk: balance lock failed: "+err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-		}
-
-		// releaseOverReservation releases the difference between what was
-		// reserved (at the worst-case price) and what settlement actually
-		// debited (at fill prices), minus the reservation still needed for
-		// any resting remainder (at the limit price, since a resting maker
-		// fills at its own price). This fixes the price-improvement leak for
-		// limit orders and generalises the market-order release to all types.
-		releaseOverReservation := func(trades []*models.Trade) {
-			filledDebit := risk.FilledDebit(o, trades)
-			_, restingReserved := risk.ReleaseAmountFor(o)
-			overReserved := resAmount.Sub(filledDebit).Sub(restingReserved)
-			if overReserved.IsPositive() {
-				ledger.Release(o.AccountID, resAsset, overReserved)
-				if backend.Enabled() {
-					backendclient.Async("unlock", func(ctx context.Context) error {
-						return backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(overReserved))
-					})
-				}
-			}
-		}
-
-		trades, snap, err := reg.SubmitSnapshot(o)
+		snap, trades, status, err := submitOrderPipeline(r.Context(), submitDeps{
+			reg: reg, ledger: ledger, backend: backend, checker: checker,
+			symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
+			pgPool: pgPool, mdSvc: mdSvc,
+		}, o, q.Get("slippageBps"))
 		if err != nil {
-			// Nothing filled in rejection paths (halt, FOK-not-filled,
-			// post-only-cross, invalid order) — release the full reservation.
-			if resAmount.IsPositive() {
-				ledger.Release(o.AccountID, resAsset, resAmount)
-				if backend.Enabled() {
-					backendclient.Async("unlock", func(ctx context.Context) error {
-						return backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount))
-					})
-				}
-			}
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), status)
 			return
 		}
-		// Release any unused reservation after settlement (price improvement
-		// on the filled portion + unfilled remainder for market/IOC orders).
-		releaseOverReservation(trades)
-		status := o.Status
 		filled := o.Filled
+		respStatus := o.Status
 		if snap != nil {
-			status = snap.Status
 			filled = snap.Filled
+			respStatus = snap.Status
 		}
 		writeJSON(w, http.StatusOK, OrderResponse{
-			OrderID: o.ID, Status: string(status), Filled: filled.String(), Trades: len(trades),
+			OrderID: o.ID, Status: string(respStatus), Filled: filled.String(), Trades: len(trades),
 		})
 	}))
+
+	mux.HandleFunc("/attached-order", attachedOrderHandler(submitDeps{
+		reg: reg, ledger: ledger, backend: backend, checker: checker,
+		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
+		pgPool: pgPool, mdSvc: mdSvc,
+	}, attachedReg))
 
 	mux.HandleFunc("/cancel", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -679,6 +537,7 @@ func main() {
 					Side: string(o.Side), Price: o.Price.String(),
 					Qty: o.Quantity.String(), Filled: o.Filled.String(),
 					Status: string(o.Status),
+					GroupID: o.GroupID, GroupRole: o.GroupRole,
 				})
 			}
 		}

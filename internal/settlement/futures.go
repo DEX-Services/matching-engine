@@ -348,4 +348,16 @@ func (f *FuturesSettlement) GetPosition(accountID, symbol string) *Position {
 	return &cp
 }
 
+// CurrentSize returns the account's current absolute position size for
+// symbol (zero if there is no open position). Implements
+// internal/attached.PositionSizer for the OCO/resize listener, which needs
+// exposure magnitude only, not direction.
+func (f *FuturesSettlement) CurrentSize(accountID, symbol string) decimal.Decimal {
+	pos := f.GetPosition(accountID, symbol)
+	if pos == nil {
+		return decimal.Zero
+	}
+	return pos.Size.Abs()
+}
+
 var _ Handler = (*FuturesSettlement)(nil)
