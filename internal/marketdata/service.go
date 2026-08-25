@@ -6,6 +6,7 @@ package marketdata
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
@@ -37,11 +38,31 @@ type Service struct {
 	mu         sync.RWMutex
 	books      map[string]BookReader      // key: symbol+":"+market
 	lastPrices map[string]decimal.Decimal // key: symbol+":"+market
+	trades     map[string][]recordedTrade // key: symbol+":"+market, oldest first
+}
+
+type recordedTrade struct {
+	price decimal.Decimal
+	qty   decimal.Decimal
+	at    time.Time
+}
+
+// Summary is the rolling, engine-derived market state used by the trade UI.
+// Change and volume cover the trailing 24 hours and are unavailable until the
+// engine has seen trades in that window.
+type Summary struct {
+	Symbol       string
+	Market       models.MarketType
+	Price        decimal.Decimal
+	Change24hPct decimal.Decimal
+	Volume24h    decimal.Decimal
+	Has24hData   bool
+	UpdatedAt    time.Time
 }
 
 // NewService creates an empty Service.
 func NewService() *Service {
-	return &Service{books: make(map[string]BookReader), lastPrices: make(map[string]decimal.Decimal)}
+	return &Service{books: make(map[string]BookReader), lastPrices: make(map[string]decimal.Decimal), trades: make(map[string][]recordedTrade)}
 }
 
 // Register adds a book reader for the given symbol/market.
@@ -54,13 +75,62 @@ func (s *Service) Register(symbol string, market models.MarketType, reader BookR
 // RecordTrade records the last trade price for a symbol/market, used to
 // compute a manipulation-resistant mark price. Called from the trade-event
 // subscriber goroutine in main.go.
-func (s *Service) RecordTrade(symbol string, market models.MarketType, price decimal.Decimal) {
+func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qty decimal.Decimal, at time.Time) {
 	if price.IsZero() || price.IsNegative() {
 		return
 	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	key := symbol + ":" + string(market)
 	s.mu.Lock()
-	s.lastPrices[symbol+":"+string(market)] = price
+	s.lastPrices[key] = price
+	cutoff := at.Add(-24 * time.Hour)
+	trades := append(s.trades[key], recordedTrade{price: price, qty: qty, at: at})
+	firstCurrent := 0
+	for firstCurrent < len(trades) && trades[firstCurrent].at.Before(cutoff) {
+		firstCurrent++
+	}
+	s.trades[key] = append([]recordedTrade(nil), trades[firstCurrent:]...)
 	s.mu.Unlock()
+}
+
+// Summary returns a price and rolling 24h change/volume from real engine
+// trades. It never synthesizes a value when there is no liquidity.
+func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, error) {
+	ticker, err := s.Ticker(symbol, market)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	key := symbol + ":" + string(market)
+	s.mu.Lock()
+	trades := s.trades[key]
+	cutoff := now.Add(-24 * time.Hour)
+	firstCurrent := 0
+	for firstCurrent < len(trades) && trades[firstCurrent].at.Before(cutoff) {
+		firstCurrent++
+	}
+	if firstCurrent > 0 {
+		trades = append([]recordedTrade(nil), trades[firstCurrent:]...)
+		s.trades[key] = trades
+	}
+	s.mu.Unlock()
+
+	price := ticker.MarkPrice
+	summary := &Summary{Symbol: symbol, Market: market, Price: price, UpdatedAt: now}
+	if len(trades) == 0 || price.IsZero() {
+		return summary, nil
+	}
+	opening := trades[0].price
+	if !opening.IsZero() {
+		summary.Change24hPct = price.Sub(opening).Div(opening).Mul(decimal.NewFromInt(100))
+	}
+	for _, trade := range trades {
+		summary.Volume24h = summary.Volume24h.Add(trade.price.Mul(trade.qty))
+	}
+	summary.Has24hData = true
+	return summary, nil
 }
 
 // Ticker returns a market data snapshot for symbol/market.

@@ -147,7 +147,7 @@ func main() {
 	go func() {
 		for evt := range priceCh {
 			if evt.Type == models.EventTrade && evt.Trade != nil {
-				mdSvc.RecordTrade(evt.Symbol, models.MarketType(evt.Market), evt.Trade.Price)
+				mdSvc.RecordTrade(evt.Symbol, models.MarketType(evt.Market), evt.Trade.Price, evt.Trade.Quantity, evt.Trade.ExecutedAt)
 			}
 		}
 	}()
@@ -250,6 +250,7 @@ func main() {
 	// only the five engines registered above; the frontend may continue to
 	// display other assets until their separate implementation is ready.
 	mux.HandleFunc("/markets", marketsHandler(symbolRegistry))
+	mux.HandleFunc("/market-summary", marketSummaryHandler(mdSvc))
 	// /ticker returns real JSON (was plain-text bid/ask/mid/spread with no
 	// mark price, funding, fee, or MMR — insufficient for the trade page's
 	// header, which was previously falling back to fabricated ±0.01%

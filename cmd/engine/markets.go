@@ -2,8 +2,10 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/shopspring/decimal"
 )
@@ -88,5 +90,33 @@ func currentMarketMetadata(symbols *config.Registry) []MarketMetadata {
 func marketsHandler(symbols *config.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, currentMarketMetadata(symbols))
+	}
+}
+
+type MarketSummaryResponse struct {
+	Symbol       string `json:"symbol"`
+	Market       string `json:"market"`
+	Price        string `json:"price"`
+	Change24hPct string `json:"change24hPct,omitempty"`
+	Volume24h    string `json:"volume24h,omitempty"`
+	Has24hData   bool   `json:"has24hData"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
+func marketSummaryHandler(data interface {
+	Summary(string, models.MarketType) (*marketdata.Summary, error)
+}) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		symbol, market := r.URL.Query().Get("symbol"), models.MarketType(r.URL.Query().Get("market"))
+		summary, err := data.Summary(symbol, market)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, MarketSummaryResponse{
+			Symbol: summary.Symbol, Market: string(summary.Market), Price: summary.Price.String(),
+			Change24hPct: summary.Change24hPct.String(), Volume24h: summary.Volume24h.String(),
+			Has24hData: summary.Has24hData, UpdatedAt: summary.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		})
 	}
 }
