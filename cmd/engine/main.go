@@ -124,17 +124,7 @@ func main() {
 	// instrument via GetOrCreate (see validateAndPrepareOption), not
 	// pre-registered here, because each strike/expiry/type contract needs
 	// its own order book.
-	pairs := []struct {
-		symbol string
-		market models.MarketType
-	}{
-		{"BTC-USDT", models.Spot},
-		{"ETH-USDT", models.Spot},
-		{"SOL-USDT", models.Spot},
-		{"BTC-USDC", models.Futures},
-		{"ETH-USDC", models.Futures},
-	}
-	for _, p := range pairs {
+	for _, p := range currentMarkets {
 		if _, err := reg.Register(p.symbol, p.market); err != nil {
 			slog.Error("register engine", "error", err)
 			os.Exit(1)
@@ -144,7 +134,7 @@ func main() {
 
 	// Phase 7: Market Data
 	mdSvc := marketdata.NewService()
-	for _, p := range pairs {
+	for _, p := range currentMarkets {
 		eng, _ := reg.Get(p.symbol, p.market)
 		mdSvc.Register(p.symbol, p.market, eng)
 	}
@@ -256,6 +246,10 @@ func main() {
 	// HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", hub.ServeWS)
+	// /markets is the authoritative executable-market catalogue. It contains
+	// only the five engines registered above; the frontend may continue to
+	// display other assets until their separate implementation is ready.
+	mux.HandleFunc("/markets", marketsHandler(symbolRegistry))
 	// /ticker returns real JSON (was plain-text bid/ask/mid/spread with no
 	// mark price, funding, fee, or MMR — insufficient for the trade page's
 	// header, which was previously falling back to fabricated ±0.01%
