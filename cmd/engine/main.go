@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -307,7 +308,7 @@ func main() {
 		}
 		fmt.Fprintf(w, "resumed %s/%s\n", sym, mkt)
 	})
-	mux.HandleFunc("/order", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/order", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -346,7 +347,7 @@ func main() {
 			Side: side, Type: orderType, Price: price, Quantity: qty,
 			TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			Leverage: leverage, MarginMode: q.Get("marginMode"), ReduceOnly: reduceOnly,
-			StopPrice: stopPrice,
+			StopPrice:  stopPrice,
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
 		}
 
@@ -526,9 +527,9 @@ func main() {
 		writeJSON(w, http.StatusOK, OrderResponse{
 			OrderID: o.ID, Status: string(status), Filled: filled.String(), Trades: len(trades),
 		})
-	})
+	}))
 
-	mux.HandleFunc("/cancel", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/cancel", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -588,7 +589,7 @@ func main() {
 		writeJSON(w, http.StatusOK, OrderResponse{
 			OrderID: order.ID, Status: string(order.Status), Filled: order.Filled.String(),
 		})
-	})
+	}))
 
 	mux.HandleFunc("/depth", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -652,7 +653,7 @@ func main() {
 		writeJSON(w, http.StatusOK, TradesResponse{Symbol: sym, Market: mkt, Trades: dtos})
 	})
 
-	mux.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/orders", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		account := r.URL.Query().Get("account")
 		if account == "" {
 			http.Error(w, "account is required", http.StatusBadRequest)
@@ -677,7 +678,7 @@ func main() {
 			}
 		}
 		writeJSON(w, http.StatusOK, OrdersResponse{Orders: out})
-	})
+	}))
 
 	// /order/status reports the real state of a single order so a maker bot can
 	// tell an actual (possibly partial) fill apart from a self-trade-prevention
@@ -686,7 +687,7 @@ func main() {
 	// book we fall back to the durable Postgres record. When neither knows the
 	// order (e.g. the async writer hasn't flushed it yet), found=false and the
 	// caller accounts nothing rather than assuming a full fill.
-	mux.HandleFunc("/order/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/order/status", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		orderID := q.Get("id")
 		symbol := q.Get("symbol")
@@ -718,9 +719,9 @@ func main() {
 			OrderID: orderID, Found: true, Resting: false,
 			Status: st.Status, Filled: st.Filled.String(),
 		})
-	})
+	}))
 
-	mux.HandleFunc("/admin/balance", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/balance", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		account := q.Get("account")
 		asset := q.Get("asset")
@@ -735,7 +736,7 @@ func main() {
 			Reserved:  ledger.Reserved(account, asset).String(),
 			Available: ledger.Available(account, asset).String(),
 		})
-	})
+	}))
 
 	// /internal/ledger/sync lets Dex-Backend keep the engine's in-memory risk
 	// ledger in step with real Postgres balance changes (deposits, approved
@@ -777,7 +778,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mux.HandleFunc("/positions", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/positions", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		account := q.Get("account")
 		if account == "" {
@@ -813,7 +814,7 @@ func main() {
 			})
 		}
 		writeJSON(w, http.StatusOK, out)
-	})
+	}))
 
 	mux.HandleFunc("/option-chain", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -914,6 +915,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// requireEngineServiceAuth protects account-scoped endpoints from direct
+// browser access. Dex-Backend and the bots service call these endpoints with
+// the shared service credential; end users reach them only through the
+// authenticated Dex-Backend gateway, which derives the account from the
+// wallet session rather than trusting a query parameter.
+func requireEngineServiceAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		secret := os.Getenv("DEX_BACKEND_ENGINE_SECRET")
+		if secret == "" || subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Engine-Secret")), []byte(secret)) != 1 {
+			http.Error(w, "not authorized", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // checkReduceOnly rejects a reduce-only order that would open a new
