@@ -121,6 +121,19 @@ CREATE TABLE IF NOT EXISTS funding_payments (
 
 CREATE INDEX IF NOT EXISTS funding_payments_account ON funding_payments (account_id, symbol);
 
+CREATE TABLE IF NOT EXISTS realized_pnl (
+    id              BIGSERIAL   PRIMARY KEY,
+    account_id      TEXT        NOT NULL,
+    symbol          TEXT        NOT NULL,
+    closed_qty      NUMERIC     NOT NULL,
+    pnl             NUMERIC     NOT NULL,
+    margin_returned NUMERIC     NOT NULL,
+    is_liquidation  BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS realized_pnl_account ON realized_pnl (account_id, symbol, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS option_positions (
     account_id   TEXT        NOT NULL,
     symbol       TEXT        NOT NULL,

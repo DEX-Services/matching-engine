@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/backendclient"
+	"github.com/dex/matching-engine/internal/events"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/shopspring/decimal"
@@ -73,6 +74,7 @@ func (p *Position) PnL(markPrice decimal.Decimal) decimal.Decimal {
 type FuturesSettlement struct {
 	ledger    *risk.Ledger
 	backend   *backendclient.Client
+	bus       *events.Bus
 	mu        sync.RWMutex
 	positions map[string]*Position // key: accountID+":"+symbol
 }
@@ -80,13 +82,16 @@ type FuturesSettlement struct {
 // NewFuturesSettlement creates a FuturesSettlement backed by the given ledger.
 // backend is the shared Postgres balance-lock bridge (may be a disabled
 // no-op client); pass the same instance used elsewhere so config is loaded once.
-func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client) *FuturesSettlement {
+// bus may be nil (e.g. in tests); realized-PnL events are simply not
+// published in that case.
+func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client, bus *events.Bus) *FuturesSettlement {
 	if backend == nil {
 		backend = &backendclient.Client{}
 	}
 	return &FuturesSettlement{
 		ledger:    ledger,
 		backend:   backend,
+		bus:       bus,
 		positions: make(map[string]*Position),
 	}
 }
@@ -110,10 +115,10 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode); err != nil {
+	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode, trade.BuyOrder.InternalLiquidation); err != nil {
 		return fmt.Errorf("futures: apply buyer fill: %w", err)
 	}
-	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode); err != nil {
+	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode, trade.SellOrder.InternalLiquidation); err != nil {
 		return fmt.Errorf("futures: apply seller fill: %w", err)
 	}
 
@@ -127,7 +132,7 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 // realizing PnL and releasing margin) and, on overfill, opens a new position
 // in the new direction with the remaining quantity.
 func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side models.OrderSide,
-	qty, price decimal.Decimal, leverage int, marginMode string) error {
+	qty, price decimal.Decimal, leverage int, marginMode string, isLiquidation bool) error {
 	existing := f.GetPosition(accountID, symbol)
 
 	if existing == nil || existing.Side == side {
@@ -146,7 +151,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 	closeQty := decimal.Min(qty, existing.Size)
 	openQty := qty.Sub(closeQty)
 
-	f.closePortion(accountID, symbol, quoteAsset, price, closeQty)
+	f.closePortion(accountID, symbol, quoteAsset, price, closeQty, isLiquidation)
 
 	if openQty.IsPositive() {
 		notional := price.Mul(openQty)
@@ -166,7 +171,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 // closeQty of accountID's existing position at symbol, crediting the result
 // to the ledger and (asynchronously) to Postgres. Deletes the position if it
 // is fully closed.
-func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal) {
+func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal, isLiquidation bool) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -190,6 +195,19 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 	f.mu.Unlock()
 
 	f.realizeAndCredit(accountID, quoteAsset, releaseMargin, pnl, !crossMargin)
+
+	if f.bus != nil {
+		f.bus.Publish(&models.Event{
+			Type:   models.EventRealizedPnl,
+			Symbol: symbol,
+			Market: string(models.Futures),
+			RealizedPnl: &models.RealizedPnl{
+				AccountID: accountID, Symbol: symbol,
+				ClosedQty: closeQty, Pnl: pnl, MarginReturned: releaseMargin,
+				IsLiquidation: isLiquidation,
+			},
+		})
+	}
 }
 
 // realizeAndCredit settles a released margin amount plus realized PnL back

@@ -23,6 +23,12 @@ const (
 	EventBookDelta     EventType = "BOOK_DELTA"
 	EventLiquidation   EventType = "LIQUIDATION"
 	EventFunding       EventType = "FUNDING"
+	// EventRealizedPnl is published whenever a futures position is (fully or
+	// partially) closed, carrying the authoritative realized PnL/fee/margin
+	// figures for that close so they can be persisted and queried later —
+	// the settlement math already existed in FuturesSettlement.closePortion,
+	// but was previously applied to the ledger only, never recorded.
+	EventRealizedPnl EventType = "REALIZED_PNL"
 )
 
 // Event is published outbound from the matching goroutine.
@@ -37,6 +43,7 @@ type Event struct {
 	Trade       *Trade       `json:"trade,omitempty"`
 	Liquidation *Liquidation `json:"liquidation,omitempty"`
 	Funding     *Funding     `json:"funding,omitempty"`
+	RealizedPnl *RealizedPnl `json:"realizedPnl,omitempty"`
 }
 
 // Liquidation describes a forced position close.
@@ -54,4 +61,18 @@ type Funding struct {
 	Symbol    string          `json:"symbol"`
 	Rate      decimal.Decimal `json:"rate"`
 	Payment   decimal.Decimal `json:"payment"`
+}
+
+// RealizedPnl describes one position-closing settlement (full or partial).
+// IsLiquidation distinguishes a forced close from a voluntary one; this
+// engine has no separate "liquidation fee" concept — a liquidation is a
+// normal reduce-only close that pays the same taker fee as any other trade,
+// so no separate fee field exists here beyond what trades already record.
+type RealizedPnl struct {
+	AccountID     string          `json:"accountId"`
+	Symbol        string          `json:"symbol"`
+	ClosedQty     decimal.Decimal `json:"closedQty"`
+	Pnl           decimal.Decimal `json:"pnl"`
+	MarginReturned decimal.Decimal `json:"marginReturned"`
+	IsLiquidation bool            `json:"isLiquidation"`
 }

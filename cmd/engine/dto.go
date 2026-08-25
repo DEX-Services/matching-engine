@@ -142,6 +142,39 @@ type FuturesPositionDTO struct {
 	UnrealizedPnl string `json:"unrealizedPnl"`
 }
 
+// FundingHistoryResponse is the payload for GET /funding-history.
+type FundingHistoryResponse struct {
+	Payments   []FundingPaymentDTO `json:"payments"`
+	NextCursor string              `json:"nextCursor,omitempty"`
+}
+
+// FundingPaymentDTO is one persisted funding settlement.
+type FundingPaymentDTO struct {
+	Symbol    string `json:"symbol"`
+	Rate      string `json:"rate"`
+	Amount    string `json:"amount"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// PnlHistoryResponse is the payload for GET /pnl-history.
+type PnlHistoryResponse struct {
+	Entries    []RealizedPnlDTO `json:"entries"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+}
+
+// RealizedPnlDTO is one persisted position-closing settlement (full or
+// partial). IsLiquidation marks a forced close; this engine has no separate
+// liquidation-fee concept — a liquidation pays the same taker fee as any
+// other close, already reflected in the fee on the underlying fill.
+type RealizedPnlDTO struct {
+	Symbol         string `json:"symbol"`
+	ClosedQty      string `json:"closedQty"`
+	Pnl            string `json:"pnl"`
+	MarginReturned string `json:"marginReturned"`
+	IsLiquidation  bool   `json:"isLiquidation"`
+	CreatedAt      string `json:"createdAt"`
+}
+
 // OptionsPositionDTO is one open options position in a GET /positions response.
 type OptionsPositionDTO struct {
 	Symbol      string `json:"symbol"`

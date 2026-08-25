@@ -75,7 +75,7 @@ func main() {
 	// Futures/Options settlement handlers are shared singletons (not one per
 	// symbol) so the liquidation engine, funding scheduler, and expiry
 	// processor can see every open position across all registered markets.
-	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend)
+	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend, bus)
 	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
 
 	// Phase 6: Settlement factory. Fee lookup is late-bound: symbolRegistry is
@@ -610,6 +610,77 @@ func main() {
 		resp := FillsResponse{Fills: out}
 		if len(out) > 0 {
 			resp.NextCursor = out[len(out)-1].ExecutedAt
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
+
+	// /funding-history is the persisted, queryable complement to the live
+	// WebSocket FUNDING event: previously the frontend only had the
+	// ephemeral WS stream (capped client-side, wiped on refresh), even
+	// though funding payments were already being written to Postgres.
+	mux.HandleFunc("/funding-history", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		account := q.Get("account")
+		if account == "" {
+			http.Error(w, "account is required", http.StatusBadRequest)
+			return
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		before, _ := time.Parse(time.RFC3339Nano, q.Get("before"))
+		after, _ := time.Parse(time.RFC3339Nano, q.Get("after"))
+		items, err := persistence.FundingHistory(r.Context(), pgPool, persistence.HistoryFilter{
+			Account: account, Symbol: q.Get("symbol"), After: after, Before: before, Limit: limit,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out := make([]FundingPaymentDTO, 0, len(items))
+		for _, it := range items {
+			out = append(out, FundingPaymentDTO{
+				Symbol: it.Symbol, Rate: it.Rate.String(), Amount: it.Amount.String(),
+				CreatedAt: it.CreatedAt.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		resp := FundingHistoryResponse{Payments: out}
+		if len(out) > 0 {
+			resp.NextCursor = out[len(out)-1].CreatedAt
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}))
+
+	// /pnl-history returns authoritative realized PnL per position close
+	// (full or partial), including whether it was a forced liquidation.
+	// This settlement math already existed in FuturesSettlement.closePortion
+	// but was previously applied to the ledger only, never recorded.
+	mux.HandleFunc("/pnl-history", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		account := q.Get("account")
+		if account == "" {
+			http.Error(w, "account is required", http.StatusBadRequest)
+			return
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		before, _ := time.Parse(time.RFC3339Nano, q.Get("before"))
+		after, _ := time.Parse(time.RFC3339Nano, q.Get("after"))
+		items, err := persistence.RealizedPnlHistory(r.Context(), pgPool, persistence.HistoryFilter{
+			Account: account, Symbol: q.Get("symbol"), After: after, Before: before, Limit: limit,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out := make([]RealizedPnlDTO, 0, len(items))
+		for _, it := range items {
+			out = append(out, RealizedPnlDTO{
+				Symbol: it.Symbol, ClosedQty: it.ClosedQty.String(), Pnl: it.Pnl.String(),
+				MarginReturned: it.MarginReturned.String(), IsLiquidation: it.IsLiquidation,
+				CreatedAt: it.CreatedAt.UTC().Format(time.RFC3339Nano),
+			})
+		}
+		resp := PnlHistoryResponse{Entries: out}
+		if len(out) > 0 {
+			resp.NextCursor = out[len(out)-1].CreatedAt
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}))

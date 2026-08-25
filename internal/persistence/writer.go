@@ -161,6 +161,18 @@ func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
 		}
 	}
 
+	// Insert realized PnL if the event carries one.
+	if evt.RealizedPnl != nil {
+		p := evt.RealizedPnl
+		_, err = tx.Exec(ctx, `
+			INSERT INTO realized_pnl (account_id, symbol, closed_qty, pnl, margin_returned, is_liquidation)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			p.AccountID, p.Symbol, p.ClosedQty, p.Pnl, p.MarginReturned, p.IsLiquidation)
+		if err != nil {
+			return fmt.Errorf("insert realized pnl: %w", err)
+		}
+	}
+
 	return tx.Commit(ctx)
 }
 
