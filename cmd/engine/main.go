@@ -991,6 +991,23 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 			return fmt.Errorf("notional %s below min notional %s", notional, cfg.MinNotional)
 		}
 	}
+	if err := validateConfiguredLeverage(cfg, o); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateConfiguredLeverage(cfg *config.SymbolConfig, o *models.Order) error {
+	if o.Market != models.Futures || cfg.MaxLeverage <= 0 {
+		return nil
+	}
+	leverage := o.Leverage
+	if leverage < 1 {
+		leverage = 10 // matches settlement's legacy default for omitted leverage.
+	}
+	if leverage > cfg.MaxLeverage {
+		return fmt.Errorf("leverage %dx exceeds maximum %dx", leverage, cfg.MaxLeverage)
+	}
 	return nil
 }
 

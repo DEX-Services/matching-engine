@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/models"
 )
 
 func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
@@ -25,5 +26,17 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	}
 	if got[0].TickSize != "0.01" || len(got[0].EnabledOrderTypes) != 6 {
 		t.Fatalf("missing usable metadata: %#v", got[0])
+	}
+}
+
+func TestValidateConfiguredLeverage(t *testing.T) {
+	cfg := &config.SymbolConfig{MaxLeverage: 75}
+	order := &models.Order{Market: models.Futures, Leverage: 76}
+	if err := validateConfiguredLeverage(cfg, order); err == nil {
+		t.Fatal("expected leverage above configured maximum to be rejected")
+	}
+	order.Leverage = 75
+	if err := validateConfiguredLeverage(cfg, order); err != nil {
+		t.Fatalf("configured maximum should be accepted: %v", err)
 	}
 }
