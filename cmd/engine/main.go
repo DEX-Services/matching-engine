@@ -538,8 +538,18 @@ func main() {
 		symbol := q.Get("symbol")
 		market := models.MarketType(q.Get("market"))
 		orderID := q.Get("order_id")
-		if symbol == "" || orderID == "" {
-			http.Error(w, "symbol and order_id are required", http.StatusBadRequest)
+		accountID := q.Get("account")
+		if symbol == "" || orderID == "" || accountID == "" {
+			http.Error(w, "symbol, order_id, and account are required", http.StatusBadRequest)
+			return
+		}
+		order, resting, lookupErr := reg.OrderByID(symbol, market, orderID)
+		if lookupErr != nil || !resting {
+			http.Error(w, "order not found", http.StatusNotFound)
+			return
+		}
+		if order.AccountID != accountID {
+			http.Error(w, "not authorized to cancel this order", http.StatusForbidden)
 			return
 		}
 		order, err := reg.Cancel(symbol, market, orderID)
