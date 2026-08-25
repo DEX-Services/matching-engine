@@ -25,3 +25,18 @@ func TestActivateUsesActualFillAndResizeNeverExceedsExposure(t *testing.T) {
 		t.Fatal("closed exposure must remove exits")
 	}
 }
+
+func TestTriggerEnforcesOCO(t *testing.T) {
+	r := NewRegistry()
+	g := Group{ID: "g", ParentOrderID: "p", TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
+	if err := r.Activate(g, decimal.NewFromInt(1)); err != nil {
+		t.Fatal(err)
+	}
+	got, peer, err := r.Trigger("g", "tp")
+	if err != nil || peer != "sl" || got.StopLoss.Active {
+		t.Fatalf("oco result=%#v peer=%q err=%v", got, peer, err)
+	}
+	if _, _, err := r.Trigger("g", "sl"); err == nil {
+		t.Fatal("second leg must be rejected")
+	}
+}

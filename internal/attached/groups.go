@@ -12,12 +12,14 @@ type Leg struct {
 	ID         string
 	StopPrice  decimal.Decimal
 	LimitPrice decimal.Decimal
+	Active     bool
 }
 
 type Group struct {
 	ID, AccountID, Symbol, ParentOrderID string
 	ProtectedQty                         decimal.Decimal
 	TakeProfit, StopLoss                 *Leg
+	TriggeredLeg                         string
 }
 
 type Registry struct {
@@ -40,8 +42,49 @@ func (r *Registry) Activate(g Group, filled decimal.Decimal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	copy := g
+	if copy.TakeProfit != nil {
+		copy.TakeProfit.Active = true
+	}
+	if copy.StopLoss != nil {
+		copy.StopLoss.Active = true
+	}
 	r.groups[g.ID] = &copy
 	return nil
+}
+
+// Trigger marks one protective leg as consumed and returns the peer that must
+// be cancelled atomically by the order executor (OCO semantics).
+func (r *Registry) Trigger(id, legID string) (*Group, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g, ok := r.groups[id]
+	if !ok {
+		return nil, "", fmt.Errorf("attached group not found")
+	}
+	if g.TriggeredLeg != "" {
+		return nil, "", fmt.Errorf("attached group already triggered")
+	}
+	if (g.TakeProfit == nil || g.TakeProfit.ID != legID) && (g.StopLoss == nil || g.StopLoss.ID != legID) {
+		return nil, "", fmt.Errorf("leg does not belong to group")
+	}
+	g.TriggeredLeg = legID
+	peer := ""
+	if g.TakeProfit != nil && g.TakeProfit.ID == legID {
+		g.TakeProfit.Active = false
+		if g.StopLoss != nil {
+			g.StopLoss.Active = false
+			peer = g.StopLoss.ID
+		}
+	}
+	if g.StopLoss != nil && g.StopLoss.ID == legID {
+		g.StopLoss.Active = false
+		if g.TakeProfit != nil {
+			g.TakeProfit.Active = false
+			peer = g.TakeProfit.ID
+		}
+	}
+	copy := *g
+	return &copy, peer, nil
 }
 
 // Resize caps protection to remaining exposure; zero exposure removes it.
