@@ -22,7 +22,7 @@ type TradeDTO struct {
 	Market    string `json:"market"`
 	Price     string `json:"price"`
 	Quantity  string `json:"quantity"`
-	Side      string `json:"side"` // taker side: BUY or SELL
+	Side      string `json:"side"`      // taker side: BUY or SELL
 	Timestamp int64  `json:"timestamp"` // unix millis
 }
 
@@ -68,6 +68,24 @@ type OpenOrderDTO struct {
 // OrdersResponse is the payload for GET /orders.
 type OrdersResponse struct {
 	Orders []OpenOrderDTO `json:"orders"`
+}
+
+type OrderHistoryResponse struct {
+	Orders     []OrderHistoryDTO `json:"orders"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+}
+type OrderHistoryDTO struct {
+	ID        string `json:"id"`
+	Symbol    string `json:"symbol"`
+	Market    string `json:"market"`
+	Side      string `json:"side"`
+	Type      string `json:"type"`
+	Price     string `json:"price"`
+	Quantity  string `json:"quantity"`
+	Filled    string `json:"filled"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+	UpdatedAt string `json:"updatedAt"`
 }
 
 // BalanceResponse is the payload for GET /admin/balance.
