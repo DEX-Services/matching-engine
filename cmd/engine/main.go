@@ -434,9 +434,13 @@ func main() {
 					if amount.IsPositive() {
 						ledger.Release(order.AccountID, asset, amount)
 						if backend.Enabled() {
-							backendclient.Async("unlock", func(ctx context.Context) error {
-								return backend.Unlock(ctx, order.AccountID, asset, backendclient.ToRawUnits(amount))
-							})
+							// A cancellation must durably release its hold before the
+							// caller can place replacement quotes. Async unlocks raced
+							// the next MM ladder and caused false insufficient-balance
+							// rejections.
+							if err := backend.Unlock(r.Context(), order.AccountID, asset, backendclient.ToRawUnits(amount)); err != nil {
+								slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
+							}
 						}
 					}
 				}
@@ -444,9 +448,11 @@ func main() {
 		} else {
 			checker.Release(order)
 			if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
-				backendclient.Async("unlock", func(ctx context.Context) error {
-					return backend.Unlock(ctx, order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount))
-				})
+				// Wait for the durable release before acknowledging cancellation;
+				// market makers immediately replace cancelled orders.
+				if err := backend.Unlock(r.Context(), order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount)); err != nil {
+					slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
+				}
 			}
 		}
 		writeJSON(w, http.StatusOK, OrderResponse{

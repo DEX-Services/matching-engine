@@ -115,3 +115,30 @@ func TestRejectReason_SelfTradePrevention(t *testing.T) {
 		t.Fatalf("expected the resting order to be self-trade-cancelled with a reason, got %#v", cancelled)
 	}
 }
+
+func TestSelfTradePreventionDoesNotCancelNonCrossingQuotes(t *testing.T) {
+	b := New("BTC-USDT", models.Spot)
+	ask := &models.Order{
+		ID: "ask", AccountID: "mm", Symbol: "BTC-USDT", Market: models.Spot,
+		Side: models.Sell, Type: models.Limit, TimeInForce: models.GTC,
+		Price: decimal.RequireFromString("101"), Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
+	}
+	bid := &models.Order{
+		ID: "bid", AccountID: "mm", Symbol: "BTC-USDT", Market: models.Spot,
+		Side: models.Buy, Type: models.Limit, TimeInForce: models.GTC,
+		Price: decimal.RequireFromString("100"), Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
+	}
+	if _, _, err := b.Submit(ask); err != nil {
+		t.Fatal(err)
+	}
+	trades, cancelled, err := b.Submit(bid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(trades) != 0 || len(cancelled) != 0 {
+		t.Fatalf("non-crossing self quotes must both rest, trades=%d cancelled=%d", len(trades), len(cancelled))
+	}
+	if bid.Status != models.StatusOpen || ask.Status != models.StatusOpen {
+		t.Fatalf("quotes did not remain open: bid=%s ask=%s", bid.Status, ask.Status)
+	}
+}

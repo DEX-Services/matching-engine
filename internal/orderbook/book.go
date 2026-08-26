@@ -295,9 +295,18 @@ func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*m
 			break
 		}
 
-		// Self-trade prevention: an account may not match against its own
-		// resting order. Cancel the resting maker and try the next order at
-		// this price level (or the next level, once this one empties out).
+		// Price check: limit aggressors may not execute at a worse price.
+		if aggressor.Type == models.Limit || aggressor.Type == models.IOC ||
+			aggressor.Type == models.FOK || aggressor.Type == models.PostOnly {
+			if !b.priceAcceptable(aggressor, maker.Price) {
+				break
+			}
+		}
+
+		// Self-trade prevention only applies after this incoming order is
+		// actually price-crossing. Applying it first incorrectly cancelled
+		// non-crossing quotes from the same market maker, leaving one-sided
+		// books even when bids and asks were safely separated.
 		if aggressor.AccountID != "" && maker.AccountID == aggressor.AccountID {
 			maker.Status = models.StatusCancelled
 			maker.RejectReason = "cancelled: self-trade prevention"
@@ -305,14 +314,6 @@ func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*m
 			b.removeFromBook(maker)
 			cancelledMakers = append(cancelledMakers, maker)
 			continue
-		}
-
-		// Price check: limit aggressors may not execute at a worse price.
-		if aggressor.Type == models.Limit || aggressor.Type == models.IOC ||
-			aggressor.Type == models.FOK || aggressor.Type == models.PostOnly {
-			if !b.priceAcceptable(aggressor, maker.Price) {
-				break
-			}
 		}
 
 		// Determine fill quantity: minimum of remaining on both sides.

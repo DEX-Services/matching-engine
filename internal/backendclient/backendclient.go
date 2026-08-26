@@ -11,9 +11,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -54,7 +56,10 @@ func New() *Client {
 	return &Client{
 		baseURL: base,
 		secret:  secret,
-		http:    &http.Client{Timeout: 5 * time.Second},
+		// A lock/unlock touches a remote Postgres instance. Five seconds was too
+		// short during a full market-maker ladder cancellation and left durable
+		// locks behind, starving the next quote cycle.
+		http: &http.Client{Timeout: 20 * time.Second},
 	}
 }
 
@@ -148,7 +153,8 @@ func (c *Client) call(ctx context.Context, path, userID, asset, amount string) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("backendclient %s: status %d", path, resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backendclient %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
