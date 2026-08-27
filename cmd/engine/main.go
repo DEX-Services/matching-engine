@@ -246,7 +246,11 @@ func main() {
 
 	// Phase 5: Redis
 	if os.Getenv("REDIS_SERVICE_URI") != "" {
-		if rc, err := cache.NewClient(ctx); err == nil {
+		// Redis is optional cache infrastructure. Never let a transient remote
+		// connection stall the trading HTTP server indefinitely at startup.
+		redisCtx, redisCancel := context.WithTimeout(ctx, 8*time.Second)
+		defer redisCancel()
+		if rc, err := cache.NewClient(redisCtx); err == nil {
 			defer rc.Close()
 		} else {
 			slog.Warn("redis disabled", "reason", err)
