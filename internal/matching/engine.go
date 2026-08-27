@@ -28,6 +28,7 @@ const (
 	reqAllOrders
 	reqOrderByID
 	reqDepth
+	reqReplaceAccountOrders
 )
 
 type request struct {
@@ -37,6 +38,8 @@ type request struct {
 	newPrice decimal.Decimal // reqModify
 	newQty   decimal.Decimal // reqModify
 	levels   int             // reqDepth
+	account  string          // reqReplaceAccountOrders
+	orders   []*models.Order // reqReplaceAccountOrders
 	snapshot bool            // reqSubmit: also populate result.orderSnapshot
 	resultCh chan<- result
 }
@@ -45,6 +48,7 @@ type result struct {
 	order         *models.Order
 	orderSnapshot *models.Order
 	orders        []*models.Order
+	accepted      []*models.Order
 	trades        []*models.Trade
 	err           error
 	found         bool
@@ -177,6 +181,18 @@ func (e *Engine) AllOrders() []*models.Order {
 	e.inputCh <- request{kind: reqAllOrders, resultCh: ch}
 	r := <-ch
 	return r.orders
+}
+
+// ReplaceAccountOrders removes every resting order owned by account and
+// installs orders as one command on the symbol goroutine.  Readers cannot
+// observe the transient empty book because Depth/AllOrders are queued behind
+// this command.  Events are emitted only after the complete replacement has
+// been applied.
+func (e *Engine) ReplaceAccountOrders(account string, orders []*models.Order) (removed, accepted []*models.Order, err error) {
+	ch := make(chan result, 1)
+	e.inputCh <- request{kind: reqReplaceAccountOrders, account: account, orders: orders, resultCh: ch}
+	r := <-ch
+	return r.orders, r.accepted, r.err
 }
 
 // OrderByID returns a copy of a resting order by ID and whether it was found in
@@ -325,6 +341,71 @@ func (e *Engine) handle(req request) {
 		res.bids, res.asks = e.book.Depth(req.levels)
 		res.bestBid = e.book.BestBid()
 		res.bestAsk = e.book.BestAsk()
+
+	case reqReplaceAccountOrders:
+		if e.halted.Load() {
+			res.err = fmt.Errorf("symbol %s/%s is halted", e.symbol, e.market)
+			break
+		}
+		// Validate the complete target before touching the current ladder. The
+		// MM endpoint performs risk/config checks; this guards accidental
+		// cross-symbol/account requests at the matching boundary.
+		for _, o := range req.orders {
+			if o == nil || o.AccountID != req.account || o.Symbol != e.symbol || o.Market != e.market || !o.Price.IsPositive() || !o.Quantity.IsPositive() {
+				res.err = fmt.Errorf("invalid replacement order")
+				break
+			}
+		}
+		if res.err != nil {
+			break
+		}
+		for _, o := range e.book.AllOrders() {
+			if o.AccountID != req.account {
+				continue
+			}
+			cancelled, err := e.book.Cancel(o.ID)
+			if err != nil {
+				res.err = err
+				break
+			}
+			res.orders = append(res.orders, cancelled)
+		}
+		if res.err != nil {
+			break
+		}
+		for _, o := range req.orders {
+			trades, cancelled, err := e.book.Submit(o)
+			if err != nil {
+				res.err = err
+				break
+			}
+			// MM quotes are non-crossing by construction. Treat a crossing or
+			// self-trade cancellation as a failed replacement rather than
+			// exposing a partial ladder.
+			if len(trades) != 0 || len(cancelled) != 0 || o.Status != models.StatusOpen {
+				res.err = fmt.Errorf("replacement quote did not rest")
+				break
+			}
+			res.accepted = append(res.accepted, o.Copy())
+		}
+		if res.err != nil {
+			// The endpoint only sends passive, prevalidated ladders. This path
+			// is defensive; remove any partially installed target before return.
+			for _, o := range res.accepted {
+				_, _ = e.book.Cancel(o.ID)
+			}
+			res.accepted = nil
+			break
+		}
+		// Publish after the complete book state is installed. Consumers that
+		// fetch depth in response see the full new ladder, never a side-by-side
+		// cancel/place transition.
+		for _, o := range res.orders {
+			e.publishEvent(models.EventOrderCancelled, o, nil)
+		}
+		for _, o := range res.accepted {
+			e.publishEvent(models.EventOrderOpen, o, nil)
+		}
 	}
 	req.resultCh <- res
 }

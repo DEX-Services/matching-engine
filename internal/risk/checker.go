@@ -139,7 +139,18 @@ func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset str
 func FilledDebit(order *models.Order, trades []*models.Trade) decimal.Decimal {
 	total := decimal.Zero
 	for _, t := range trades {
-		total = total.Add(notionalFor(order, t.Quantity, t.Price))
+		debit := notionalFor(order, t.Quantity, t.Price)
+		// Spot buyers pay their maker/taker fee in quote, so releasing only
+		// notional would unlock the fee that must remain reserved until this
+		// exact fill settles.
+		if order.Market == models.Spot && order.Side == models.Buy {
+			if t.MakerSide == models.Buy {
+				debit = debit.Add(t.MakerFeePaid)
+			} else {
+				debit = debit.Add(t.TakerFeePaid)
+			}
+		}
+		total = total.Add(debit)
 	}
 	return total
 }

@@ -86,6 +86,34 @@ func (l *Ledger) Release(accountID, asset string, amount decimal.Decimal) {
 	l.reserved[accountID][asset] = decimal.Max(decimal.Zero, cur.Sub(amount))
 }
 
+// ReplaceReservations sets the reservation totals for an account in one
+// critical section. It is used only by dedicated market-maker accounts, where
+// the supplied targets represent the account's entire active quote ladder.
+// Validation happens before any mutation, so an insufficient replacement
+// leaves the previous reservations untouched.
+func (l *Ledger) ReplaceReservations(accountID string, targets map[string]decimal.Decimal) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ensure(accountID)
+	for asset, target := range targets {
+		if target.IsNegative() {
+			return fmt.Errorf("negative reservation for %s", asset)
+		}
+		if l.balances[accountID][asset].LessThan(target) {
+			return fmt.Errorf("insufficient %s for %s: balance=%s required=%s", asset, accountID, l.balances[accountID][asset], target)
+		}
+	}
+	for asset := range l.reserved[accountID] {
+		if _, ok := targets[asset]; !ok {
+			l.reserved[accountID][asset] = decimal.Zero
+		}
+	}
+	for asset, target := range targets {
+		l.reserved[accountID][asset] = target
+	}
+	return nil
+}
+
 // Debit removes amount from accountID's balance and releases the same reservation.
 // Called synchronously by settlement handlers after a fill.
 func (l *Ledger) Debit(accountID, asset string, amount decimal.Decimal) error {

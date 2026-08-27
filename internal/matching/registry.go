@@ -116,6 +116,17 @@ func (r *Registry) Cancel(symbol string, market models.MarketType, orderID strin
 	return eng.Cancel(orderID)
 }
 
+// ReplaceAccountOrders atomically replaces all resting orders for one account
+// in a symbol/market engine. See Engine.ReplaceAccountOrders for visibility
+// guarantees.
+func (r *Registry) ReplaceAccountOrders(symbol string, market models.MarketType, account string, orders []*models.Order) (removed, accepted []*models.Order, err error) {
+	eng, err := r.Get(symbol, market)
+	if err != nil {
+		return nil, nil, err
+	}
+	return eng.ReplaceAccountOrders(account, orders)
+}
+
 // OrderByID looks up a resting order in a symbol's live book, returning whether
 // it is currently resting. Terminal orders are no longer in the book.
 func (r *Registry) OrderByID(symbol string, market models.MarketType, orderID string) (*models.Order, bool, error) {

@@ -1,9 +1,12 @@
 package settlement
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/shopspring/decimal"
@@ -25,14 +28,18 @@ type FeeLookup func(symbol string, market models.MarketType) (maker, taker decim
 // taker are each debited notional × fee-rate on top of / out of their quote
 // flow, recorded on the trade as MakerFeePaid / TakerFeePaid.
 type SpotSettlement struct {
-	ledger *risk.Ledger
-	fees   FeeLookup
+	ledger  *risk.Ledger
+	backend *backendclient.Client
+	fees    FeeLookup
 }
 
 // NewSpotSettlement constructs a SpotSettlement backed by the given ledger.
 // fees may be nil (no fees charged).
-func NewSpotSettlement(ledger *risk.Ledger, fees FeeLookup) *SpotSettlement {
-	return &SpotSettlement{ledger: ledger, fees: fees}
+func NewSpotSettlement(ledger *risk.Ledger, backend *backendclient.Client, fees FeeLookup) *SpotSettlement {
+	if backend == nil {
+		backend = &backendclient.Client{}
+	}
+	return &SpotSettlement{ledger: ledger, backend: backend, fees: fees}
 }
 
 // Settle debits and credits both sides of the trade atomically in the ledger.
@@ -61,6 +68,18 @@ func (s *SpotSettlement) Settle(trade *models.Trade) error {
 	buyerFee, sellerFee := takerFee, makerFee
 	if trade.MakerSide == models.Buy {
 		buyerFee, sellerFee = makerFee, takerFee
+	}
+
+	// Persist both sides as one backend transaction before changing the
+	// in-memory ledger. The durable reservations already exist, so a failure
+	// leaves both ledgers untouched rather than producing a partial credit.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := s.backend.SettleSpot(ctx, buyerID, sellerID, base, quote,
+		backendclient.ToRawUnits(trade.Quantity),
+		backendclient.ToRawUnits(notional.Add(buyerFee)),
+		backendclient.ToRawUnits(notional.Sub(sellerFee))); err != nil {
+		return fmt.Errorf("spot settle backend: %w", err)
 	}
 
 	// Buyer: pays quote (notional + fee), receives base.

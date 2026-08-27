@@ -99,6 +99,18 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 			} else {
 				o.Price = refPrice.Mul(decimal.NewFromInt(1).Sub(factor))
 			}
+			// The slippage cap becomes an IOC limit internally, so it must
+			// obey the same tick-size rule as a user-entered limit. Round the
+			// buy cap up and sell cap down so the protection is never narrowed.
+			if cfg, cerr := d.symbolRegistry.Get(o.Symbol, o.Market); cerr == nil && cfg.TickSize.IsPositive() {
+				steps := o.Price.Div(cfg.TickSize)
+				if o.IsBuy() {
+					steps = steps.Ceil()
+				} else {
+					steps = steps.Floor()
+				}
+				o.Price = steps.Mul(cfg.TickSize)
+			}
 			o.Type = models.IOC // marketable limit: fill up to the cap, cancel remainder, never rests
 		}
 	}
@@ -168,6 +180,20 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		}
 	} else {
 		resAsset, resAmount = risk.RequiredFor(o)
+	}
+	// A spot buy pays its execution fee in the quote asset. Reserve the
+	// highest possible fee (the order can enter as either maker or taker), not
+	// just price × quantity. Without this, the durable settlement transaction
+	// correctly refuses to consume more quote than was locked whenever a fee is
+	// configured, leaving a matched order unable to settle.
+	if o.Market == models.Spot && o.Side == models.Buy && resAmount.IsPositive() {
+		if cfg, cerr := d.symbolRegistry.Get(o.Symbol, o.Market); cerr == nil {
+			feeRate := cfg.MakerFee
+			if cfg.TakerFee.GreaterThan(feeRate) {
+				feeRate = cfg.TakerFee
+			}
+			resAmount = resAmount.Add(resAmount.Mul(feeRate))
+		}
 	}
 
 	if resAmount.IsPositive() {

@@ -74,6 +74,21 @@ type balanceReq struct {
 	Amount string `json:"amount"`
 }
 
+type replaceLocksReq struct {
+	UserID string            `json:"userId"`
+	Locks  map[string]string `json:"locks"`
+}
+
+type spotSettleReq struct {
+	BuyerID           string `json:"buyerId"`
+	SellerID          string `json:"sellerId"`
+	Base              string `json:"base"`
+	Quote             string `json:"quote"`
+	BaseQuantity      string `json:"baseQuantity"`
+	BuyerQuoteDebit   string `json:"buyerQuoteDebit"`
+	SellerQuoteCredit string `json:"sellerQuoteCredit"`
+}
+
 // Lock calls POST /internal/balance/lock. Returns an error if the backend
 // rejects the lock (e.g. insufficient real funds) or is unreachable.
 func (c *Client) Lock(ctx context.Context, userID, asset, amount string) error {
@@ -84,6 +99,34 @@ func (c *Client) Lock(ctx context.Context, userID, asset, amount string) error {
 // failures but generally should not fail the in-memory release over it.
 func (c *Client) Unlock(ctx context.Context, userID, asset, amount string) error {
 	return c.call(ctx, "/internal/balance/unlock", userID, asset, amount)
+}
+
+// ReplaceLocks atomically sets durable reservations for a dedicated
+// market-maker account.
+func (c *Client) ReplaceLocks(ctx context.Context, userID string, locks map[string]string) error {
+	if !c.Enabled() {
+		return nil
+	}
+	body, err := json.Marshal(replaceLocksReq{UserID: userID, Locks: locks})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/balance/replace-locks", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engine-Secret", c.secret)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("backendclient /internal/balance/replace-locks: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backendclient /internal/balance/replace-locks: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 // Settle calls POST /internal/balance/settle, converting a Postgres lock into
@@ -97,6 +140,33 @@ func (c *Client) Settle(ctx context.Context, userID, asset, amount string) error
 // amount may be negative (net loss); Dex-Backend applies it as a debit.
 func (c *Client) Credit(ctx context.Context, userID, asset, amount string) error {
 	return c.call(ctx, "/internal/balance/credit", userID, asset, amount)
+}
+
+// SettleSpot atomically persists both legs of a completed spot trade.
+func (c *Client) SettleSpot(ctx context.Context, buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit string) error {
+	if !c.Enabled() {
+		return nil
+	}
+	body, err := json.Marshal(spotSettleReq{buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/balance/spot-settle", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engine-Secret", c.secret)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("backendclient /internal/balance/spot-settle: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backendclient /internal/balance/spot-settle: status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return nil
 }
 
 // Backfill calls POST /internal/engine-backfill, asking Dex-Backend to push

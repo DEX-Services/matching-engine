@@ -100,7 +100,7 @@ func main() {
 		case models.Options:
 			return optionsSettlement
 		default:
-			return settlement.NewSpotSettlement(ledger, feeLookup)
+			return settlement.NewSpotSettlement(ledger, backend, feeLookup)
 		}
 	}
 
@@ -459,6 +459,14 @@ func main() {
 			OrderID: order.ID, Status: string(order.Status), Filled: order.Filled.String(),
 		})
 	}))
+
+	// Internal market-maker batch replacement. Unlike /order and /cancel this
+	// route installs a full passive ladder in one engine command.
+	mux.HandleFunc("/market-maker/replace", requireEngineServiceAuth(marketMakerReplaceHandler(submitDeps{
+		reg: reg, ledger: ledger, backend: backend, checker: checker,
+		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
+		pgPool: pgPool, mdSvc: mdSvc, bus: bus,
+	})))
 
 	mux.HandleFunc("/depth", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -983,7 +991,11 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 			return fmt.Errorf("price %s not a multiple of tick size %s", o.Price, cfg.TickSize)
 		}
 	}
-	if cfg.LotSize.IsPositive() {
+	// Spot sellers may liquidate their complete remaining balance, including
+	// dust below the standard market lot size. All other orders keep the
+	// configured lot rule, including market-maker quotes.
+	allowsDustSpotSell := o.Market == models.Spot && o.Side == models.Sell
+	if cfg.LotSize.IsPositive() && !allowsDustSpotSell {
 		if remainder := o.Quantity.Mod(cfg.LotSize); !remainder.IsZero() {
 			return fmt.Errorf("quantity %s not a multiple of lot size %s", o.Quantity, cfg.LotSize)
 		}
@@ -994,7 +1006,7 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 	if cfg.MaxPrice.IsPositive() && o.Type != models.Market && o.Price.GreaterThan(cfg.MaxPrice) {
 		return fmt.Errorf("price %s exceeds max price %s", o.Price, cfg.MaxPrice)
 	}
-	if cfg.MinNotional.IsPositive() && o.Type != models.Market {
+	if cfg.MinNotional.IsPositive() && o.Type != models.Market && !allowsDustSpotSell {
 		notional := o.Price.Mul(o.Quantity)
 		if notional.LessThan(cfg.MinNotional) {
 			return fmt.Errorf("notional %s below min notional %s", notional, cfg.MinNotional)
