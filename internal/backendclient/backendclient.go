@@ -229,16 +229,48 @@ func (c *Client) call(ctx context.Context, path, userID, asset, amount string) e
 	return nil
 }
 
-// Async runs fn in a goroutine with a fresh timeout context, logging failures
-// instead of propagating them. Use for Unlock/Settle calls that must never
-// block the matching goroutine and whose failure shouldn't undo work already
-// committed to the in-memory ledger.
+// asyncRetryAttempts and asyncRetryDelay bound how hard Async fights a
+// transient failure (a network blip, the backend restarting) before giving
+// up and only logging. Kept short: this runs off the matching goroutine, but
+// an unbounded or slow retry loop still risks piling up if the backend stays
+// down for a while.
+const (
+	asyncRetryAttempts = 3
+	asyncRetryDelay    = 2 * time.Second
+)
+
+// Async runs fn in a goroutine with a fresh timeout context per attempt,
+// retrying a handful of times before giving up and only logging. Use for
+// Unlock/Settle calls that must never block the matching goroutine and whose
+// failure shouldn't undo work already committed to the in-memory ledger.
+//
+// Retrying matters specifically for Unlock: the in-memory ledger release
+// this always follows already ran synchronously and succeeded, so from the
+// engine's own point of view the reservation is gone. If the durable
+// Postgres unlock then fails just once (a transient network error, the
+// backend mid-restart) with no retry, the account's real `locked` balance is
+// stranded above what's actually reserved, permanently — every future
+// available-balance check subtracts a hold that no longer exists anywhere
+// but Postgres, degrading or zeroing that account's tradeable balance with
+// no way to self-heal (the release already "happened" from the engine's
+// perspective, so nothing re-attempts it). A few retries absorb exactly the
+// kind of one-off blip that caused that in practice, without turning this
+// into a full durable outbox.
 func Async(op string, fn func(ctx context.Context) error) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := fn(ctx); err != nil {
-			slog.Error("backendclient async call failed", "op", op, "error", err)
+		var err error
+		for attempt := 0; attempt < asyncRetryAttempts; attempt++ {
+			if attempt > 0 {
+				time.Sleep(asyncRetryDelay)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = fn(ctx)
+			cancel()
+			if err == nil {
+				return
+			}
+			slog.Warn("backendclient async call failed, retrying", "op", op, "attempt", attempt+1, "error", err)
 		}
+		slog.Error("backendclient async call failed after retries", "op", op, "attempts", asyncRetryAttempts, "error", err)
 	}()
 }
