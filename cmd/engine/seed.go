@@ -25,13 +25,17 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// ("BTC-USDC"), which isn't a registered spot market at all — every
 		// funding tick silently fell back to indexPrice == markPrice (zero
 		// drift, zero rate, nothing ever paid) instead of erroring loudly.
-		// Fixed to point at the real BTC-USDT spot market.
-		{"BTC-USDT", "SPOT", "BTC", "USDT", "", 0, 0, "0", "0"},
-		{"ETH-USDT", "SPOT", "ETH", "USDT", "", 0, 0, "0", "0"},
-		{"SOL-USDT", "SPOT", "SOL", "USDT", "", 0, 0, "0", "0"},
-		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDT", 100, 8, "0.005", "0"},
-		{"ETH-USDC", "FUTURES", "ETH", "USDC", "ETH-USDT", 75, 8, "0.0075", "0"},
-		{"BTC-USDT", "OPTIONS", "BTC", "USDT", "BTC-USDT", 0, 0, "0", "1"},
+		// Fixed to point at the real BTC-USDB spot market.
+		//
+		// Spot/options quote in USDB, the platform's internal stable currency
+		// pegged 1:1 to USDT — see Dex-Backend's chain.Listener. USDT is no
+		// longer a tradable quote currency; futures collateral stays USDC.
+		{"BTC-USDB", "SPOT", "BTC", "USDB", "", 0, 0, "0", "0"},
+		{"ETH-USDB", "SPOT", "ETH", "USDB", "", 0, 0, "0", "0"},
+		{"SOL-USDB", "SPOT", "SOL", "USDB", "", 0, 0, "0", "0"},
+		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDB", 100, 8, "0.005", "0"},
+		{"ETH-USDC", "FUTURES", "ETH", "USDC", "ETH-USDB", 75, 8, "0.0075", "0"},
+		{"BTC-USDB", "OPTIONS", "BTC", "USDB", "BTC-USDB", 0, 0, "0", "1"},
 	}
 	for _, r := range rows {
 		_, err := pool.Exec(ctx, `
@@ -53,7 +57,7 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// seedOptionInstruments inserts a small BTC-USDT option chain (a handful of
+// seedOptionInstruments inserts a small BTC-USDB option chain (a handful of
 // strikes at two expiries) whenever there are no unexpired contracts left,
 // so /option-chain always has data instead of going empty forever once the
 // first seeded batch expires.
@@ -70,7 +74,7 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 	var liveCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM option_instruments
-		WHERE underlying_symbol = 'BTC-USDT' AND active = true AND expiry > now()`).Scan(&liveCount); err != nil {
+		WHERE underlying_symbol = 'BTC-USDB' AND active = true AND expiry > now()`).Scan(&liveCount); err != nil {
 		slog.Error("count live option_instruments", "error", err)
 		return
 	}
@@ -87,12 +91,12 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 				// Instrument symbol encodes BASE-QUOTE-STRIKE-EXPIRY-TYPE so
 				// each contract gets its own order book and the underlying
 				// spot pair can be parsed from the symbol.
-				symbol := fmt.Sprintf("BTC-USDT-%d-%s-%s", strike, expiry.Format("20060102"), optType)
+				symbol := fmt.Sprintf("BTC-USDB-%d-%s-%s", strike, expiry.Format("20060102"), optType)
 				_, err := pool.Exec(ctx, `
 					INSERT INTO option_instruments (symbol, underlying_symbol, strike_price, expiry, option_type)
 					VALUES ($1, $2, $3, $4, $5)
 					ON CONFLICT DO NOTHING`,
-					symbol, "BTC-USDT", decimal.NewFromInt(int64(strike)), expiry, optType)
+					symbol, "BTC-USDB", decimal.NewFromInt(int64(strike)), expiry, optType)
 				if err != nil {
 					slog.Error("seed option_instruments", "symbol", symbol, "error", err)
 				}

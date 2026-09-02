@@ -25,7 +25,7 @@ type OptionsPosition struct {
 	Expiry        time.Time
 	Size          decimal.Decimal // positive = long, negative = short
 	Premium       decimal.Decimal // premium paid (positive) or received (negative)
-	QuoteCurrency string          // settlement currency (e.g. "USDT")
+	QuoteCurrency string          // settlement currency (e.g. "USDB")
 }
 
 // OptionsSettlement handles trade settlement for options contracts.

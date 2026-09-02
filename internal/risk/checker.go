@@ -177,7 +177,7 @@ func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal
 // required returns the asset and amount that must be available for the order
 // at submission time, based on the full original Quantity. Used by Check and
 // Reserve, before anything has filled.
-// Symbol format: "BASE-QUOTE" (e.g. "BTC-USDT").
+// Symbol format: "BASE-QUOTE" (e.g. "BTC-USDB").
 // Buyers lock quote currency (price × qty); sellers lock base currency (qty).
 func required(order *models.Order) (asset string, amount decimal.Decimal) {
 	return assetFor(order), notionalFor(order, order.Quantity, order.Price)

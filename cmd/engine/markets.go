@@ -13,10 +13,14 @@ import (
 // currentMarkets is the deliberately small execution set for this delivery.
 // It is separate from the wider list of assets the frontend displays: those
 // assets remain visible while their engines/configuration are implemented.
+// Spot markets quote in USDB, the platform's internal stable currency
+// (pegged 1:1 to USDT, no on-chain contract of its own) — see
+// Dex-Backend's chain.Listener and repo/ledger.go for the credit side.
+// USDT itself is no longer a tradable quote currency.
 var currentMarkets = []marketDefinition{
-	{displaySymbol: "BTC-USDT", symbol: "BTC-USDT", market: models.Spot, base: "BTC", quote: "USDT"},
-	{displaySymbol: "ETH-USDT", symbol: "ETH-USDT", market: models.Spot, base: "ETH", quote: "USDT"},
-	{displaySymbol: "SOL-USDT", symbol: "SOL-USDT", market: models.Spot, base: "SOL", quote: "USDT"},
+	{displaySymbol: "BTC-USDB", symbol: "BTC-USDB", market: models.Spot, base: "BTC", quote: "USDB"},
+	{displaySymbol: "ETH-USDB", symbol: "ETH-USDB", market: models.Spot, base: "ETH", quote: "USDB"},
+	{displaySymbol: "SOL-USDB", symbol: "SOL-USDB", market: models.Spot, base: "SOL", quote: "USDB"},
 	{displaySymbol: "BTC-PERP", symbol: "BTC-USDC", market: models.Futures, base: "BTC", quote: "USDC"},
 	{displaySymbol: "ETH-PERP", symbol: "ETH-USDC", market: models.Futures, base: "ETH", quote: "USDC"},
 }
