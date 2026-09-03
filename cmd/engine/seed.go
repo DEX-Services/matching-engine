@@ -33,6 +33,7 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		{"BTC-USDB", "SPOT", "BTC", "USDB", "", 0, 0, "0", "0"},
 		{"ETH-USDB", "SPOT", "ETH", "USDB", "", 0, 0, "0", "0"},
 		{"SOL-USDB", "SPOT", "SOL", "USDB", "", 0, 0, "0", "0"},
+		{"BNB-USDB", "SPOT", "BNB", "USDB", "", 0, 0, "0", "0"},
 		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDB", 100, 8, "0.005", "0"},
 		{"ETH-USDC", "FUTURES", "ETH", "USDC", "ETH-USDB", 75, 8, "0.0075", "0"},
 		{"BTC-USDB", "OPTIONS", "BTC", "USDB", "BTC-USDB", 0, 0, "0", "1"},

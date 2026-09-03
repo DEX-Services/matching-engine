@@ -21,6 +21,7 @@ var currentMarkets = []marketDefinition{
 	{displaySymbol: "BTC-USDB", symbol: "BTC-USDB", market: models.Spot, base: "BTC", quote: "USDB"},
 	{displaySymbol: "ETH-USDB", symbol: "ETH-USDB", market: models.Spot, base: "ETH", quote: "USDB"},
 	{displaySymbol: "SOL-USDB", symbol: "SOL-USDB", market: models.Spot, base: "SOL", quote: "USDB"},
+	{displaySymbol: "BNB-USDB", symbol: "BNB-USDB", market: models.Spot, base: "BNB", quote: "USDB"},
 	{displaySymbol: "BTC-PERP", symbol: "BTC-USDC", market: models.Futures, base: "BTC", quote: "USDC"},
 	{displaySymbol: "ETH-PERP", symbol: "ETH-USDC", market: models.Futures, base: "ETH", quote: "USDC"},
 }
