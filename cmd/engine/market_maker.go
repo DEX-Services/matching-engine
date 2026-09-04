@@ -37,6 +37,18 @@ type MMReplaceResponse struct {
 	ReferencePrice       string         `json:"referencePrice"`
 	ReferenceTimestampMs int64          `json:"referenceTimestampMs"`
 	Orders               []OpenOrderDTO `json:"orders"`
+	// Removed carries the FINAL state (Filled/Status) of every order this
+	// replace cancelled from the previous ladder. A resting order can fill —
+	// fully or partially — in the instant before a replace cancels it; the
+	// bot's local tracking only ever sees this replace's response for that
+	// order, never a fresh /orders poll (the order is already gone from the
+	// live book), so if this were dropped that fill would be permanently
+	// invisible to the strategy — real inventory moves, the strategy's
+	// belief never catches up, and every later requote asks the engine to
+	// lock more than is actually left, forever. See mm.detectFills, which
+	// reconciles OpenOrders against a live /orders poll for everything
+	// EXCEPT the ladder a replace just tore down — Removed closes that gap.
+	Removed []OpenOrderDTO `json:"removed"`
 }
 
 func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
@@ -152,7 +164,7 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		_, accepted, err := d.reg.ReplaceAccountOrders(req.Symbol, market, req.Account, orders)
+		removed, accepted, err := d.reg.ReplaceAccountOrders(req.Symbol, market, req.Account, orders)
 		if err != nil {
 			_ = d.ledger.ReplaceReservations(req.Account, oldTargets)
 			if d.backend.Enabled() {
@@ -165,6 +177,10 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 		for _, o := range accepted {
 			out = append(out, OpenOrderDTO{ID: o.ID, Symbol: o.Symbol, Market: string(o.Market), Side: string(o.Side), Price: o.Price.String(), Qty: o.Quantity.String(), Filled: o.Filled.String(), Status: string(o.Status)})
 		}
-		writeJSON(w, http.StatusOK, MMReplaceResponse{Status: "REPLACED", ReferencePrice: ref.String(), ReferenceTimestampMs: req.ReferenceTimestampMs, Orders: out})
+		removedOut := make([]OpenOrderDTO, 0, len(removed))
+		for _, o := range removed {
+			removedOut = append(removedOut, OpenOrderDTO{ID: o.ID, Symbol: o.Symbol, Market: string(o.Market), Side: string(o.Side), Price: o.Price.String(), Qty: o.Quantity.String(), Filled: o.Filled.String(), Status: string(o.Status)})
+		}
+		writeJSON(w, http.StatusOK, MMReplaceResponse{Status: "REPLACED", ReferencePrice: ref.String(), ReferenceTimestampMs: req.ReferenceTimestampMs, Orders: out, Removed: removedOut})
 	}
 }
