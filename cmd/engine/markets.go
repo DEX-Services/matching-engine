@@ -13,17 +13,22 @@ import (
 // currentMarkets is the deliberately small execution set for this delivery.
 // It is separate from the wider list of assets the frontend displays: those
 // assets remain visible while their engines/configuration are implemented.
-// Spot markets quote in USDB, the platform's internal stable currency
-// (pegged 1:1 to USDT, no on-chain contract of its own) — see
-// Dex-Backend's chain.Listener and repo/ledger.go for the credit side.
-// USDT itself is no longer a tradable quote currency.
+// Every market — spot AND futures — quotes in USDB, the platform's internal
+// stable currency (pegged 1:1 to USDT, no on-chain contract of its own) —
+// see Dex-Backend's chain.Listener and repo/ledger.go for the credit side.
+// USDT/USDC are no longer tradable quote currencies anywhere on the
+// exchange; a real USDC deposit still lands as USDC in the deposit-intake
+// ledger, but every tradable balance and every market (spot or futures)
+// converts to/settles in USDB at 1:1. Futures collateral used to be real
+// USDC (see the (symbol, market) key below — BTC-USDB/FUTURES is a distinct
+// row from BTC-USDB/SPOT, so the two coexist without collision).
 var currentMarkets = []marketDefinition{
 	{displaySymbol: "BTC-USDB", symbol: "BTC-USDB", market: models.Spot, base: "BTC", quote: "USDB"},
 	{displaySymbol: "ETH-USDB", symbol: "ETH-USDB", market: models.Spot, base: "ETH", quote: "USDB"},
 	{displaySymbol: "SOL-USDB", symbol: "SOL-USDB", market: models.Spot, base: "SOL", quote: "USDB"},
 	{displaySymbol: "BNB-USDB", symbol: "BNB-USDB", market: models.Spot, base: "BNB", quote: "USDB"},
-	{displaySymbol: "BTC-PERP", symbol: "BTC-USDC", market: models.Futures, base: "BTC", quote: "USDC"},
-	{displaySymbol: "ETH-PERP", symbol: "ETH-USDC", market: models.Futures, base: "ETH", quote: "USDC"},
+	{displaySymbol: "BTC-PERP", symbol: "BTC-USDB", market: models.Futures, base: "BTC", quote: "USDB"},
+	{displaySymbol: "ETH-PERP", symbol: "ETH-USDB", market: models.Futures, base: "ETH", quote: "USDB"},
 }
 
 type marketDefinition struct {

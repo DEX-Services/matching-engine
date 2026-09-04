@@ -27,15 +27,20 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// drift, zero rate, nothing ever paid) instead of erroring loudly.
 		// Fixed to point at the real BTC-USDB spot market.
 		//
-		// Spot/options quote in USDB, the platform's internal stable currency
-		// pegged 1:1 to USDT — see Dex-Backend's chain.Listener. USDT is no
-		// longer a tradable quote currency; futures collateral stays USDC.
+		// Every market — spot, futures, and options — quotes in USDB, the
+		// platform's internal stable currency pegged 1:1 to USDT — see
+		// Dex-Backend's chain.Listener. USDT/USDC are no longer tradable
+		// quote currencies anywhere on the exchange; futures collateral used
+		// to be real USDC, now converts to/settles in USDB like everything
+		// else. The futures row's symbol is "BTC-USDB"/"ETH-USDB" too — a
+		// distinct (symbol, market) row from the SPOT row of the same name,
+		// so the two coexist without collision.
 		{"BTC-USDB", "SPOT", "BTC", "USDB", "", 0, 0, "0", "0"},
 		{"ETH-USDB", "SPOT", "ETH", "USDB", "", 0, 0, "0", "0"},
 		{"SOL-USDB", "SPOT", "SOL", "USDB", "", 0, 0, "0", "0"},
 		{"BNB-USDB", "SPOT", "BNB", "USDB", "", 0, 0, "0", "0"},
-		{"BTC-USDC", "FUTURES", "BTC", "USDC", "BTC-USDB", 100, 8, "0.005", "0"},
-		{"ETH-USDC", "FUTURES", "ETH", "USDC", "ETH-USDB", 75, 8, "0.0075", "0"},
+		{"BTC-USDB", "FUTURES", "BTC", "USDB", "BTC-USDB", 100, 8, "0.005", "0"},
+		{"ETH-USDB", "FUTURES", "ETH", "USDB", "ETH-USDB", 75, 8, "0.0075", "0"},
 		{"BTC-USDB", "OPTIONS", "BTC", "USDB", "BTC-USDB", 0, 0, "0", "1"},
 	}
 	for _, r := range rows {
