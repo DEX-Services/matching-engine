@@ -2,3 +2,6 @@
 kafka-ca.pem
 /engine
 *.exe
+
+# macOS
+.DS_Store
