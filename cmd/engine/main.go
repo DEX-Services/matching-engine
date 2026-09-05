@@ -301,22 +301,26 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})
-	mux.HandleFunc("/admin/halt", func(w http.ResponseWriter, r *http.Request) {
+	// Halt/resume can take an entire market offline for every trader, so they
+	// need the same shared-secret gate as every other privileged endpoint —
+	// previously anyone with network access to the engine's port could halt
+	// any market at will.
+	mux.HandleFunc("/admin/halt", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
 		if err := haltReg.Halt(sym, mkt, risk_admin.HaltManual, "admin"); err != nil {
 			http.Error(w, "halt failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		fmt.Fprintf(w, "halted %s/%s\n", sym, mkt)
-	})
-	mux.HandleFunc("/admin/resume", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/admin/resume", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		sym, mkt := r.URL.Query().Get("symbol"), r.URL.Query().Get("market")
 		if err := haltReg.Resume(sym, mkt); err != nil {
 			http.Error(w, "resume failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		fmt.Fprintf(w, "resumed %s/%s\n", sym, mkt)
-	})
+	}))
 	mux.HandleFunc("/order", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)

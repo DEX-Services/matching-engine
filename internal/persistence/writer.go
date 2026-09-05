@@ -57,7 +57,21 @@ func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
 		MinBytes:       1,
 		MaxBytes:       10 << 20, // 10 MB
 		CommitInterval: time.Second,
-		StartOffset:    kafka.LastOffset,
+		// StartOffset only applies when the "postgres-writer" group has no
+		// committed offset yet (a brand-new group, or one whose committed
+		// offset was lost/expired). LastOffset there means "start from the
+		// tail" — any event published before this consumer's first
+		// successful commit (e.g. the engine started trading before Kafka
+		// finished connecting, or a broker/rebalance hiccup dropped the
+		// group's offset) is skipped forever, silently: the writer never
+		// errors, it just never sees those messages. That is exactly what
+		// broke /trade/fills, /trade/order-history, and /trade/pnl-history
+		// for real trades in production testing. FirstOffset is safe here
+		// because persist() is idempotent (upserts keyed on a unique
+		// (symbol, sequence_number) index) — replaying from the beginning
+		// of the topic on a fresh/reset group just no-ops on rows already
+		// written instead of losing history.
+		StartOffset: kafka.FirstOffset,
 	})
 
 	return &Writer{reader: reader, pool: pool, log: slog.Default()}, nil
