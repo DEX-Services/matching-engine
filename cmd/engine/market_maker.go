@@ -135,12 +135,23 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			}
 		}
 		// After an engine restart the live book is empty, so oldTargets has no
-		// assets. A batch clear still must explicitly release both spot assets
-		// in the durable wallet instead of sending an empty replacement map.
+		// assets. A batch clear still must explicitly release the durable
+		// wallet's locks instead of sending an empty replacement map.
+		//
+		// Which assets those are depends on the market. A SPOT ladder locks
+		// both legs, so both are released. A FUTURES ladder only ever locks
+		// margin in the quote currency (see risk.RequiredFor) — and its base
+		// is merely the contract's underlying, which for the non-crypto perps
+		// is a ticker like "GOLD" or "AAPL.us" that Dex-Backend has no balance
+		// column for. Naming it here made the whole replace-locks call fail
+		// "unsupported asset", so a market maker on those markets could never
+		// finish initializing.
 		if len(targets) == 0 {
 			parts := strings.SplitN(strings.ToUpper(req.Symbol), "-", 2)
 			if len(parts) == 2 {
-				targets[parts[0]] = decimal.Zero
+				if market != models.Futures {
+					targets[parts[0]] = decimal.Zero
+				}
 				targets[parts[1]] = decimal.Zero
 			}
 		}

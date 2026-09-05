@@ -29,6 +29,25 @@ var currentMarkets = []marketDefinition{
 	{displaySymbol: "BNB-USDB", symbol: "BNB-USDB", market: models.Spot, base: "BNB", quote: "USDB"},
 	{displaySymbol: "BTC-PERP", symbol: "BTC-USDB", market: models.Futures, base: "BTC", quote: "USDB"},
 	{displaySymbol: "ETH-PERP", symbol: "ETH-USDB", market: models.Futures, base: "ETH", quote: "USDB"},
+	// Crypto perps beyond BTC/ETH: the SOL/BNB spot books above double as the
+	// index/funding underlying (see seedSymbolConfigs's underlying_symbol).
+	{displaySymbol: "SOL-PERP", symbol: "SOL-USDB", market: models.Futures, base: "SOL", quote: "USDB"},
+	{displaySymbol: "BNB-PERP", symbol: "BNB-USDB", market: models.Futures, base: "BNB", quote: "USDB"},
+	// Non-crypto perps (forex majors, commodities, US stocks). There is no
+	// engine spot book for any of these, so no funding underlying exists —
+	// their symbol_configs rows leave underlying_symbol/funding unset (see
+	// seed.go). The base ticker is case-sensitive for Live-Rates.com
+	// instruments ("CrudeOIL", "AAPL.us") and doubles as the Price-Fetcher
+	// Redis key the MM quotes against.
+	{displaySymbol: "EURUSD", symbol: "EURUSD-USDB", market: models.Futures, base: "EURUSD", quote: "USDB"},
+	{displaySymbol: "GBPUSD", symbol: "GBPUSD-USDB", market: models.Futures, base: "GBPUSD", quote: "USDB"},
+	{displaySymbol: "AUDUSD", symbol: "AUDUSD-USDB", market: models.Futures, base: "AUDUSD", quote: "USDB"},
+	{displaySymbol: "XAU-USD", symbol: "GOLD-USDB", market: models.Futures, base: "GOLD", quote: "USDB"},
+	{displaySymbol: "XAG-USD", symbol: "SILVER-USDB", market: models.Futures, base: "SILVER", quote: "USDB"},
+	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-USDB", market: models.Futures, base: "CrudeOIL", quote: "USDB"},
+	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-USDB", market: models.Futures, base: "AAPL.us", quote: "USDB"},
+	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-USDB", market: models.Futures, base: "TSLA.us", quote: "USDB"},
+	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-USDB", market: models.Futures, base: "NVDA.us", quote: "USDB"},
 }
 
 type marketDefinition struct {

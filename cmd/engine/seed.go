@@ -16,7 +16,14 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 	rows := []struct {
 		symbol, market, base, quote, underlying string
 		maxLeverage, fundingIntervalHours       int
-		maintenanceMarginRate, contractMult     string
+		maintenance                             string
+		contractMult                            string
+		// tickSize/lotSize are "" for markets that just want the schema
+		// defaults (0.01 / 0.00001). "" is passed as SQL NULL, which the
+		// statement below reads as "leave whatever is already there" — an
+		// explicit "0" would instead overwrite a live market's granularity
+		// with zero and disable its tick/lot validation.
+		tickSize, lotSize string
 	}{
 		// UnderlyingSymbol on a FUTURES row must be a real registered SPOT
 		// symbol — the funding scheduler and the /ticker handler both look
@@ -35,28 +42,68 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// else. The futures row's symbol is "BTC-USDB"/"ETH-USDB" too — a
 		// distinct (symbol, market) row from the SPOT row of the same name,
 		// so the two coexist without collision.
-		{"BTC-USDB", "SPOT", "BTC", "USDB", "", 0, 0, "0", "0"},
-		{"ETH-USDB", "SPOT", "ETH", "USDB", "", 0, 0, "0", "0"},
-		{"SOL-USDB", "SPOT", "SOL", "USDB", "", 0, 0, "0", "0"},
-		{"BNB-USDB", "SPOT", "BNB", "USDB", "", 0, 0, "0", "0"},
-		{"BTC-USDB", "FUTURES", "BTC", "USDB", "BTC-USDB", 100, 8, "0.005", "0"},
-		{"ETH-USDB", "FUTURES", "ETH", "USDB", "ETH-USDB", 75, 8, "0.0075", "0"},
-		{"BTC-USDB", "OPTIONS", "BTC", "USDB", "BTC-USDB", 0, 0, "0", "1"},
+		{"BTC-USDB", "SPOT", "BTC", "USDB", "", 0, 0, "0", "0", "", ""},
+		{"ETH-USDB", "SPOT", "ETH", "USDB", "", 0, 0, "0", "0", "", ""},
+		{"SOL-USDB", "SPOT", "SOL", "USDB", "", 0, 0, "0", "0", "", ""},
+		{"BNB-USDB", "SPOT", "BNB", "USDB", "", 0, 0, "0", "0", "", ""},
+		{"BTC-USDB", "FUTURES", "BTC", "USDB", "BTC-USDB", 100, 8, "0.005", "0", "", ""},
+		{"ETH-USDB", "FUTURES", "ETH", "USDB", "ETH-USDB", 75, 8, "0.0075", "0", "", ""},
+		{"BTC-USDB", "OPTIONS", "BTC", "USDB", "BTC-USDB", 0, 0, "0", "1", "", ""},
+		// SOL/BNB perps mirror BTC/ETH: the spot books above exist, so they
+		// double as the funding/index underlying.
+		{"SOL-USDB", "FUTURES", "SOL", "USDB", "SOL-USDB", 50, 8, "0.005", "0", "", ""},
+		{"BNB-USDB", "FUTURES", "BNB", "USDB", "BNB-USDB", 50, 8, "0.005", "0", "", ""},
+		// Non-crypto perps have no engine spot book to serve as a funding
+		// underlying, so funding_interval_hours = 0 keeps the funding
+		// scheduler off for them (underlying_symbol stays empty for the same
+		// reason). Leverage is kept conservative for FX/commodities/stocks.
+		// tick reflects each instrument's native quoting increment (forex to
+		// the pip, SILVER to a tenth of a cent, the rest to the cent). lot
+		// stays FINE deliberately: it is a granularity, not a minimum size,
+		// and the market maker floors every quote quantity down to it. A
+		// coarse lot (one FX standard lot, say) silently rounds a whole ladder
+		// to zero unless the desk is funded past roughly lot x price x levels,
+		// and a desk that quotes nothing looks identical to a broken one. The
+		// min_notional column is what actually floors order size.
+		{"EURUSD-USDB", "FUTURES", "EURUSD", "USDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		{"GBPUSD-USDB", "FUTURES", "GBPUSD", "USDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		{"AUDUSD-USDB", "FUTURES", "AUDUSD", "USDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		{"GOLD-USDB", "FUTURES", "GOLD", "USDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		{"SILVER-USDB", "FUTURES", "SILVER", "USDB", "", 20, 0, "0.01", "0", "0.001", "0.01"},
+		{"CrudeOIL-USDB", "FUTURES", "CrudeOIL", "USDB", "", 20, 0, "0.01", "0", "0.01", "0.01"},
+		{"AAPL.us-USDB", "FUTURES", "AAPL.us", "USDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		{"TSLA.us-USDB", "FUTURES", "TSLA.us", "USDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		{"NVDA.us-USDB", "FUTURES", "NVDA.us", "USDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
 	}
 	for _, r := range rows {
+		// "" means "unspecified" for the granularity columns; NULL lets the
+		// statement below fall through to the schema default on insert and to
+		// the existing value on conflict.
+		var tick, lot any
+		if r.tickSize != "" {
+			tick = r.tickSize
+		}
+		if r.lotSize != "" {
+			lot = r.lotSize
+		}
 		_, err := pool.Exec(ctx, `
 			INSERT INTO symbol_configs
 			    (symbol, market, base_currency, quote_currency, max_leverage,
-			     maintenance_margin_rate, funding_interval_hours, contract_multiplier, underlying_symbol)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			     maintenance_margin_rate, funding_interval_hours, contract_multiplier, underlying_symbol,
+			     tick_size, lot_size)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+			        COALESCE($10::numeric, '0.01'), COALESCE($11::numeric, '0.00001'))
 			ON CONFLICT (symbol, market) DO UPDATE SET
 			    max_leverage = EXCLUDED.max_leverage,
 			    maintenance_margin_rate = EXCLUDED.maintenance_margin_rate,
 			    funding_interval_hours = EXCLUDED.funding_interval_hours,
 			    contract_multiplier = EXCLUDED.contract_multiplier,
-			    underlying_symbol = EXCLUDED.underlying_symbol`,
+			    underlying_symbol = EXCLUDED.underlying_symbol,
+			    tick_size = COALESCE($10::numeric, symbol_configs.tick_size),
+			    lot_size = COALESCE($11::numeric, symbol_configs.lot_size)`,
 			r.symbol, r.market, r.base, r.quote, r.maxLeverage,
-			r.maintenanceMarginRate, r.fundingIntervalHours, r.contractMult, r.underlying)
+			r.maintenance, r.fundingIntervalHours, r.contractMult, r.underlying,
+			tick, lot)
 		if err != nil {
 			slog.Error("seed symbol_configs", "symbol", r.symbol, "market", r.market, "error", err)
 		}
