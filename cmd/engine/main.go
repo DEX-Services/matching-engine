@@ -1011,7 +1011,19 @@ func validateOrderConfig(reg *config.Registry, o *models.Order) error {
 		return fmt.Errorf("price %s exceeds max price %s", o.Price, cfg.MaxPrice)
 	}
 	if cfg.MinNotional.IsPositive() && o.Type != models.Market && !allowsDustSpotSell {
-		notional := o.Price.Mul(o.Quantity)
+		// A stop order with no limit price (Price == 0) intentionally carries
+		// no execution price yet — it activates as a market order once
+		// StopPrice triggers (see orderbook.Book stop handling and
+		// attached.BuildLegOrder's SL leg, which is built exactly this way).
+		// Pricing notional off o.Price for such an order always computes 0
+		// and rejects every stop-loss leg regardless of position size — use
+		// StopPrice instead, which is the real reference price for this
+		// order's eventual execution.
+		notionalPrice := o.Price
+		if o.Type == models.Stop && !o.Price.IsPositive() {
+			notionalPrice = o.StopPrice
+		}
+		notional := notionalPrice.Mul(o.Quantity)
 		if notional.LessThan(cfg.MinNotional) {
 			return fmt.Errorf("notional %s below min notional %s", notional, cfg.MinNotional)
 		}
