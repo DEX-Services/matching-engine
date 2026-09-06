@@ -41,6 +41,15 @@ func KafkaTLSConfig() (*tls.Config, error) {
 	return cfg, nil
 }
 
+// Outbox is the durable fallback a KafkaPublisher writes to when a bounded
+// publish attempt fails. Declared here (rather than importing package
+// persistence, which already imports events — that would cycle) so
+// persistence.OutboxWriter can satisfy it without either package depending
+// on the other beyond this narrow interface.
+type Outbox interface {
+	Write(ctx context.Context, evt *models.Event) error
+}
+
 // KafkaPublisher consumes events from the Bus and writes them to Kafka.
 // It runs in its own goroutine and never blocks the matching goroutines.
 //
@@ -50,6 +59,20 @@ type KafkaPublisher struct {
 	writer *kafka.Writer
 	sub    <-chan *models.Event
 	log    *slog.Logger
+
+	// outbox is set via SetOutbox once Postgres is available (Kafka is
+	// constructed before Postgres in main.go's boot order — see that call
+	// site). nil until then, and nil entirely when Postgres isn't
+	// configured; publish() falls back to log-only in either case, same as
+	// before this existed.
+	outbox Outbox
+}
+
+// SetOutbox wires a durable fallback for publish failures. Safe to call
+// once, after construction, from the same goroutine that starts Run — there
+// is no concurrent access to outbox before Run's loop begins reading it.
+func (p *KafkaPublisher) SetOutbox(o Outbox) {
+	p.outbox = o
 }
 
 // NewKafkaPublisher constructs a publisher connected to the Aiven Kafka cluster.
@@ -137,25 +160,23 @@ func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 	// platform-wide, directly contradicting this type's own doc comment
 	// ("never blocks the matching goroutines"). Bounding this call's context
 	// restores that guarantee: a stuck broker now degrades to a dropped,
-	// logged event instead of freezing every symbol.
-	//
-	// NOTE: unlike the comment below claims, TopicOutbox is not actually
-	// wired up anywhere in this codebase (defined in topics.go, referenced
-	// only in comments here and in persistence/writer.go) — a message
-	// dropped by this timeout is NOT currently retried or recovered by
-	// anything. This trades a platform-wide freeze for a real (if rare,
-	// bounded to 3s of sustained broker unavailability) persistence gap;
-	// the postgres-writer's own resilience (idempotent upserts, its own
-	// consumer group) is unaffected since it never receives a message this
-	// never reaches Kafka in the first place. Building the outbox consumer
-	// or otherwise closing this gap is a separate, real follow-up.
+	// logged event instead of freezing every symbol — and outbox (below)
+	// keeps "dropped" from meaning "lost".
 	publishCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := p.writer.WriteMessages(publishCtx, msg); err != nil {
-		// Async writer queues internally; an error here means the queue is full
-		// or the context was cancelled — see this function's doc comment above
-		// on why a dropped message here is not currently recovered.
+		// Async writer queues internally; an error here means the queue is
+		// full or the context was cancelled — Kafka never actually received
+		// this event. Fall back to the durable outbox (persistence.OutboxWriter,
+		// wired in via SetOutbox once Postgres is up) so it still reaches
+		// order history / fills / PnL once OutboxSweeper drains it, instead
+		// of being lost the moment this log line is written.
 		p.log.Error("kafka publish failed", "symbol", evt.Symbol, "seq", evt.SequenceNumber, "error", err)
+		if p.outbox != nil {
+			if obErr := p.outbox.Write(ctx, evt); obErr != nil {
+				p.log.Error("outbox fallback also failed; event lost", "symbol", evt.Symbol, "seq", evt.SequenceNumber, "error", obErr)
+			}
+		}
 	}
 }
 

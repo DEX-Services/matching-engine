@@ -96,23 +96,30 @@ func (w *Writer) Run(ctx context.Context) {
 			continue
 		}
 
-		if err := w.persist(ctx, &evt); err != nil {
+		if err := persist(ctx, w.pool, &evt); err != nil {
 			w.log.Error("persist event", "symbol", evt.Symbol, "seq", evt.SequenceNumber, "error", err)
-			// Message is NOT committed; Kafka will redeliver it.
-			// The durable outbox (TopicOutbox) is the fallback if Postgres
-			// stays down long enough to exhaust the retry budget.
+			// Message is NOT committed; Kafka will redeliver it. This is the
+			// case where Postgres itself, not Kafka, is unavailable — the
+			// event outbox (see OutboxSweeper) doesn't help here since it
+			// also writes to Postgres; retrying via Kafka redelivery is the
+			// right recovery path once Postgres comes back.
 			continue
 		}
 	}
 }
 
-func (w *Writer) persist(ctx context.Context, evt *models.Event) error {
+// persist writes one event's rows (order/trade/funding/pnl, plus the raw
+// event itself) in a single transaction. Shared by Writer (the normal
+// Kafka-consuming path) and OutboxSweeper (the fallback path for events a
+// broker outage kept out of Kafka entirely) so both apply identical,
+// idempotent upsert logic.
+func persist(ctx context.Context, pool *pgxpool.Pool, evt *models.Event) error {
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		return err
 	}
 
-	tx, err := w.pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}

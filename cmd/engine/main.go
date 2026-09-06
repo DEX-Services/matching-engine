@@ -185,6 +185,18 @@ func main() {
 				slog.Info("postgres writer started")
 			}
 
+			// Durable outbox: give the (already-started) Kafka publisher a
+			// fallback for events a broker outage kept out of Kafka
+			// entirely (see KafkaPublisher.publish's doc comment), and start
+			// the sweeper that drains event_outbox back into the normal
+			// tables. Postgres is set up after Kafka in this boot sequence
+			// (see Phase 4 above), so this wiring has to happen here rather
+			// than at KafkaPublisher construction.
+			if kafkaPub != nil {
+				kafkaPub.SetOutbox(persistence.NewOutboxWriter(pool))
+			}
+			go persistence.NewOutboxSweeper(pool, 10*time.Second).Run(ctx)
+
 			if err := config.EnsureSchema(ctx, pool); err != nil {
 				slog.Error("ensure symbol_configs schema", "error", err)
 			} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {

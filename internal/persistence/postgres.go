@@ -145,4 +145,20 @@ CREATE TABLE IF NOT EXISTS option_positions (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (account_id, symbol, option_type, strike_price, expiry)
 );
+
+-- event_outbox is the durable fallback for KafkaPublisher: when a broker is
+-- slow or unreachable long enough that the bounded publish call (see
+-- events.KafkaPublisher.publish) gives up, the event is written here
+-- directly from the matching-engine process instead of being silently
+-- dropped. OutboxSweeper (this package) periodically drains it into the
+-- same orders/trades/events/etc. tables the normal Kafka-consuming Writer
+-- populates, then deletes delivered rows. This is what the doc comments on
+-- TopicOutbox / persistence.Writer previously promised but never actually
+-- implemented — Kafka was never in the loop for this path, so an outage
+-- there can't affect it.
+CREATE TABLE IF NOT EXISTS event_outbox (
+    id         BIGSERIAL   PRIMARY KEY,
+    payload    JSONB       NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `
