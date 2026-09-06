@@ -123,9 +123,38 @@ func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 		Value: payload,
 		Time:  time.Now(),
 	}
-	if err := p.writer.WriteMessages(ctx, msg); err != nil {
+	// Even with Async:true, kafka-go's WriteMessages blocks once its internal
+	// outstanding-message queue is full — it only fires-and-forgets the
+	// broker ACK, not the enqueue itself. Passing Run's own long-lived ctx
+	// here (cancelled only on shutdown) meant a slow/unreachable broker (a
+	// real, observed failure mode against the hosted Aiven cluster: repeated
+	// "context deadline exceeded" / "i/o timeout" writing to
+	// matching-engine.events) could block this call indefinitely. That stalls
+	// this loop, which stops draining Run's subscriber channel, which fills
+	// it (the channel is a generous but finite 50,000), and once it's full
+	// Bus.Publish — called synchronously from the MATCHING goroutine for
+	// every order/trade — blocks too: a slow Kafka broker froze trading
+	// platform-wide, directly contradicting this type's own doc comment
+	// ("never blocks the matching goroutines"). Bounding this call's context
+	// restores that guarantee: a stuck broker now degrades to a dropped,
+	// logged event instead of freezing every symbol.
+	//
+	// NOTE: unlike the comment below claims, TopicOutbox is not actually
+	// wired up anywhere in this codebase (defined in topics.go, referenced
+	// only in comments here and in persistence/writer.go) — a message
+	// dropped by this timeout is NOT currently retried or recovered by
+	// anything. This trades a platform-wide freeze for a real (if rare,
+	// bounded to 3s of sustained broker unavailability) persistence gap;
+	// the postgres-writer's own resilience (idempotent upserts, its own
+	// consumer group) is unaffected since it never receives a message this
+	// never reaches Kafka in the first place. Building the outbox consumer
+	// or otherwise closing this gap is a separate, real follow-up.
+	publishCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := p.writer.WriteMessages(publishCtx, msg); err != nil {
 		// Async writer queues internally; an error here means the queue is full
-		// or the context was cancelled. Phase 5's durable outbox handles retries.
+		// or the context was cancelled — see this function's doc comment above
+		// on why a dropped message here is not currently recovered.
 		p.log.Error("kafka publish failed", "symbol", evt.Symbol, "seq", evt.SequenceNumber, "error", err)
 	}
 }
