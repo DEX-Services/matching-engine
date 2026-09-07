@@ -13,41 +13,41 @@ import (
 // currentMarkets is the deliberately small execution set for this delivery.
 // It is separate from the wider list of assets the frontend displays: those
 // assets remain visible while their engines/configuration are implemented.
-// Every market — spot AND futures — quotes in USDB, the platform's internal
+// Every market — spot AND futures — quotes in BIUSD, the platform's internal
 // stable currency (pegged 1:1 to USDT, no on-chain contract of its own) —
 // see Dex-Backend's chain.Listener and repo/ledger.go for the credit side.
 // USDT/USDC are no longer tradable quote currencies anywhere on the
 // exchange; a real USDC deposit still lands as USDC in the deposit-intake
 // ledger, but every tradable balance and every market (spot or futures)
-// converts to/settles in USDB at 1:1. Futures collateral used to be real
-// USDC (see the (symbol, market) key below — BTC-USDB/FUTURES is a distinct
-// row from BTC-USDB/SPOT, so the two coexist without collision).
+// converts to/settles in BIUSD at 1:1. Futures collateral used to be real
+// USDC (see the (symbol, market) key below — BTC-BIUSD/FUTURES is a distinct
+// row from BTC-BIUSD/SPOT, so the two coexist without collision).
 var currentMarkets = []marketDefinition{
-	{displaySymbol: "BTC-USDB", symbol: "BTC-USDB", market: models.Spot, base: "BTC", quote: "USDB"},
-	{displaySymbol: "ETH-USDB", symbol: "ETH-USDB", market: models.Spot, base: "ETH", quote: "USDB"},
-	{displaySymbol: "SOL-USDB", symbol: "SOL-USDB", market: models.Spot, base: "SOL", quote: "USDB"},
-	{displaySymbol: "BNB-USDB", symbol: "BNB-USDB", market: models.Spot, base: "BNB", quote: "USDB"},
-	{displaySymbol: "BTC-PERP", symbol: "BTC-USDB", market: models.Futures, base: "BTC", quote: "USDB"},
-	{displaySymbol: "ETH-PERP", symbol: "ETH-USDB", market: models.Futures, base: "ETH", quote: "USDB"},
+	{displaySymbol: "BTC-BIUSD", symbol: "BTC-BIUSD", market: models.Spot, base: "BTC", quote: "BIUSD"},
+	{displaySymbol: "ETH-BIUSD", symbol: "ETH-BIUSD", market: models.Spot, base: "ETH", quote: "BIUSD"},
+	{displaySymbol: "SOL-BIUSD", symbol: "SOL-BIUSD", market: models.Spot, base: "SOL", quote: "BIUSD"},
+	{displaySymbol: "BNB-BIUSD", symbol: "BNB-BIUSD", market: models.Spot, base: "BNB", quote: "BIUSD"},
+	{displaySymbol: "BTC-PERP", symbol: "BTC-BIUSD", market: models.Futures, base: "BTC", quote: "BIUSD"},
+	{displaySymbol: "ETH-PERP", symbol: "ETH-BIUSD", market: models.Futures, base: "ETH", quote: "BIUSD"},
 	// Crypto perps beyond BTC/ETH: the SOL/BNB spot books above double as the
 	// index/funding underlying (see seedSymbolConfigs's underlying_symbol).
-	{displaySymbol: "SOL-PERP", symbol: "SOL-USDB", market: models.Futures, base: "SOL", quote: "USDB"},
-	{displaySymbol: "BNB-PERP", symbol: "BNB-USDB", market: models.Futures, base: "BNB", quote: "USDB"},
+	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSD", market: models.Futures, base: "SOL", quote: "BIUSD"},
+	{displaySymbol: "BNB-PERP", symbol: "BNB-BIUSD", market: models.Futures, base: "BNB", quote: "BIUSD"},
 	// Non-crypto perps (forex majors, commodities, US stocks). There is no
 	// engine spot book for any of these, so no funding underlying exists —
 	// their symbol_configs rows leave underlying_symbol/funding unset (see
 	// seed.go). The base ticker is case-sensitive for Live-Rates.com
 	// instruments ("CrudeOIL", "AAPL.us") and doubles as the Price-Fetcher
 	// Redis key the MM quotes against.
-	{displaySymbol: "EURUSD", symbol: "EURUSD-USDB", market: models.Futures, base: "EURUSD", quote: "USDB"},
-	{displaySymbol: "GBPUSD", symbol: "GBPUSD-USDB", market: models.Futures, base: "GBPUSD", quote: "USDB"},
-	{displaySymbol: "AUDUSD", symbol: "AUDUSD-USDB", market: models.Futures, base: "AUDUSD", quote: "USDB"},
-	{displaySymbol: "XAU-USD", symbol: "GOLD-USDB", market: models.Futures, base: "GOLD", quote: "USDB"},
-	{displaySymbol: "XAG-USD", symbol: "SILVER-USDB", market: models.Futures, base: "SILVER", quote: "USDB"},
-	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-USDB", market: models.Futures, base: "CrudeOIL", quote: "USDB"},
-	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-USDB", market: models.Futures, base: "AAPL.us", quote: "USDB"},
-	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-USDB", market: models.Futures, base: "TSLA.us", quote: "USDB"},
-	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-USDB", market: models.Futures, base: "NVDA.us", quote: "USDB"},
+	{displaySymbol: "EURUSD", symbol: "EURUSD-BIUSD", market: models.Futures, base: "EURUSD", quote: "BIUSD"},
+	{displaySymbol: "GBPUSD", symbol: "GBPUSD-BIUSD", market: models.Futures, base: "GBPUSD", quote: "BIUSD"},
+	{displaySymbol: "AUDUSD", symbol: "AUDUSD-BIUSD", market: models.Futures, base: "AUDUSD", quote: "BIUSD"},
+	{displaySymbol: "XAU-USD", symbol: "GOLD-BIUSD", market: models.Futures, base: "GOLD", quote: "BIUSD"},
+	{displaySymbol: "XAG-USD", symbol: "SILVER-BIUSD", market: models.Futures, base: "SILVER", quote: "BIUSD"},
+	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-BIUSD", market: models.Futures, base: "CrudeOIL", quote: "BIUSD"},
+	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-BIUSD", market: models.Futures, base: "AAPL.us", quote: "BIUSD"},
+	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-BIUSD", market: models.Futures, base: "TSLA.us", quote: "BIUSD"},
+	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-BIUSD", market: models.Futures, base: "NVDA.us", quote: "BIUSD"},
 }
 
 type marketDefinition struct {

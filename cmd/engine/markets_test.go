@@ -24,7 +24,7 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	// 4 spot + 13 futures (BTC, ETH, SOL, BNB, 3 FX, 3 commodities, 3 stocks).
 	// The futures rows after ETH-PERP are the non-crypto perp set. (Options
 	// engines register lazily per contract and are not in this list.)
-	if len(got) != 17 || got[0].DisplaySymbol != "BTC-USDB" || got[4].Symbol != "BTC-USDB" || got[4].Market != "FUTURES" {
+	if len(got) != 17 || got[0].DisplaySymbol != "BTC-BIUSD" || got[4].Symbol != "BTC-BIUSD" || got[4].Market != "FUTURES" {
 		t.Fatalf("unexpected current markets: %#v", got)
 	}
 	if got[0].TickSize != "0.01" || len(got[0].EnabledOrderTypes) != 6 {
@@ -32,7 +32,7 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	}
 	// The 9 non-crypto perps close the set: 3 FX, 3 commodities, 3 stocks,
 	// in the order declared in currentMarkets.
-	if got[8].Symbol != "EURUSD-USDB" || got[11].Symbol != "GOLD-USDB" || got[14].Symbol != "AAPL.us-USDB" {
+	if got[8].Symbol != "EURUSD-BIUSD" || got[11].Symbol != "GOLD-BIUSD" || got[14].Symbol != "AAPL.us-BIUSD" {
 		t.Fatalf("unexpected non-crypto perp layout: %#v", got[9:])
 	}
 }
