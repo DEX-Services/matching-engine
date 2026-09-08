@@ -271,20 +271,6 @@ func main() {
 
 	// HTTP server
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		if pgPool != nil {
-			if err := pgPool.Ping(ctx); err != nil {
-				slog.Error("healthz: postgres ping failed", "err", err)
-				w.WriteHeader(http.StatusServiceUnavailable)
-				w.Write([]byte(`{"status":"unhealthy"}`))
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
 	mux.HandleFunc("/ws", hub.ServeWS)
 	// /markets is the authoritative executable-market catalogue. It contains
 	// only the five engines registered above; the frontend may continue to
@@ -915,18 +901,14 @@ func main() {
 		writeJSON(w, http.StatusOK, OptionChainResponse{Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out})
 	})
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	srv := &http.Server{Addr: ":" + port, Handler: withCORS(mux)}
+	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
 	listener, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		slog.Error("failed to bind HTTP listener", "addr", srv.Addr, "error", err)
 		os.Exit(1)
 	}
 	go func() {
-		slog.Info("HTTP server listening", "addr", srv.Addr)
+		slog.Info("HTTP server listening", "addr", ":8080")
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("http server", "error", err)
 		}
