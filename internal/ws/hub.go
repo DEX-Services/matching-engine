@@ -4,6 +4,7 @@
 package ws
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -40,10 +41,44 @@ func origins() map[string]bool {
 	return allowedOrigins
 }
 
+// wsInternalSecretOnce/wsInternalSecret cache WS_INTERNAL_SECRET, read lazily
+// for the same godotenv-ordering reason as loadAllowedOrigins above.
+var wsInternalSecretOnce sync.Once
+var wsInternalSecret string
+
+func internalSecret() string {
+	wsInternalSecretOnce.Do(func() { wsInternalSecret = os.Getenv("WS_INTERNAL_SECRET") })
+	return wsInternalSecret
+}
+
+// hasValidInternalSecret reports whether the request carries the correct
+// X-Engine-Ws-Secret header. This is a SEPARATE mechanism from the browser
+// Origin allowlist below, deliberately: browser CORS answers "is this a
+// trusted website," which is meaningless for a server-to-server caller (the
+// bots service) that has no Origin header and isn't a browser at all —
+// conflating the two would mean either loosening the browser allowlist to
+// admit non-browser traffic, or the bots service impersonating a browser
+// Origin it doesn't have. A shared secret is the right primitive for "is
+// this our own other backend service," the same way DEX_BACKEND_ENGINE_SECRET
+// already authenticates Dex-Backend's calls elsewhere in this codebase — kept
+// as its own env var rather than reusing that one so the two trust
+// boundaries (ledger-sync callers vs. WS-stream callers) stay independently
+// rotatable.
+func hasValidInternalSecret(r *http.Request) bool {
+	secret := internalSecret()
+	if secret == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Engine-Ws-Secret")), []byte(secret)) == 1
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
+		if hasValidInternalSecret(r) {
+			return true
+		}
 		allowed := origins()
 		if len(allowed) == 0 {
 			// No allowlist configured: only accept same-origin upgrades.
