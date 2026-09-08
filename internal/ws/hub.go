@@ -43,6 +43,13 @@ func origins() map[string]bool {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
+	// Permessage-deflate: the event stream is extremely repetitive JSON
+	// (same field names, symbols, and ladder prices within a few bps), so
+	// negotiated compression shrinks the broadcast payload roughly 5-10x.
+	// Servers compress each message independently (no context takeover);
+	// browsers negotiate the extension automatically, so no client change
+	// is needed. CPU cost is negligible at this frame rate.
+	EnableCompression: true,
 	CheckOrigin: func(r *http.Request) bool {
 		allowed := origins()
 		if len(allowed) == 0 {
