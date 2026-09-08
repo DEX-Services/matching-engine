@@ -250,4 +250,12 @@ type TickerResponse struct {
 	// live MMR from symbol_configs, so the frontend's liquidation-price
 	// preview can stop hardcoding it.
 	MaintenanceMarginRatePct string `json:"maintenanceMarginRatePct,omitempty"`
+	// Rolling 24h stats from the engine's trade window. Empty/Has24hData=false
+	// until the engine has seen trades in the window. These ride along on the
+	// periodic TICKER WebSocket frame so the market list needs no separate
+	// /market-summary polling; the REST /ticker and /market-summary endpoints
+	// return the same fields as a fallback.
+	Change24hPct string `json:"change24hPct,omitempty"`
+	Volume24h    string `json:"volume24h,omitempty"`
+	Has24hData   bool   `json:"has24hData,omitempty"`
 }

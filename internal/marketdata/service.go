@@ -5,6 +5,7 @@ package marketdata
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,29 @@ type Summary struct {
 	Volume24h    decimal.Decimal
 	Has24hData   bool
 	UpdatedAt    time.Time
+}
+
+// SymbolKey identifies one registered book by its symbol and market type.
+type SymbolKey struct {
+	Symbol string
+	Market models.MarketType
+}
+
+// Symbols returns every registered (symbol, market) pair — the set of books
+// this service can produce market data for. Used by the periodic ticker
+// broadcaster to enumerate the frame contents without depending on the
+// engine's static market list.
+func (s *Service) Symbols() []SymbolKey {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SymbolKey, 0, len(s.books))
+	for k := range s.books {
+		parts := strings.SplitN(k, ":", 2)
+		if len(parts) == 2 {
+			out = append(out, SymbolKey{Symbol: parts[0], Market: models.MarketType(parts[1])})
+		}
+	}
+	return out
 }
 
 // NewService creates an empty Service.
@@ -131,6 +155,30 @@ func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, er
 	}
 	summary.Has24hData = true
 	return summary, nil
+}
+
+// SummaryAll returns summaries for every registered book in one pass. Used
+// by the batched /market-summary endpoint. Delegates to Summary per symbol —
+// including its 24h trade-window trimming — so batch and single-symbol
+// responses are computed identically.
+func (s *Service) SummaryAll() []Summary {
+	s.mu.RLock()
+	keys := make([]SymbolKey, 0, len(s.books))
+	for k := range s.books {
+		parts := strings.SplitN(k, ":", 2)
+		if len(parts) == 2 {
+			keys = append(keys, SymbolKey{Symbol: parts[0], Market: models.MarketType(parts[1])})
+		}
+	}
+	s.mu.RUnlock()
+
+	out := make([]Summary, 0, len(keys))
+	for _, k := range keys {
+		if summ, err := s.Summary(k.Symbol, k.Market); err == nil {
+			out = append(out, *summ)
+		}
+	}
+	return out
 }
 
 // Ticker returns a market data snapshot for symbol/market.

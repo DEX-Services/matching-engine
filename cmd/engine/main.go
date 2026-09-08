@@ -271,6 +271,11 @@ func main() {
 
 	// HTTP server
 	mux := http.NewServeMux()
+	// Periodic TICKER frames: one snapshot per second for ALL symbols,
+	// fanned out to every connected WebSocket client (see ticker.go). This
+	// is what lets the trade UI drop its per-second /ticker and 5s
+	// per-market /market-summary polling without losing its 1s cadence.
+	go runTickerBroadcaster(mdSvc, symbolRegistry, hub, time.Second)
 	mux.HandleFunc("/ws", hub.ServeWS)
 	// /markets is the authoritative executable-market catalogue. It contains
 	// only the five engines registered above; the frontend may continue to
@@ -286,30 +291,12 @@ func main() {
 	mux.HandleFunc("/ticker", func(w http.ResponseWriter, r *http.Request) {
 		sym := r.URL.Query().Get("symbol")
 		mkt := models.MarketType(r.URL.Query().Get("market"))
-		ticker, err := mdSvc.Ticker(sym, mkt)
+		// Shares its body with the periodic TICKER WS frame (see ticker.go)
+		// so the HTTP fallback and the push stream can never drift apart.
+		resp, err := buildTickerResponse(mdSvc, symbolRegistry, sym, mkt)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
-		}
-		resp := TickerResponse{
-			Symbol: ticker.Symbol, Market: string(ticker.Market),
-			BestBid: ticker.BestBid.String(), BestAsk: ticker.BestAsk.String(),
-			MidPrice: ticker.MidPrice.String(), MarkPrice: ticker.MarkPrice.String(),
-			Spread: ticker.Spread.String(),
-		}
-		if cfg, cerr := symbolRegistry.Get(sym, mkt); cerr == nil {
-			resp.MakerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
-			resp.TakerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
-			if mkt == models.Futures {
-				resp.MaintenanceMarginRatePct = cfg.MaintenanceMarginRate.Mul(decimal.NewFromInt(100)).String()
-				if cfg.UnderlyingSymbol != "" {
-					if indexTicker, ierr := mdSvc.Ticker(cfg.UnderlyingSymbol, models.Spot); ierr == nil && indexTicker.MarkPrice.IsPositive() {
-						resp.IndexPrice = indexTicker.MarkPrice.String()
-						resp.FundingRatePct = settlement.CurrentFundingRate(ticker.MarkPrice, indexTicker.MarkPrice).
-							Mul(decimal.NewFromInt(100)).String()
-					}
-				}
-			}
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})

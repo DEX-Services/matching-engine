@@ -133,20 +133,46 @@ type MarketSummaryResponse struct {
 	UpdatedAt    string `json:"updatedAt"`
 }
 
-func marketSummaryHandler(data interface {
+// summarySource is the marketdata surface the summary handlers need.
+// SummaryAll enumerates every registered book so the batched response covers
+// the full executable catalogue in one request.
+type summarySource interface {
 	Summary(string, models.MarketType) (*marketdata.Summary, error)
-}) http.HandlerFunc {
+	SummaryAll() []marketdata.Summary
+}
+
+// toSummaryResponse converts one engine summary into its wire form.
+func toSummaryResponse(s *marketdata.Summary) MarketSummaryResponse {
+	return MarketSummaryResponse{
+		Symbol: s.Symbol, Market: string(s.Market), Price: s.Price.String(),
+		Change24hPct: s.Change24hPct.String(), Volume24h: s.Volume24h.String(),
+		Has24hData: s.Has24hData, UpdatedAt: s.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// marketSummaryHandler serves one summary per symbol/market pair, or — when
+// no symbol query param is given — ALL registered symbols in a single batched
+// response. The batch form is what the frontend's 5s market-list refresh
+// calls: one request instead of one per market keeps the request count flat
+// no matter how many symbols are listed (the old per-market fan-out was the
+// largest single source of trade-page HTTP chatter).
+func marketSummaryHandler(data summarySource) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		symbol, market := r.URL.Query().Get("symbol"), models.MarketType(r.URL.Query().Get("market"))
+		if symbol == "" && market == "" {
+			all := data.SummaryAll()
+			out := make([]MarketSummaryResponse, 0, len(all))
+			for i := range all {
+				out = append(out, toSummaryResponse(&all[i]))
+			}
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
 		summary, err := data.Summary(symbol, market)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, MarketSummaryResponse{
-			Symbol: summary.Symbol, Market: string(summary.Market), Price: summary.Price.String(),
-			Change24hPct: summary.Change24hPct.String(), Volume24h: summary.Volume24h.String(),
-			Has24hData: summary.Has24hData, UpdatedAt: summary.UpdatedAt.UTC().Format(time.RFC3339Nano),
-		})
+		writeJSON(w, http.StatusOK, toSummaryResponse(summary))
 	}
 }

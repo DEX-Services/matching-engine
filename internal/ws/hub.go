@@ -82,6 +82,27 @@ func (h *Hub) Run() {
 	}
 }
 
+// BroadcastJSON sends a raw payload to every connected client. It is for
+// aggregated market-data frames (e.g. the 1s TICKER snapshot) that do NOT
+// originate from the event bus — deliberately so: bus-driven broadcasts are
+// persisted downstream (Postgres writer, Kafka publisher, attached-order
+// listener) and carry gapless per-symbol sequence numbers, neither of which
+// applies to a periodic UI snapshot.
+func (h *Hub) BroadcastJSON(payload []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for c := range h.clients {
+		c.send(payload)
+	}
+}
+
+// ClientCount returns the number of connected WebSocket clients.
+func (h *Hub) ClientCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
+}
+
 // ServeWS upgrades an HTTP connection to WebSocket and registers the client.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
