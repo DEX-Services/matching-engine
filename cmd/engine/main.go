@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -152,6 +153,13 @@ func main() {
 			}
 		}
 	}()
+
+	// Options writer margin needs a live underlying mark price (see
+	// risk.shortOptionMargin) — wire it up now that mdSvc exists. The
+	// Checker was constructed earlier (before mdSvc) so this is a late
+	// setter rather than a constructor argument; nil-safe until this runs,
+	// so order checks before this line still see cash-secured behavior.
+	risk.SetMarkSource(mdSvc)
 
 	// Phase 4: WebSocket
 	hub := ws.NewHub(wsCh)
@@ -872,16 +880,46 @@ func main() {
 				continue
 			}
 			isCall := inst.OptionType == "CALL"
-			price := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
-			greeks := pricing.CalcGreeks(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
-			spread := price * 0.02
+
+			// Theoretical Black-Scholes price/greeks using the flat assumed-vol
+			// fallback. This is the only source once real book data exists too
+			// (a resting order's own book mid can't fill in the assumedVol used
+			// for a not-yet-quoted strike's greeks — those still come from this
+			// flat assumption until a real per-strike vol surface exists, see
+			// the roadmap's Phase 2 "IV surface" item).
+			theo := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
+			vol := assumedVol
+
+			// Blend with the instrument's own order book when it has live two-
+			// sided quotes: a thin/never-traded strike falls back to pure
+			// theoretical (mdSvc has no ticker for it at all until an order
+			// touches it — see validateAndPrepareOption's mdSvc.Register), but
+			// once quoted, the book mid is real price discovery and should not
+			// be ignored in favor of a flat 60% vol guess.
+			price := theo
+			if bookTicker, err := mdSvc.Ticker(inst.Symbol, models.Options); err == nil && bookTicker.MidPrice.IsPositive() {
+				bookMid, _ := bookTicker.MidPrice.Float64()
+				price = (theo + bookMid) / 2
+				// Re-imply vol from the blended price so the displayed
+				// IV/greeks match what's actually being quoted, not the flat
+				// assumption — bisection is cheap and this endpoint is polled,
+				// not hot-path.
+				if iv := pricing.ImpliedVol(price, spot, strike, tYears, riskFreeRate, isCall); iv > 0 {
+					vol = iv
+				}
+			}
+			if price < 0 {
+				price = 0
+			}
+			greeks := pricing.CalcGreeks(spot, strike, tYears, vol, riskFreeRate, isCall)
+			spread := math.Max(price*0.02, 0.01)
 			out = append(out, OptionChainEntry{
 				Symbol: inst.Symbol, OptionType: inst.OptionType, Strike: inst.Strike.String(),
 				Expiry: inst.Expiry.Format(time.RFC3339),
-				Bid:    fmt.Sprintf("%.4f", price-spread/2),
+				Bid:    fmt.Sprintf("%.4f", math.Max(price-spread/2, 0)),
 				Ask:    fmt.Sprintf("%.4f", price+spread/2),
 				Mid:    fmt.Sprintf("%.4f", price),
-				IV:     assumedVol * 100,
+				IV:     vol * 100,
 				Delta:  greeks.Delta, Gamma: greeks.Gamma, Theta: greeks.Theta, Vega: greeks.Vega, Rho: greeks.Rho,
 			})
 		}

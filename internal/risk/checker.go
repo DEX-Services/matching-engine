@@ -20,6 +20,106 @@ func NewChecker(ledger *Ledger) *Checker {
 	return &Checker{ledger: ledger}
 }
 
+// UnderlyingMarkSource resolves the current mark price for an options
+// underlying (e.g. "BTC-BIUSD"), so the options margin model can price a
+// short writer's actual risk instead of always locking the full strike.
+// Implemented by *marketdata.Service; kept as a narrow interface here to
+// avoid risk importing marketdata (marketdata does not import risk either,
+// but this keeps the dependency direction explicit and one-way).
+type UnderlyingMarkSource interface {
+	UnderlyingMark(symbol string) (decimal.Decimal, bool)
+}
+
+// markSource is package-level rather than a Checker field because notionalFor
+// and friends (required, releaseAmount, FilledDebit, RequiredFor, ...) are
+// free functions called from many packages without a Checker in hand — see
+// their doc comments. Set once at startup via SetMarkSource; nil-safe (falls
+// back to the pre-existing cash-secured strike×qty behavior) so tests and any
+// call path that runs before wiring never panic.
+var markSource UnderlyingMarkSource
+
+// SetMarkSource wires the mark-price provider used for options margin. Call
+// once during startup, after the marketdata.Service exists (main.go creates
+// the Checker before the Service, so this can't be a constructor argument).
+func SetMarkSource(src UnderlyingMarkSource) {
+	markSource = src
+}
+
+// shortOptionMarginFloorPct is the fraction of underlying notional (strike ×
+// qty is NOT the base here — it's spot × qty) added to the premium already
+// received, per Phase 2a of the options roadmap: max(premium + pct% of
+// underlying notional, ITM amount). This is the same shape retail brokers
+// use for cash-secured-adjacent short option margin (not truly portfolio
+// margin — no offsets for hedged positions yet, that's Phase 2b).
+const shortOptionMarginFloorPct = "0.20"
+
+// shortOptionMargin computes the margin required to write (sell) an option,
+// replacing the naive strike×qty cash-secured hold with a floor model:
+//
+//	max(premium + 20% of underlying notional, ITM amount) × qty
+//
+// capped at the fully cash-secured strike×qty amount (this model should
+// only ever require LESS collateral than full cash-securing, never more —
+// if the computation somehow exceeds it, that's a bug in the estimate, not
+// a real additional risk the floor is meant to capture).
+// Falls back to the original strike×qty behavior when no mark price is
+// available yet (source unset, or the underlying has no live book) so
+// options trading never becomes *more* permissive than today by accident.
+func shortOptionMargin(order *models.Order, qty, premiumPrice decimal.Decimal) decimal.Decimal {
+	cashSecured := order.StrikePrice.Mul(qty)
+	if markSource == nil {
+		return cashSecured
+	}
+	underlying := underlyingFromOrderSymbol(order)
+	spot, ok := markSource.UnderlyingMark(underlying)
+	if !ok || !spot.IsPositive() {
+		return cashSecured
+	}
+
+	// Premium already received by the writer for this order's notional.
+	// premiumPrice is 0 for a resting order not yet priced against the book
+	// (e.g. before a limit's own price is known) — required()/requiredAt()
+	// always pass order.Price or an explicit estimate, so this is the same
+	// price a buyer would pay, per unit.
+	premium := premiumPrice.Mul(qty)
+
+	underlyingNotional := spot.Mul(qty)
+	floorPct, _ := decimal.NewFromString(shortOptionMarginFloorPct)
+	floor := premium.Add(underlyingNotional.Mul(floorPct))
+
+	var itm decimal.Decimal
+	if strings.EqualFold(order.OptionType, "CALL") {
+		itm = decimal.Max(decimal.Zero, spot.Sub(order.StrikePrice)).Mul(qty)
+	} else {
+		itm = decimal.Max(decimal.Zero, order.StrikePrice.Sub(spot)).Mul(qty)
+	}
+
+	required := decimal.Max(floor, itm)
+	if required.GreaterThan(cashSecured) {
+		return cashSecured
+	}
+	if required.IsNegative() {
+		return decimal.Zero
+	}
+	return required
+}
+
+// underlyingFromOrderSymbol extracts the underlying spot symbol (e.g.
+// "BTC-BIUSD") from an option instrument symbol, mirroring
+// settlement.underlyingFromSymbol (duplicated here rather than imported —
+// settlement already depends on risk, so the reverse import would cycle).
+func underlyingFromOrderSymbol(order *models.Order) string {
+	parts := strings.Split(order.Symbol, "-")
+	if len(parts) >= 5 {
+		return parts[0] + "-" + parts[1]
+	}
+	if len(parts) >= 1 && order.QuoteCurrency != "" {
+		return parts[0] + "-" + order.QuoteCurrency
+	}
+	return order.Symbol
+}
+
+
 // Check validates an order before submission to the matching engine.
 // Returns nil if all checks pass.
 func (c *Checker) Check(order *models.Order) error {
@@ -251,9 +351,12 @@ func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decima
 			// Premium owed by the buyer.
 			return price.Mul(qty)
 		}
-		// Cash-secured collateral for the writer (both CALL and PUT): lock
-		// strike*qty in quote currency. No physical covered-call support yet.
-		return order.StrikePrice.Mul(qty)
+		// Writer (short) margin: max(premium + 20% underlying notional, ITM
+		// amount), capped at full cash-secured strike×qty — see
+		// shortOptionMargin. Falls back to the original cash-secured
+		// strike×qty when no live mark price is available for the
+		// underlying (markSource unset or the book has no quotes yet).
+		return shortOptionMargin(order, qty, price)
 	default:
 		if order.IsBuy() {
 			return price.Mul(qty)
