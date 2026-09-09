@@ -181,6 +181,27 @@ func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit decimal.Decimal)
 	return required
 }
 
+// comboLegStrikes parses the strike price out of each leg symbol
+// (BASE-QUOTE-STRIKE-EXPIRY-TYPE) directly, without any Postgres lookup —
+// the risk package has no database access and must stay that way (it's on
+// the hot order-check path); the strike is already encoded in the symbol
+// string itself, put there by whichever handler built the combo order (see
+// cmd/engine's /spread handler), so parsing it back out is sufficient and
+// keeps this package's dependency-free design intact.
+func comboLegStrikes(order *models.Order) (buyStrike, sellStrike decimal.Decimal, ok bool) {
+	buyParts := strings.Split(order.ComboBuySymbol, "-")
+	sellParts := strings.Split(order.ComboSellSymbol, "-")
+	if len(buyParts) < 5 || len(sellParts) < 5 {
+		return decimal.Zero, decimal.Zero, false
+	}
+	buyStrike, err1 := decimal.NewFromString(buyParts[2])
+	sellStrike, err2 := decimal.NewFromString(sellParts[2])
+	if err1 != nil || err2 != nil || !buyStrike.IsPositive() || !sellStrike.IsPositive() {
+		return decimal.Zero, decimal.Zero, false
+	}
+	return buyStrike, sellStrike, true
+}
+
 // underlyingFromOrderSymbol extracts the underlying spot symbol (e.g.
 // "BTC-BIUSD") from an option instrument symbol, mirroring
 // settlement.underlyingFromSymbol (duplicated here rather than imported —
@@ -383,8 +404,18 @@ func assetFor(order *models.Order) string {
 	// BASE-QUOTE-STRIKE-EXPIRY-TYPE) cannot be split into BASE-QUOTE, so
 	// the quote currency must come from the order itself (set by the
 	// handler from the instrument's underlying config).
-	if order.Market == models.Options && order.QuoteCurrency != "" {
+	if (order.Market == models.Options || order.Market == models.ComboOptions) && order.QuoteCurrency != "" {
 		return order.QuoteCurrency
+	}
+	// A combo's own Symbol is the synthetic "COMBO:<hash>" identifier, not
+	// a real BASE-QUOTE pair — its quote currency must come from
+	// QuoteCurrency (set by the handler, same as a standalone option order)
+	// or, failing that, from parsing one of its two real leg symbols.
+	if order.Market == models.ComboOptions {
+		if parts := strings.Split(order.ComboBuySymbol, "-"); len(parts) >= 2 {
+			return parts[1]
+		}
+		return order.Symbol
 	}
 
 	parts := strings.SplitN(order.Symbol, "-", 2)
@@ -422,6 +453,37 @@ func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decima
 	case models.Futures:
 		notional := price.Mul(qty)
 		return MarginRequired(notional, order.Leverage)
+	case models.ComboOptions:
+		// A combo order's margin is netted from the moment it is placed —
+		// VerticalSpreadMargin(strikeDistance, netCredit) — not each leg
+		// margined independently and reconciled after the fact. This is the
+		// real difference from the old /spread endpoint (two independent
+		// orders, netted only after both confirmed open): the native combo
+		// book's own risk check IS the netted number, with no transient
+		// window where more than the net-defined-risk amount is locked.
+		//
+		// price here is the combo's quoted NET price: positive = a net
+		// debit (a BUY order paying to open the spread; margin required is
+		// zero, matching VerticalSpreadMargin's rule that a debit already
+		// paid needs no further collateral), negative = a net credit
+		// received (margin required is the strike distance minus that
+		// credit). A SELL order on the combo (closing/reversing) is priced
+		// with the opposite sign convention by the caller — see the /spread
+		// handler's order construction.
+		buyStrike, sellStrike, ok := comboLegStrikes(order)
+		if !ok {
+			return decimal.Zero // malformed combo symbols: fail open to zero here, validateAndPrepareCombo already rejects this before Check ever runs
+		}
+		netCredit := price.Neg() // BUY at net debit price -> credit is negative; BUY at net credit -> credit is positive
+		if order.IsBuy() {
+			return VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit)
+		}
+		// SELL (closing/reversing an existing combo position) needs no NEW
+		// margin reservation of its own — it reduces or reverses exposure
+		// against an already-margined position, the same way a futures
+		// ReduceOnly close needs no fresh margin check (see Checker.Check's
+		// InternalLiquidation short-circuit for the analogous futures case).
+		return decimal.Zero
 	case models.Options:
 		if order.IsBuy() {
 			// Premium owed by the buyer.

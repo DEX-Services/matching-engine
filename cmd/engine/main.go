@@ -95,12 +95,26 @@ func main() {
 		}
 		return cfg.MakerFee, cfg.TakerFee
 	}
+	// comboSettlementRef is filled in once mdSvc/pgPool exist further down
+	// (settlementFactory is only INVOKED lazily, when an engine is actually
+	// created — by then this closure's captured comboSettlementRef will
+	// already be set, same late-binding shape symbolRegistryRef uses for
+	// feeLookup above).
+	var comboSettlementRef atomic.Pointer[settlement.ComboSettlement]
 	settlementFactory := func(symbol string, market models.MarketType) matching.SettlementHandler {
 		switch market {
 		case models.Futures:
 			return futuresSettlement
 		case models.Options:
 			return optionsSettlement
+		case models.ComboOptions:
+			if cs := comboSettlementRef.Load(); cs != nil {
+				return cs
+			}
+			// Should never happen in practice (a combo engine is only ever
+			// created via /spread, which runs long after main() finishes
+			// wiring) but fail closed rather than nil-panic if it somehow does.
+			return matching.NoopSettlement{}
 		default:
 			return settlement.NewSpotSettlement(ledger, backend, feeLookup)
 		}
@@ -212,6 +226,8 @@ func main() {
 				slog.Error("ensure option_instruments schema", "error", err)
 			} else if err := volsurface.EnsureSchema(ctx, pool); err != nil {
 				slog.Error("ensure iv_snapshots schema", "error", err)
+			} else if err := ensureComboSchema(ctx, pool); err != nil {
+				slog.Error("ensure combo_instruments schema", "error", err)
 			} else {
 				seedSymbolConfigs(ctx, pool)
 				seedOptionInstruments(ctx, pool)
@@ -252,6 +268,14 @@ func main() {
 	// pgPool == nil, e.g. Postgres disabled locally), so this is always safe
 	// to construct even when the schema-ensure above never ran.
 	ivStore := volsurface.NewStore(pgPool)
+
+	// Combo (multi-leg spread) settlement: fans a native combo book's trades
+	// out into two linked option-leg trades against the SAME optionsSettlement
+	// standalone option orders use. See settlement.ComboSettlement's doc
+	// comment for why this is genuinely atomic, unlike the old /spread
+	// endpoint's two-independent-orders-plus-unwind approach.
+	comboAdapter := &comboSettlementAdapter{pool: pgPool, mdSvc: mdSvc}
+	comboSettlementRef.Store(settlement.NewComboSettlement(optionsSettlement, comboAdapter, comboAdapter))
 
 	// Attached (TP/SL) order groups: OCO cancel-sibling-on-fill and
 	// fill/exposure-aware resize live outside the matching goroutine, as an
@@ -1195,6 +1219,49 @@ func validateAndPrepareOption(ctx context.Context, pool *pgxpool.Pool, symbols *
 	// work for option instruments too.
 	mdSvc.Register(o.Symbol, o.Market, eng)
 
+	return nil
+}
+
+// validateAndPrepareCombo resolves a combo order's two legs (o.ComboBuySymbol/
+// o.ComboSellSymbol, already set by the caller — see the /spread handler),
+// validates they form a real vertical spread, registers the combo
+// instrument (creating it on first use, same lazy pattern as individual
+// option contracts), rewrites o.Symbol to the combo's own deterministic
+// symbol so it gets its own dedicated order book, and sets QuoteCurrency.
+//
+// This is what makes combo orders match natively: after this runs, o.Symbol
+// is a real registered instrument with a real order book — matching against
+// OTHER resting combo orders on the exact same book, atomically, the same
+// way any other instrument matches. There is no client-side coordination of
+// two separate orders left anywhere in this path.
+func validateAndPrepareCombo(ctx context.Context, pool *pgxpool.Pool, reg *matching.Registry, mdSvc *marketdata.Service, o *models.Order) error {
+	if o.ComboBuySymbol == "" || o.ComboSellSymbol == "" {
+		return fmt.Errorf("comboBuySymbol and comboSellSymbol are required")
+	}
+	buyInst, err := loadOptionInstrument(ctx, pool, o.ComboBuySymbol)
+	if err != nil || buyInst == nil {
+		return fmt.Errorf("comboBuySymbol %s is not a known option instrument", o.ComboBuySymbol)
+	}
+	sellInst, err := loadOptionInstrument(ctx, pool, o.ComboSellSymbol)
+	if err != nil || sellInst == nil {
+		return fmt.Errorf("comboSellSymbol %s is not a known option instrument", o.ComboSellSymbol)
+	}
+	if err := validateVerticalPair(buyInst, sellInst); err != nil {
+		return err
+	}
+
+	combo, err := getOrCreateComboInstrument(ctx, pool, buyInst, sellInst)
+	if err != nil {
+		return err
+	}
+	o.Symbol = combo.Symbol
+	o.QuoteCurrency = "BIUSD"
+	if parts := splitOptionSymbol(buyInst.Symbol); len(parts) >= 2 {
+		o.QuoteCurrency = parts[1]
+	}
+
+	eng := reg.GetOrCreate(o.Symbol, o.Market)
+	mdSvc.Register(o.Symbol, o.Market, eng)
 	return nil
 }
 

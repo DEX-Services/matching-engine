@@ -28,6 +28,32 @@ type OptionsPosition struct {
 	QuoteCurrency string          // settlement currency (e.g. "BIUSD")
 }
 
+// PnL returns the position's unrealized profit/loss at the given current
+// option mark price (the same theoretical/book-blended price /option-chain
+// and /positions' portfolio-Greeks computation use), mirroring
+// futures.Position.PnL's role for options — the input liquidation.Engine's
+// mark-to-market options sweep needs to erode a writer's available margin
+// exactly the way futures margin erodes as a position moves against it.
+//
+// For a LONG position, PnL is straightforward: current value minus what was
+// paid (Premium is positive — cash paid out — for a long).
+//
+// For a SHORT (writer) position, Premium is stored negative (cash RECEIVED,
+// see recordPosition): unrealized PnL = premium received (-Premium) minus
+// the current cost to buy back the same position (markPrice * |Size|). A
+// writer profits as the option's value falls toward zero (paying less to
+// close than was received to open) and loses as it rises.
+func (p *OptionsPosition) PnL(markPrice decimal.Decimal) decimal.Decimal {
+	if p.Size.IsZero() {
+		return decimal.Zero
+	}
+	currentValue := markPrice.Mul(p.Size.Abs())
+	if p.Size.IsPositive() {
+		return currentValue.Sub(p.Premium)
+	}
+	return p.Premium.Neg().Sub(currentValue)
+}
+
 // OptionsSettlement handles trade settlement for options contracts.
 // At trade time, the option premium is transferred between buyer and seller.
 // Strike/expiry/type travel on the order itself (models.Order), populated by
@@ -134,6 +160,63 @@ func (o *OptionsSettlement) AllPositions() []*OptionsPosition {
 		out = append(out, &cp)
 	}
 	return out
+}
+
+// ForceClosePosition force-closes a WRITER's (short) options position at the
+// given current mark price, for liquidation.Engine's mark-to-market options
+// sweep — the real force-close counterpart to FuturesSettlement.ClosePosition,
+// filling the roadmap's "liquidation for options sellers" gap (Phase 2 item
+// 5) instead of leaving it alert-only.
+//
+// Mechanically: releases the reservedCollateral (whatever was actually
+// locked for this position at order time — see
+// risk.RequiredOptionsMargin, recomputed by the caller against the SAME
+// inputs the order-time check used) back to available, then debits the
+// account for its realized loss (pos.PnL is negative for a losing writer)
+// or credits it for a realized gain. This is a REAL, final settlement — the
+// position is deleted and cannot be partially reopened; unlike the reduce-
+// only order this is called alongside, it applies regardless of whether the
+// option's own book has any liquidity to trade against, exactly the same
+// way ClosePosition force-settles a futures position at mark when the
+// reduce-only order can't fill it first.
+//
+// Returns the realized PnL applied, for the caller's event/logging use. If
+// the debit fails (extreme case: account has less than the loss even after
+// releasing its own collateral — should not happen since the position IS
+// margined for exactly this, but ledger state can desync under real-world
+// failure conditions), the position is NOT removed, mirroring
+// ExpiryProcessor's exercise-debit-failure path: leave it for manual
+// reconciliation rather than silently eat an unrecoverable loss.
+func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike decimal.Decimal, expiry time.Time, optionType string, reservedCollateral, markPrice decimal.Decimal) (decimal.Decimal, error) {
+	key := positionKey(accountID, symbol, strike, expiry, optionType)
+	o.mu.RLock()
+	pos, ok := o.positions[key]
+	o.mu.RUnlock()
+	if !ok || pos.Size.IsZero() {
+		return decimal.Zero, nil
+	}
+	quote := pos.QuoteCurrency
+	pnl := pos.PnL(markPrice)
+
+	if reservedCollateral.IsPositive() {
+		o.ledger.Release(accountID, quote, reservedCollateral)
+	}
+	if pnl.IsNegative() {
+		if err := o.ledger.Debit(accountID, quote, pnl.Neg()); err != nil {
+			return decimal.Zero, fmt.Errorf("force-close debit: %w", err)
+		}
+		backendclient.Async("settle", func(ctx context.Context) error {
+			return o.backend.Settle(ctx, accountID, quote, backendclient.ToRawUnits(pnl.Neg()))
+		})
+	} else if pnl.IsPositive() {
+		o.ledger.Credit(accountID, quote, pnl)
+		backendclient.Async("credit", func(ctx context.Context) error {
+			return o.backend.Credit(ctx, accountID, quote, backendclient.ToRawUnits(pnl))
+		})
+	}
+
+	o.removePosition(accountID, symbol, strike, expiry, optionType)
+	return pnl, nil
 }
 
 // removePosition deletes a settled/expired position.

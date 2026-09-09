@@ -136,6 +136,15 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		}
 	}
 
+	// Combo (multi-leg spread) orders similarly need their own dedicated
+	// order book — one per unique (buy leg, sell leg) pair — created lazily
+	// on first use exactly like individual option contracts above.
+	if o.Market == models.ComboOptions {
+		if err := validateAndPrepareCombo(ctx, d.pgPool, d.reg, d.mdSvc, o); err != nil {
+			return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid combo order: %w", err))
+		}
+	}
+
 	if err := validateOrderConfig(d.symbolRegistry, o); err != nil {
 		return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid order: %w", err))
 	}

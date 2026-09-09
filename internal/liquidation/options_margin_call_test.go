@@ -7,7 +7,10 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/marketdata"
+	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
+	"github.com/dex/matching-engine/internal/orderbook"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/shopspring/decimal"
@@ -21,6 +24,27 @@ type fakeMarkSource map[string]decimal.Decimal
 func (f fakeMarkSource) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
 	v, ok := f[symbol]
 	return v, ok
+}
+
+// fakeBook is a minimal marketdata.BookReader with a fixed best bid/ask, so
+// a real marketdata.Service can be driven to a known Ticker() output without
+// a live matching.Engine.
+type fakeBook struct{ bid, ask decimal.Decimal }
+
+func (f fakeBook) BestBid() decimal.Decimal                         { return f.bid }
+func (f fakeBook) BestAsk() decimal.Decimal                         { return f.ask }
+func (f fakeBook) Depth(int) (bids, asks []orderbook.LevelSnapshot) { return nil, nil }
+
+// mdWithUnderlyingSpot builds a real marketdata.Service with a registered
+// SPOT book for underlying at the given price (as both best bid and ask, so
+// MidPrice/MarkPrice resolve to exactly that price) and NO registered book
+// for any option instrument — driving checkOptionsMarginCalls's optionMark
+// down its theoretical-Black-Scholes fallback path, which is what a
+// never-quoted option correctly falls back to.
+func mdWithUnderlyingSpot(underlying string, spot decimal.Decimal) *marketdata.Service {
+	md := marketdata.NewService()
+	md.Register(underlying, models.Spot, fakeBook{bid: spot, ask: spot})
+	return md
 }
 
 // openShortOption drives OptionsSettlement.Settle with a synthetic trade to
@@ -50,7 +74,12 @@ func openShortOption(t *testing.T, os *settlement.OptionsSettlement, writer, sym
 	}
 }
 
-func TestCheckOptionsMarginCalls_NoAlertWhenFarFromReserved(t *testing.T) {
+func newTestOptionsEngine(os *settlement.OptionsSettlement, md *marketdata.Service, bus *events.Bus) *Engine {
+	reg := matching.NewRegistry(bus, nil, nil)
+	return &Engine{options: os, marketdata: md, registry: reg, bus: bus, log: slog.Default()}
+}
+
+func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	ledger := risk.NewLedger()
 	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
 	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
@@ -58,52 +87,68 @@ func TestCheckOptionsMarginCalls_NoAlertWhenFarFromReserved(t *testing.T) {
 	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(50000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
-	// OTM call, spot far below strike: floor requirement should be well
-	// under the 80% margin-call threshold of the cash-secured reservation.
+	// OTM call, spot far below strike: the writer's equity (reserved +
+	// unrealized gain, since an OTM short call is profitable for the
+	// writer) stays comfortably above the maintenance requirement.
 	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
+	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(50000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
-	eng := &Engine{options: os, bus: bus, log: slog.Default()}
+	eng := newTestOptionsEngine(os, md, bus)
 	eng.checkOptionsMarginCalls()
 
 	select {
 	case evt := <-ch:
-		t.Fatalf("expected no margin call alert, got %+v", evt)
+		t.Fatalf("expected no liquidation/alert event, got %+v", evt)
 	default:
+	}
+
+	pos := os.GetPosition("writer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	if pos == nil || pos.Size.IsZero() {
+		t.Fatal("expected the writer's position to still be open (not liquidated)")
 	}
 }
 
-func TestCheckOptionsMarginCalls_AlertsWhenDeepITM(t *testing.T) {
+func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 	ledger := risk.NewLedger()
 	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
 	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
-	// Deep ITM call: spot far above strike pushes intrinsic value (and so
-	// the floor's ITM term) toward the cash-secured ceiling.
+	// Deep ITM call: spot far above strike makes the short call a large
+	// unrealized loss for the writer, eroding equity well below maintenance.
 	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(200000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
 	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
+	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(200000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
-	eng := &Engine{options: os, bus: bus, log: slog.Default()}
+	eng := newTestOptionsEngine(os, md, bus)
 	eng.checkOptionsMarginCalls()
 
-	select {
-	case evt := <-ch:
-		if evt.Type != models.EventMarginCallAlert {
-			t.Fatalf("event type = %s, want MARGIN_CALL_ALERT", evt.Type)
+	// Drain events looking for the liquidation event (a margin-call alert
+	// may also be published first, at the higher warning threshold).
+	var sawLiquidation bool
+	deadline := time.After(time.Second)
+	for !sawLiquidation {
+		select {
+		case evt := <-ch:
+			if evt.Type == models.EventLiquidation {
+				sawLiquidation = true
+				if evt.Liquidation.AccountID != "writer" {
+					t.Fatalf("liquidated account = %s, want writer", evt.Liquidation.AccountID)
+				}
+			}
+		case <-deadline:
+			t.Fatal("expected an EventLiquidation for the deep-ITM short position, got none")
 		}
-		if evt.MarginCallInfo == nil {
-			t.Fatal("expected MarginCallInfo to be populated")
-		}
-		if evt.MarginCallInfo.AccountID != "writer" {
-			t.Fatalf("account = %s, want writer", evt.MarginCallInfo.AccountID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected a margin call alert event, got none")
+	}
+
+	pos := os.GetPosition("writer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	if pos != nil && !pos.Size.IsZero() {
+		t.Fatalf("expected the writer's position to be force-closed, still open: %+v", pos)
 	}
 }
 
@@ -117,22 +162,16 @@ func TestCheckOptionsMarginCalls_IgnoresLongPositions(t *testing.T) {
 
 	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
+	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(200000))
 	bus := events.NewBus()
-	ch := bus.Subscribe(10)
-	eng := &Engine{options: os, bus: bus, log: slog.Default()}
+	eng := newTestOptionsEngine(os, md, bus)
 	eng.checkOptionsMarginCalls()
 
-	// The buyer's long position must never trigger an alert even though the
-	// same fill also recorded one for them (buyers can't be margin-called —
-	// they already paid the full premium up front, nothing further is owed).
-	select {
-	case evt := <-ch:
-		if evt.MarginCallInfo != nil && evt.MarginCallInfo.AccountID == "buyer" {
-			t.Fatalf("buyer (long) must never receive a margin call alert, got %+v", evt.MarginCallInfo)
-		}
-	case <-time.After(100 * time.Millisecond):
-		// fine — the writer's alert may or may not have already been drained
-		// by another test in this package; the assertion above is what matters.
+	// The buyer's long position must never be force-closed — buyers can't be
+	// margin-called; they already paid the full premium up front.
+	buyerPos := os.GetPosition("buyer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	if buyerPos == nil || buyerPos.Size.IsZero() {
+		t.Fatal("expected the buyer's long position to remain untouched")
 	}
 }
 

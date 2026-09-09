@@ -1,11 +1,10 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
-	"github.com/dex/matching-engine/internal/events"
-	"github.com/dex/matching-engine/internal/risk"
 	"github.com/shopspring/decimal"
 )
 
@@ -60,66 +59,43 @@ func TestValidateVerticalPair_RejectsSameStrike(t *testing.T) {
 	}
 }
 
-func TestNetVerticalMargin_ReleasesExcessAboveNetRequirement(t *testing.T) {
-	bus := events.NewBus()
-	d := newTestSubmitDeps(bus)
-	d.ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
-	// No mark source wired -> shortOptionMargin/RequiredOptionsMargin falls
-	// back to the full cash-secured strike*qty ceiling, exactly like a
-	// standalone short leg would have reserved at order time.
-	risk.SetMarkSource(nil)
-
-	expiry := time.Now().Add(24 * time.Hour)
-	buy := sampleInstrument("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD", "CALL", "60000", expiry)
-	sell := sampleInstrument("BTC-BIUSD-65000-20260101-CALL", "BTC-BIUSD", "CALL", "65000", expiry)
-
-	qty := decimal.NewFromInt(1)
-	// Reserve what the short leg's own order-time check would have locked:
-	// cash-secured strike*qty = 65000.
-	if err := d.ledger.Reserve("writer", "BIUSD", decimal.NewFromInt(65000)); err != nil {
-		t.Fatalf("reserve: %v", err)
+func TestComboSymbolFor_DeterministicAndOrderSensitive(t *testing.T) {
+	a := comboSymbolFor("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD-65000-20260101-CALL")
+	b := comboSymbolFor("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD-65000-20260101-CALL")
+	if a != b {
+		t.Fatalf("comboSymbolFor must be deterministic for the same inputs: %s vs %s", a, b)
 	}
-
-	// Net credit of 500 -> VerticalSpreadMargin = strikeDistance(5000) - 500 = 4500.
-	netCredit := decimal.NewFromInt(500)
-	got := netVerticalMargin(d, "writer", buy, sell, qty, netCredit, decimal.NewFromInt(500), "BIUSD")
-
-	want := decimal.NewFromInt(4500)
-	if !got.Equal(want) {
-		t.Fatalf("netVerticalMargin returned %s, want %s", got, want)
-	}
-	// 65000 reserved - 4500 required = 60500 should have been released back
-	// to available.
-	available := d.ledger.Available("writer", "BIUSD")
-	wantAvailable := decimal.NewFromInt(1_000_000).Sub(decimal.NewFromInt(4500))
-	if !available.Equal(wantAvailable) {
-		t.Fatalf("available after netting = %s, want %s", available, wantAvailable)
+	// Swapping which leg is "buy" vs "sell" is a DIFFERENT combo (going long
+	// the 60k/65k spread is not the same instrument as going long the
+	// 65k/60k spread — the buy/sell assignment IS the spread's identity).
+	reversed := comboSymbolFor("BTC-BIUSD-65000-20260101-CALL", "BTC-BIUSD-60000-20260101-CALL")
+	if a == reversed {
+		t.Fatal("comboSymbolFor must distinguish leg order (buy vs sell assignment defines the spread)")
 	}
 }
 
-func TestNetVerticalMargin_NoReleaseWhenAlreadyAtOrBelowRequirement(t *testing.T) {
-	bus := events.NewBus()
-	d := newTestSubmitDeps(bus)
-	d.ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
-	risk.SetMarkSource(nil)
-
+func TestGetOrCreateComboInstrument_MemoryFallbackRoundTrips(t *testing.T) {
+	ctx := context.Background()
 	expiry := time.Now().Add(24 * time.Hour)
 	buy := sampleInstrument("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD", "CALL", "60000", expiry)
 	sell := sampleInstrument("BTC-BIUSD-65000-20260101-CALL", "BTC-BIUSD", "CALL", "65000", expiry)
-	qty := decimal.NewFromInt(1)
 
-	if err := d.ledger.Reserve("writer", "BIUSD", decimal.NewFromInt(65000)); err != nil {
-		t.Fatalf("reserve: %v", err)
+	created, err := getOrCreateComboInstrument(ctx, nil, buy, sell)
+	if err != nil {
+		t.Fatalf("getOrCreateComboInstrument: %v", err)
 	}
-	// Net DEBIT (negative netCredit) -> VerticalSpreadMargin = 0, which is
-	// below the reserved 65000, so this should still release the excess
-	// down to 0 (a net-debit vertical needs no margin at all).
-	got := netVerticalMargin(d, "writer", buy, sell, qty, decimal.NewFromInt(-1000), decimal.NewFromInt(500), "BIUSD")
-	if !got.IsZero() {
-		t.Fatalf("netVerticalMargin for a net-debit spread = %s, want 0", got)
+
+	loaded, err := loadComboInstrument(ctx, nil, created.Symbol)
+	if err != nil {
+		t.Fatalf("loadComboInstrument: %v", err)
 	}
-	available := d.ledger.Available("writer", "BIUSD")
-	if !available.Equal(decimal.NewFromInt(1_000_000)) {
-		t.Fatalf("available after netting a net-debit spread = %s, want the full 1,000,000 (nothing should stay locked)", available)
+	if loaded.BuySymbol != buy.Symbol || loaded.SellSymbol != sell.Symbol || loaded.Underlying != buy.Underlying {
+		t.Fatalf("loaded combo instrument = %+v, want legs %s/%s underlying %s", loaded, buy.Symbol, sell.Symbol, buy.Underlying)
+	}
+}
+
+func TestLoadComboInstrument_UnknownSymbolErrors(t *testing.T) {
+	if _, err := loadComboInstrument(context.Background(), nil, "COMBO:doesnotexist"); err == nil {
+		t.Fatal("expected an error looking up an unregistered combo symbol")
 	}
 }

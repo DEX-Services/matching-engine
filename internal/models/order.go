@@ -54,13 +54,22 @@ const (
 	StatusExpired         OrderStatus = "EXPIRED"
 )
 
-// MarketType distinguishes Spot, Futures, and Options books.
+// MarketType distinguishes Spot, Futures, Options, and ComboOptions books.
 type MarketType string
 
 const (
 	Spot    MarketType = "SPOT"
 	Futures MarketType = "FUTURES"
 	Options MarketType = "OPTIONS"
+	// ComboOptions is a native multi-leg (currently: 2-leg vertical spread)
+	// order book, matching how real options exchanges (Deribit, CME, Binance
+	// Options combos) implement spread trading: the combo is registered as
+	// its own instrument with its own order book, quoted and matched as ONE
+	// unit at a single net price — not two independently-submitted orders
+	// coordinated by a client. A combo fill is atomic by construction (it is
+	// a single trade on a single book) and fans out into two linked leg
+	// trades at settlement time; see settlement.ComboSettlement.
+	ComboOptions MarketType = "COMBO_OPTIONS"
 )
 
 // Order is the core struct shared by all asset classes.
@@ -107,6 +116,17 @@ type Order struct {
 	OptionType  string          `json:"optionType,omitempty"` // "CALL" | "PUT"
 	StrikePrice decimal.Decimal `json:"strikePrice,omitempty"`
 	Expiry      time.Time       `json:"expiry,omitempty"`
+
+	// ComboBuySymbol/ComboSellSymbol apply to ComboOptions orders only: the
+	// two option instrument symbols this combo's BUY side means "buy
+	// ComboBuySymbol, sell ComboSellSymbol" (a BUY order on the combo book
+	// goes long the spread; a SELL order does the reverse — sell
+	// ComboBuySymbol, buy ComboSellSymbol, i.e. closing/reversing it). Set
+	// once at combo-instrument creation (see cmd/engine's /spread handler)
+	// and copied onto every order against that combo symbol so settlement
+	// can resolve both legs without a second Postgres round-trip per trade.
+	ComboBuySymbol  string `json:"comboBuySymbol,omitempty"`
+	ComboSellSymbol string `json:"comboSellSymbol,omitempty"`
 
 	// InternalLiquidation marks an order forced by the liquidation engine;
 	// such orders bypass pre-trade risk checks (the position is already open).

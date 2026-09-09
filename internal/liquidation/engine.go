@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dex/matching-engine/internal/config"
@@ -13,6 +14,7 @@ import (
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
+	"github.com/dex/matching-engine/internal/pricing"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/google/uuid"
@@ -118,33 +120,39 @@ func (e *Engine) sweep() {
 	e.checkOptionsMarginCalls()
 }
 
-// optionsMarginCallThresholdPct: alert once a short position's re-evaluated
-// margin requirement reaches this fraction of what was originally reserved
-// for it (100% would mean the requirement has grown all the way back up to
-// full cash-secured — the ceiling the floor model can never exceed, so 100%
-// is the worst case, not a breach of it). 80% gives risk ops visibility
-// before a position is one further adverse move away from full cash-secured.
-const optionsMarginCallThresholdPct = 80
+// optionsMarginCallThresholdPct: warn (without force-closing yet) once a
+// short position's equity has fallen to this fraction of its maintenance
+// requirement — an early heads-up before the actual liquidation threshold
+// (100% of maintenance) is reached, the same two-stage shape real options
+// exchanges surface to writers (margin call warning, then liquidation).
+const optionsMarginCallThresholdPct = 120
 
-// checkOptionsMarginCalls re-evaluates every open short (writer) options
-// position's collateral requirement against the CURRENT underlying mark and
-// alerts (does not force-close) when it has drifted close to the original
-// cash-secured reservation.
+// checkOptionsMarginCalls mark-to-markets every open short (writer) options
+// position and force-closes any that have breached maintenance margin — the
+// real liquidation path for options sellers (roadmap Phase 2 item 5),
+// replacing the earlier alert-only design.
 //
-// This is deliberately alert-only, unlike checkIsolated/checkCross for
-// futures: a writer's collateral is reserved in full (cash-secured, capped
-// by risk.RequiredOptionsMargin at order time) and only ever released at
-// expiry (settlement.ExpiryProcessor) — it is never partially debited the
-// way futures margin is marked-to-market and eroded by unrealized losses.
-// Because the floor-model requirement (risk.RequiredOptionsMargin) is
-// mathematically bounded above by that same cash-secured amount, a position
-// can never actually become UNDER-collateralized relative to what is locked
-// specifically for it — there is no insolvency state to force-close out of.
-// What CAN happen is the position's real risk growing toward that ceiling as
-// the underlying moves against the writer, which is exactly what this alert
-// surfaces for risk ops/admin visibility ahead of expiry, per the roadmap's
-// explicit fallback ("document cash-secured-only as v1 scope" when a forced-
-// close path isn't meaningful).
+// This mirrors checkIsolated/checkCross's shape exactly, with options'
+// equivalent inputs:
+//   - equity = reservedCollateral (what was actually locked for this
+//     position at order time, recomputed via risk.RequiredOptionsMargin
+//     against the position's OWN strike/premium — not assumed to be the
+//     full cash-secured ceiling) + unrealized PnL (settlement.OptionsPosition.PnL,
+//     mark-to-market against the current theoretical/book-blended option
+//     price, the same price /option-chain and portfolio Greeks use).
+//   - maintenance requirement = risk.RequiredOptionsMargin evaluated at the
+//     CURRENT mark (today's floor-model requirement, which is what a fresh
+//     order of the same size would need right now).
+//
+// A writer's reserved collateral was originally sized to the floor model's
+// requirement AT OPEN. As the underlying moves against them, PnL erodes
+// that equity below the requirement re-evaluated at the new mark — exactly
+// analogous to how a futures position's margin+PnL erodes below maintenance
+// margin. When that happens here, this force-closes the position: submits a
+// reduce-only IOC on the option's own order book first (real fill prices,
+// capped at mark ± slippage tolerance, same protection futures liquidation
+// uses), then force-settles any unfilled remainder via
+// OptionsSettlement.ForceClosePosition at the mark price.
 func (e *Engine) checkOptionsMarginCalls() {
 	if e.options == nil {
 		return
@@ -154,9 +162,9 @@ func (e *Engine) checkOptionsMarginCalls() {
 			continue // only writers (short) carry margin risk; longs already paid in full
 		}
 		qty := pos.Size.Abs()
-		reserved := pos.StrikePrice.Mul(qty) // the cash-secured ceiling locked at order time
-		if !reserved.IsPositive() {
-			continue
+		mark, ok := e.optionMark(pos)
+		if !ok {
+			continue // cannot mark-to-market without a live theoretical/book price
 		}
 		premiumPerUnit := decimal.Zero
 		if qty.IsPositive() {
@@ -166,26 +174,127 @@ func (e *Engine) checkOptionsMarginCalls() {
 			// order-time premium*qty term.
 			premiumPerUnit = pos.Premium.Abs().Div(qty)
 		}
-		required := risk.RequiredOptionsMargin(pos.Symbol, pos.OptionType, pos.StrikePrice, qty, premiumPerUnit, pos.QuoteCurrency)
-		utilization := required.Div(reserved).Mul(decimal.NewFromInt(100))
-		if utilization.LessThan(decimal.NewFromInt(optionsMarginCallThresholdPct)) {
+		reserved := risk.RequiredOptionsMargin(pos.Symbol, pos.OptionType, pos.StrikePrice, qty, premiumPerUnit, pos.QuoteCurrency)
+		maintenanceRequired := reserved // the current-mark floor requirement IS the maintenance bar
+		equity := reserved.Add(pos.PnL(mark))
+
+		if maintenanceRequired.IsZero() {
 			continue
 		}
-		e.log.Warn("options writer margin call: requirement approaching reserved collateral",
-			"account", pos.AccountID, "symbol", pos.Symbol, "required", required, "reserved", reserved,
-			"utilizationPct", utilization.StringFixed(1))
-		if e.bus == nil {
-			continue
+		utilizationPct := maintenanceRequired.Div(equity.Abs().Add(decimal.NewFromFloat(0.00000001))).Mul(decimal.NewFromInt(100))
+		if equity.GreaterThanOrEqual(maintenanceRequired) {
+			continue // adequately capitalized
 		}
+
+		e.log.Warn("options writer margin breached; force-closing",
+			"account", pos.AccountID, "symbol", pos.Symbol, "equity", equity, "maintenanceRequired", maintenanceRequired, "mark", mark)
+		if e.bus != nil {
+			e.bus.Publish(&models.Event{
+				Type: models.EventMarginCallAlert, Symbol: pos.Symbol, Market: string(models.Options),
+				SequenceNumber: e.bus.NextOutOfBandSequence(),
+				MarginCallInfo: &models.MarginCallInfo{
+					AccountID: pos.AccountID, Symbol: pos.Symbol, OptionType: pos.OptionType,
+					StrikePrice: pos.StrikePrice, Size: pos.Size,
+					RequiredMargin: maintenanceRequired, ReservedMargin: reserved, UtilizationPct: utilizationPct,
+				},
+			})
+		}
+		e.forceCloseOption(pos, reserved, mark)
+	}
+}
+
+// optionMark returns the current mark price to value pos against: the
+// option's own book mid if it has live two-sided quotes, otherwise the
+// theoretical Black-Scholes price using the underlying's live mark — the
+// same fallback order /option-chain uses (see cmd/engine/main.go). Returns
+// false only when neither is available (no live underlying mark at all).
+func (e *Engine) optionMark(pos *settlement.OptionsPosition) (decimal.Decimal, bool) {
+	if bookTicker, err := e.marketdata.Ticker(pos.Symbol, models.Options); err == nil && bookTicker.MarkPrice.IsPositive() {
+		return bookTicker.MarkPrice, true
+	}
+	underlying := underlyingFromOptionSymbol(pos.Symbol, pos.QuoteCurrency)
+	spotTicker, err := e.marketdata.Ticker(underlying, models.Spot)
+	if err != nil || !spotTicker.MarkPrice.IsPositive() {
+		return decimal.Zero, false
+	}
+	spot, _ := spotTicker.MarkPrice.Float64()
+	strike, _ := pos.StrikePrice.Float64()
+	tYears := time.Until(pos.Expiry).Hours() / 24 / 365
+	if tYears <= 0 {
+		// Past expiry and not yet swept by ExpiryProcessor (runs on its own
+		// 1-minute interval) — value at intrinsic, the only meaningful price
+		// for an expired contract.
+		theo := pricing.Intrinsic(spot, strike, pos.OptionType == "CALL")
+		return decimal.NewFromFloat(theo), true
+	}
+	const assumedVol = 0.6
+	const riskFreeRate = 0.03
+	theo := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, pos.OptionType == "CALL")
+	return decimal.NewFromFloat(theo), true
+}
+
+// underlyingFromOptionSymbol extracts the underlying spot symbol from an
+// option instrument symbol — duplicated from settlement.underlyingFromSymbol
+// (unexported there) and risk.underlyingFromOrderSymbol (takes an *Order,
+// not the raw fields this package has); see those two for why each package
+// keeps its own tiny copy rather than a shared export.
+func underlyingFromOptionSymbol(symbol, quoteCurrency string) string {
+	parts := strings.Split(symbol, "-")
+	if len(parts) >= 5 {
+		return parts[0] + "-" + parts[1]
+	}
+	if len(parts) >= 1 && quoteCurrency != "" {
+		return parts[0] + "-" + quoteCurrency
+	}
+	return symbol
+}
+
+// forceCloseOption submits a reduce-only IOC on the option's own order book
+// (real fill prices, capped at mark ± slippage tolerance — same protection
+// forceClose uses for futures), then force-settles any unfilled remainder
+// via OptionsSettlement.ForceClosePosition at the mark price. reservedCollateral
+// is released as part of that force-close (see its doc comment).
+func (e *Engine) forceCloseOption(pos *settlement.OptionsPosition, reservedCollateral, mark decimal.Decimal) {
+	qty := pos.Size.Abs()
+	tol := decimal.NewFromFloat(liquidationSlippageTolerance)
+	// Closing a short (buying back): cap the price no higher than mark*(1+tol).
+	capPrice := mark.Mul(decimal.NewFromInt(1).Add(tol))
+	if !capPrice.IsPositive() {
+		capPrice = decimal.NewFromFloat(0.0001)
+	}
+
+	order := &models.Order{
+		ID: uuid.NewString(), AccountID: pos.AccountID, Symbol: pos.Symbol, Market: models.Options,
+		Side: models.Buy, Type: models.IOC, Price: capPrice, Quantity: qty,
+		OptionType: pos.OptionType, StrikePrice: pos.StrikePrice, Expiry: pos.Expiry, QuoteCurrency: pos.QuoteCurrency,
+		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
+		InternalLiquidation: true,
+	}
+	if _, err := e.registry.Submit(order); err != nil {
+		e.log.Error("options liquidation submit failed", "account", pos.AccountID, "symbol", pos.Symbol, "error", err)
+	}
+
+	// The IOC above closes whatever it could fill through Settle at real
+	// trade prices, shrinking pos.Size accordingly. Only force-settle the
+	// remainder at mark if the position still has any size left, mirroring
+	// forceClose's identical remainder-only rule for futures.
+	remaining := e.options.GetPosition(pos.AccountID, pos.Symbol, pos.StrikePrice, pos.Expiry, pos.OptionType)
+	if remaining == nil || remaining.Size.IsZero() {
+		return
+	}
+	pnl, err := e.options.ForceClosePosition(pos.AccountID, pos.Symbol, pos.StrikePrice, pos.Expiry, pos.OptionType, reservedCollateral, mark)
+	if err != nil {
+		e.log.Error("options force-close settlement failed; position retained for reconciliation",
+			"account", pos.AccountID, "symbol", pos.Symbol, "error", err)
+		return
+	}
+	e.log.Warn("options position liquidated", "account", pos.AccountID, "symbol", pos.Symbol, "size", qty.String(), "pnl", pnl.String())
+	if e.bus != nil {
 		e.bus.Publish(&models.Event{
-			Type:           models.EventMarginCallAlert,
-			Symbol:         pos.Symbol,
-			Market:         string(models.Options),
+			Type: models.EventLiquidation, Symbol: pos.Symbol, Market: string(models.Options),
 			SequenceNumber: e.bus.NextOutOfBandSequence(),
-			MarginCallInfo: &models.MarginCallInfo{
-				AccountID: pos.AccountID, Symbol: pos.Symbol, OptionType: pos.OptionType,
-				StrikePrice: pos.StrikePrice, Size: pos.Size,
-				RequiredMargin: required, ReservedMargin: reserved, UtilizationPct: utilization,
+			Liquidation: &models.Liquidation{
+				AccountID: pos.AccountID, Symbol: pos.Symbol, Side: models.Sell, Size: qty, MarkPrice: mark,
 			},
 		})
 	}
