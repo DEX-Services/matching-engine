@@ -117,21 +117,28 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("ws upgrade failed", "error", err)
 		return
 	}
-	c := &client{conn: conn, sendCh: make(chan []byte, 512)}
+	c := newClient(conn)
 	h.register(c)
 	go c.writePump()
 	go h.readPump(c)
 }
 
-// broadcast serialises evt and sends it to all connected clients non-blocking.
+// broadcast serialises evt and sends it to every interested client
+// non-blocking. A client that has declared stream subscriptions (see
+// readPump) only receives events for its subscribed "symbol|market" streams;
+// clients with no subscriptions get the legacy full broadcast.
 func (h *Hub) broadcast(evt *models.Event) {
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		return
 	}
+	view := &eventView{streamKey: evt.Symbol + "|" + evt.Market}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {
+		if !c.wantsEvent(view) {
+			continue
+		}
 		c.send(payload)
 	}
 }
@@ -149,6 +156,22 @@ func (h *Hub) unregister(c *client) {
 	close(c.sendCh)
 }
 
+// wsInboundMessage is the (tiny) client→server control protocol. Clients may
+// subscribe to specific "symbol|market" streams so the hub stops fanning out
+// all markets' churn to every connection — per-user bandwidth becomes O(active
+// markets) instead of O(all markets).
+type wsInboundMessage struct {
+	// "subscribe" or "unsubscribe".
+	Action string `json:"action"`
+	// Streams in the same "symbol|market" form the frontend uses for its
+	// per-stream sequence tracking. Unknown streams are harmless (they just
+	// never match an event).
+	Streams []string `json:"streams"`
+}
+
+// readPump consumes inbound frames. Two duties: keep the pong/read-deadline
+// machinery alive (the original purpose), and apply subscription control
+// frames. Anything else is ignored.
 func (h *Hub) readPump(c *client) {
 	defer func() {
 		h.unregister(c)
@@ -161,8 +184,39 @@ func (h *Hub) readPump(c *client) {
 		return nil
 	})
 	for {
-		if _, _, err := c.conn.ReadMessage(); err != nil {
+		msgType, msg, err := c.conn.ReadMessage()
+		if err != nil {
 			break
 		}
+		if msgType != websocket.TextMessage || len(msg) == 0 {
+			continue
+		}
+		var m wsInboundMessage
+		if json.Unmarshal(msg, &m) != nil {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(m.Action)) {
+		case "subscribe":
+			if keys := normalizeStreams(m.Streams); len(keys) > 0 {
+				c.subscribeSymbols(keys)
+			}
+		case "unsubscribe":
+			if keys := normalizeStreams(m.Streams); len(keys) > 0 {
+				c.unsubscribeSymbols(keys)
+			}
+		}
 	}
+}
+
+// normalizeStreams trims and lowercases stream keys (symbols/markets are
+// upper-case in events; accepting case-insensitively makes client typos
+// harmless in the direction of MORE data, never less).
+func normalizeStreams(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s = strings.ToUpper(strings.TrimSpace(s)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

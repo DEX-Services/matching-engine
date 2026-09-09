@@ -121,46 +121,54 @@ func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qt
 
 // Summary returns a price and rolling 24h change/volume from real engine
 // trades. It never synthesizes a value when there is no liquidity.
+//
+// Read-only by design: the 1s TICKER broadcaster calls this for every symbol,
+// and it previously took the WRITE lock to lazily trim the 24h window on each
+// read — contending with matching-side RecordTrade and /depth on the same
+// mutex 17x/s. The window is now trimmed exclusively on the write path
+// (RecordTrade); here we merely skip trades older than the cutoff when
+// accumulating, so a symbol that stops trading simply freezes its last window
+// instead of mutating shared state on read. Reading the stored slice without
+// holding the lock during accumulation is safe: RecordTrade only ever appends
+// at indexes >= the published length or replaces the slice with a fresh copy,
+// so elements within an observed snapshot are immutable.
 func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, error) {
 	ticker, err := s.Ticker(symbol, market)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
-	key := symbol + ":" + string(market)
-	s.mu.Lock()
-	trades := s.trades[key]
-	cutoff := now.Add(-24 * time.Hour)
-	firstCurrent := 0
-	for firstCurrent < len(trades) && trades[firstCurrent].at.Before(cutoff) {
-		firstCurrent++
-	}
-	if firstCurrent > 0 {
-		trades = append([]recordedTrade(nil), trades[firstCurrent:]...)
-		s.trades[key] = trades
-	}
-	s.mu.Unlock()
+	s.mu.RLock()
+	trades := s.trades[symbol+":"+string(market)]
+	s.mu.RUnlock()
 
 	price := ticker.MarkPrice
 	summary := &Summary{Symbol: symbol, Market: market, Price: price, UpdatedAt: now}
-	if len(trades) == 0 || price.IsZero() {
-		return summary, nil
-	}
-	opening := trades[0].price
-	if !opening.IsZero() {
-		summary.Change24hPct = price.Sub(opening).Div(opening).Mul(decimal.NewFromInt(100))
-	}
+	// Accumulate over the true trailing-24h window without mutating the
+	// stored slice — trimming lives on the RecordTrade write path (see the
+	// doc comment above).
+	cutoff := now.Add(-24 * time.Hour)
+	var opening decimal.Decimal
 	for _, trade := range trades {
+		if trade.at.Before(cutoff) {
+			continue
+		}
+		if opening.IsZero() {
+			opening = trade.price
+		}
 		summary.Volume24h = summary.Volume24h.Add(trade.price.Mul(trade.qty))
 	}
+	if opening.IsZero() || price.IsZero() {
+		return summary, nil
+	}
+	summary.Change24hPct = price.Sub(opening).Div(opening).Mul(decimal.NewFromInt(100))
 	summary.Has24hData = true
 	return summary, nil
 }
 
 // SummaryAll returns summaries for every registered book in one pass. Used
-// by the batched /market-summary endpoint. Delegates to Summary per symbol —
-// including its 24h trade-window trimming — so batch and single-symbol
-// responses are computed identically.
+// by the batched /market-summary endpoint and delegates to Summary per symbol
+// so batch and single-symbol responses are computed identically.
 func (s *Service) SummaryAll() []Summary {
 	s.mu.RLock()
 	keys := make([]SymbolKey, 0, len(s.books))

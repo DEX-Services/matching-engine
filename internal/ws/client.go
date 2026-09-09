@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,64 @@ type client struct {
 	conn     *websocket.Conn
 	sendCh   chan []byte
 	overflow atomic.Bool
+
+	// mu guards the subscription set below. The hub's broadcast loops iterate
+	// clients under the hub lock; per-client subscription changes arrive from
+	// this client's own readPump, so a dedicated lock per connection keeps
+	// that contention-free and avoids lock-ordering questions entirely.
+	mu sync.RWMutex
+	// Symbol streams this connection explicitly subscribed to. Inbound
+	// subscribe/unsubscribe frames (subscribeSymbols/unsubscribeSymbols)
+	// mutate it; filtering in the hub reads it. An empty set means "no
+	// filter applied" — the legacy full-broadcast behavior — so clients
+	// that never send subscription frames (older frontends, monitoring
+	// tools, tests) keep receiving everything and nothing breaks.
+	wantStreams map[string]struct{}
+}
+
+func newClient(conn *websocket.Conn) *client {
+	return &client{conn: conn, sendCh: make(chan []byte, 512), wantStreams: make(map[string]struct{})}
+}
+
+// subscribeSymbols registers interest in additional "symbol|market" streams.
+func (c *client) subscribeSymbols(keys []string) {
+	c.mu.Lock()
+	for _, k := range keys {
+		c.wantStreams[k] = struct{}{}
+	}
+	c.mu.Unlock()
+}
+
+// unsubscribeSymbols removes interest in "symbol|market" streams.
+func (c *client) unsubscribeSymbols(keys []string) {
+	c.mu.Lock()
+	for _, k := range keys {
+		delete(c.wantStreams, k)
+	}
+	c.mu.Unlock()
+}
+
+// wantsEvent reports whether this client should receive evt. It is a filter
+// only — every client still receives everything until it declares at least
+// one stream. The stream key matches the frontend's per-stream sequence
+// tracking ("symbol|market"), so one subscription covers both the order and
+// trade events of that market.
+func (c *client) wantsEvent(evt *eventView) bool {
+	c.mu.RLock()
+	if len(c.wantStreams) == 0 {
+		c.mu.RUnlock()
+		return true // unfiltered connection: legacy full broadcast
+	}
+	_, ok := c.wantStreams[evt.streamKey]
+	c.mu.RUnlock()
+	return ok
+}
+
+// eventView is the minimal projection the filtering path needs from a bus
+// event: its stream key. Declared here (rather than taking *models.Event)
+// so filtering and broadcasting stay decoupled from the event type.
+type eventView struct {
+	streamKey string
 }
 
 // send enqueues a message for the client. If the client's buffer is full the
