@@ -189,6 +189,24 @@ type OptionsPositionDTO struct {
 type PositionsResponse struct {
 	Futures []FuturesPositionDTO `json:"futures"`
 	Options []OptionsPositionDTO `json:"options"`
+	// OptionsGreeks is the account's aggregate options risk across every
+	// open options position — each position's per-contract Greeks (from
+	// Black-Scholes, priced against the live underlying mark and the vol
+	// surface/flat-vol fallback), weighted by signed size and summed. Zero-
+	// valued (all fields 0) when the account holds no options positions.
+	OptionsGreeks PortfolioGreeksDTO `json:"optionsGreeks"`
+}
+
+// PortfolioGreeksDTO is one account's aggregate options Greeks across all its
+// open positions — the roadmap's "Greeks-aware risk numbers" item (Phase 2
+// item 4). Delta/Gamma/Vega are dimensionless-per-unit-underlying sums (a
+// portfolio Delta of 5 behaves like being long 5 units of the underlying for
+// small moves); Theta is aggregate daily time decay in quote currency.
+type PortfolioGreeksDTO struct {
+	Delta float64 `json:"delta"`
+	Gamma float64 `json:"gamma"`
+	Theta float64 `json:"theta"`
+	Vega  float64 `json:"vega"`
 }
 
 // OptionChainEntry is one contract's live quote/greeks in a GET /option-chain response.
@@ -213,6 +231,13 @@ type OptionChainResponse struct {
 	Underlying string             `json:"underlying"`
 	Spot       string             `json:"spot"`
 	Chain      []OptionChainEntry `json:"chain"`
+	// MakerFeePct / TakerFeePct are the underlying's real configured options
+	// fee (from symbol_configs, market=OPTIONS), as a percentage string —
+	// same convention as MarketMetadata.MakerFeePct/TakerFeePct. Added so the
+	// frontend can price options orders off the real per-instrument fee
+	// instead of a hardcoded 0.001 literal (see TradePanel.tsx's feeRate).
+	MakerFeePct string `json:"makerFeePct"`
+	TakerFeePct string `json:"takerFeePct"`
 }
 
 // TickerResponse is the payload for GET /ticker. All price fields are

@@ -23,6 +23,17 @@ const (
 	EventBookDelta             EventType = "BOOK_DELTA"
 	EventLiquidation           EventType = "LIQUIDATION"
 	EventFunding               EventType = "FUNDING"
+	// EventMarginCallAlert is published for a short options position whose
+	// re-evaluated collateral requirement (risk.RequiredOptionsMargin, priced
+	// against the CURRENT underlying mark) has drifted close to its original
+	// cash-secured reservation. Unlike EventLiquidation this is alert-only —
+	// see liquidation.Engine's options sweep doc comment for why an options
+	// writer's collateral cannot actually become insolvent under the
+	// cash-secured-at-open reservation model (the floor requirement is
+	// mathematically bounded by what was already reserved), so there is
+	// nothing to force-close; this event exists purely so risk ops/admin
+	// tooling can see a writer's risk growing before expiry.
+	EventMarginCallAlert EventType = "MARGIN_CALL_ALERT"
 	// EventRealizedPnl is published whenever a futures position is (fully or
 	// partially) closed, carrying the authoritative realized PnL/fee/margin
 	// figures for that close so they can be persisted and queried later —
@@ -39,11 +50,26 @@ type Event struct {
 	SequenceNumber uint64    `json:"sequenceNumber"`
 
 	// Exactly one of the following will be non-nil per event type.
-	Order       *Order       `json:"order,omitempty"`
-	Trade       *Trade       `json:"trade,omitempty"`
-	Liquidation *Liquidation `json:"liquidation,omitempty"`
-	Funding     *Funding     `json:"funding,omitempty"`
-	RealizedPnl *RealizedPnl `json:"realizedPnl,omitempty"`
+	Order          *Order          `json:"order,omitempty"`
+	Trade          *Trade          `json:"trade,omitempty"`
+	Liquidation    *Liquidation    `json:"liquidation,omitempty"`
+	Funding        *Funding        `json:"funding,omitempty"`
+	RealizedPnl    *RealizedPnl    `json:"realizedPnl,omitempty"`
+	MarginCallInfo *MarginCallInfo `json:"marginCallInfo,omitempty"`
+}
+
+// MarginCallInfo describes one short options position whose re-evaluated
+// collateral requirement has drifted close to its original reservation. See
+// EventMarginCallAlert.
+type MarginCallInfo struct {
+	AccountID      string          `json:"accountId"`
+	Symbol         string          `json:"symbol"`
+	OptionType     string          `json:"optionType"`
+	StrikePrice    decimal.Decimal `json:"strikePrice"`
+	Size           decimal.Decimal `json:"size"` // negative (short)
+	RequiredMargin decimal.Decimal `json:"requiredMargin"`
+	ReservedMargin decimal.Decimal `json:"reservedMargin"` // the cash-secured amount originally locked (strike*|size|)
+	UtilizationPct decimal.Decimal `json:"utilizationPct"` // RequiredMargin / ReservedMargin * 100
 }
 
 // Liquidation describes a forced position close.

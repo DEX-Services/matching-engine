@@ -104,6 +104,83 @@ func shortOptionMargin(order *models.Order, qty, premiumPrice decimal.Decimal) d
 	return required
 }
 
+// RequiredOptionsMargin re-evaluates the collateral a short (writer)
+// options position needs RIGHT NOW, using the same floor model
+// shortOptionMargin applies at order-submission time. Exported for
+// liquidation.Engine's options margin-call sweep: a position's collateral
+// was computed once when the order that opened it was placed, against
+// whatever the underlying's spot was at that moment — since then the spot
+// may have moved enough that the position is now under-margined relative to
+// what a FRESH order of the same size would require today, without the
+// account having done anything wrong. premiumPerUnit should be the
+// position's own historical average premium (Premium/|Size| from
+// settlement.OptionsPosition) as the best available stand-in for "premium
+// already received" — the position doesn't carry a live order price the way
+// a fresh order does.
+func RequiredOptionsMargin(symbol, optionType string, strike, qty, premiumPerUnit decimal.Decimal, quoteCurrency string) decimal.Decimal {
+	order := &models.Order{
+		Symbol: symbol, OptionType: optionType, StrikePrice: strike,
+		QuoteCurrency: quoteCurrency, Side: models.Sell, Market: models.Options,
+	}
+	return shortOptionMargin(order, qty, premiumPerUnit)
+}
+
+// VerticalSpreadMargin computes the net margin required to open a vertical
+// spread — buy one option, sell another, same underlying/expiry/option
+// type, different strikes, same quantity — as a single defined-risk
+// position, per the roadmap's Phase 2b ("portfolio-margin offsets for
+// hedged positions... covered calls, spreads").
+//
+// A vertical's maximum possible loss is bounded by construction:
+//   - CALL spread (buy lower strike, sell higher strike — a bull call
+//     spread; a bear call spread is the mirror short side of the exact same
+//     pair): max loss = strike distance × qty, MINUS the net premium
+//     credit already banked (a net debit ADDS to that max loss instead).
+//   - PUT spread: same shape, mirrored (buy higher strike, sell lower).
+//
+// This deliberately does NOT re-derive shortOptionMargin's flat 20%-of-
+// underlying floor for the short leg — the whole point of a vertical is
+// that its long leg caps the short leg's loss at the strike distance, which
+// is almost always tighter than that floor. Margining each leg
+// independently (the pre-9b behavior — buy leg costs its premium, sell leg
+// locks its own floor/cash-secured amount) ignores that the two legs
+// together can never lose more than the strike distance, and so
+// overcharges margin for every textbook credit/debit spread.
+//
+// buyStrike/sellStrike are which leg is long/short; qty is the (equal, by
+// construction — see cmd/engine's /spread handler) contract count on both
+// legs; netCredit is (premium RECEIVED for the short leg) − (premium PAID
+// for the long leg): positive means the spread was opened for a net credit,
+// negative means a net debit was paid to open it.
+//
+// A net-debit spread needs NO additional collateral beyond the debit
+// already paid — that debit is cash already handed over, and it IS the
+// spread's maximum possible loss (if both legs expire worthless, the buyer
+// loses exactly what they paid, no more). A net-credit spread's maximum
+// loss is the strike distance minus the credit already banked (the credit
+// offsets part of the worst case), so that residual is what must be posted
+// as margin.
+//
+// Returns the quote-currency margin to reserve, always >= 0 and always <=
+// the strike distance × qty (a vertical's collateral requirement can never
+// exceed its own defined maximum loss).
+func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit decimal.Decimal) decimal.Decimal {
+	if !qty.IsPositive() {
+		return decimal.Zero
+	}
+	strikeDistance := buyStrike.Sub(sellStrike).Abs().Mul(qty)
+	if !netCredit.IsPositive() {
+		// Net debit (or exactly zero): no additional margin — the debit
+		// paid up front already IS the maximum loss.
+		return decimal.Zero
+	}
+	required := strikeDistance.Sub(netCredit)
+	if required.IsNegative() {
+		return decimal.Zero
+	}
+	return required
+}
+
 // underlyingFromOrderSymbol extracts the underlying spot symbol (e.g.
 // "BTC-BIUSD") from an option instrument symbol, mirroring
 // settlement.underlyingFromSymbol (duplicated here rather than imported —
@@ -118,7 +195,6 @@ func underlyingFromOrderSymbol(order *models.Order) string {
 	}
 	return order.Symbol
 }
-
 
 // Check validates an order before submission to the matching engine.
 // Returns nil if all checks pass.

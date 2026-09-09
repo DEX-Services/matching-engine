@@ -32,6 +32,7 @@ import (
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/risk_admin"
 	"github.com/dex/matching-engine/internal/settlement"
+	"github.com/dex/matching-engine/internal/volsurface"
 	"github.com/dex/matching-engine/internal/ws"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -209,6 +210,8 @@ func main() {
 				slog.Error("ensure symbol_configs schema", "error", err)
 			} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {
 				slog.Error("ensure option_instruments schema", "error", err)
+			} else if err := volsurface.EnsureSchema(ctx, pool); err != nil {
+				slog.Error("ensure iv_snapshots schema", "error", err)
 			} else {
 				seedSymbolConfigs(ctx, pool)
 				seedOptionInstruments(ctx, pool)
@@ -245,6 +248,11 @@ func main() {
 	}
 	symbolRegistryRef.Store(symbolRegistry)
 
+	// IV surface store for /option-chain: nil-pool-safe (NewStore tolerates
+	// pgPool == nil, e.g. Postgres disabled locally), so this is always safe
+	// to construct even when the schema-ensure above never ran.
+	ivStore := volsurface.NewStore(pgPool)
+
 	// Attached (TP/SL) order groups: OCO cancel-sibling-on-fill and
 	// fill/exposure-aware resize live outside the matching goroutine, as an
 	// event-bus subscriber - the same pattern as the ws hub and trade
@@ -256,6 +264,7 @@ func main() {
 
 	// Futures liquidation, funding, and options expiry background loops.
 	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)
+	liqEngine.SetOptionsSettlement(optionsSettlement)
 	go liqEngine.Run(ctx, time.Second)
 
 	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus, pgPool)
@@ -396,6 +405,12 @@ func main() {
 		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
 		pgPool: pgPool, mdSvc: mdSvc, bus: bus,
 	}, attachedReg))
+
+	mux.HandleFunc("/spread", spreadHandler(submitDeps{
+		reg: reg, ledger: ledger, backend: backend, checker: checker,
+		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
+		pgPool: pgPool, mdSvc: mdSvc, bus: bus,
+	}))
 
 	mux.HandleFunc("/cancel", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -846,6 +861,7 @@ func main() {
 				Symbol: p.Symbol, OptionType: p.OptionType, StrikePrice: p.StrikePrice.String(),
 				Expiry: p.Expiry.Format(time.RFC3339), Size: p.Size.String(), Premium: p.Premium.String(),
 			})
+			accumulatePortfolioGreeks(&out.OptionsGreeks, p, mdSvc, ivStore, r.Context())
 		}
 		writeJSON(w, http.StatusOK, out)
 	}))
@@ -881,31 +897,40 @@ func main() {
 			}
 			isCall := inst.OptionType == "CALL"
 
-			// Theoretical Black-Scholes price/greeks using the flat assumed-vol
-			// fallback. This is the only source once real book data exists too
-			// (a resting order's own book mid can't fill in the assumedVol used
-			// for a not-yet-quoted strike's greeks — those still come from this
-			// flat assumption until a real per-strike vol surface exists, see
-			// the roadmap's Phase 2 "IV surface" item).
-			theo := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, isCall)
+			// vol starts from the IV surface's interpolation across this
+			// expiry's other observed strikes (nearby contracts that have
+			// recently had a live book) rather than a single flat guess for
+			// the whole chain — a strike near actively-quoted neighbors gets
+			// a much better estimate than one 60% assumption applied
+			// everywhere. Falls back to assumedVol only when there is
+			// nothing nearby to interpolate from yet (e.g. right after a
+			// fresh contract is seeded, before any strike on this expiry has
+			// ever traded).
 			vol := assumedVol
+			if iv, ok := ivStore.Interpolate(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType); ok {
+				vol = iv
+			}
+			theo := pricing.Price(spot, strike, tYears, vol, riskFreeRate, isCall)
 
 			// Blend with the instrument's own order book when it has live two-
 			// sided quotes: a thin/never-traded strike falls back to pure
 			// theoretical (mdSvc has no ticker for it at all until an order
 			// touches it — see validateAndPrepareOption's mdSvc.Register), but
 			// once quoted, the book mid is real price discovery and should not
-			// be ignored in favor of a flat 60% vol guess.
+			// be ignored in favor of the (interpolated or flat) vol guess.
 			price := theo
 			if bookTicker, err := mdSvc.Ticker(inst.Symbol, models.Options); err == nil && bookTicker.MidPrice.IsPositive() {
 				bookMid, _ := bookTicker.MidPrice.Float64()
 				price = (theo + bookMid) / 2
 				// Re-imply vol from the blended price so the displayed
-				// IV/greeks match what's actually being quoted, not the flat
-				// assumption — bisection is cheap and this endpoint is polled,
-				// not hot-path.
+				// IV/greeks match what's actually being quoted, not the
+				// interpolated/flat starting guess — bisection is cheap and
+				// this endpoint is polled, not hot-path. This freshly-implied
+				// IV is also what gets persisted below for OTHER strikes on
+				// this expiry to interpolate from next time.
 				if iv := pricing.ImpliedVol(price, spot, strike, tYears, riskFreeRate, isCall); iv > 0 {
 					vol = iv
+					ivStore.Record(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType, iv)
 				}
 			}
 			if price < 0 {
@@ -923,7 +948,21 @@ func main() {
 				Delta:  greeks.Delta, Gamma: greeks.Gamma, Theta: greeks.Theta, Vega: greeks.Vega, Rho: greeks.Rho,
 			})
 		}
-		writeJSON(w, http.StatusOK, OptionChainResponse{Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out})
+		// Real per-instrument fee from symbol_configs (market=OPTIONS, keyed
+		// by the underlying — see seed.go's BTC-BIUSD OPTIONS row), not a
+		// frontend-hardcoded literal. Falls back to the schema default
+		// (0.001 = 0.1%, matching the previous hardcoded value) if the
+		// registry has no row yet, so this never regresses to a worse
+		// default than what was already assumed.
+		makerFeePct, takerFeePct := "0.1", "0.1"
+		if cfg, err := symbolRegistryRef.Load().Get(underlying, models.Options); err == nil {
+			makerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
+			takerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+		}
+		writeJSON(w, http.StatusOK, OptionChainResponse{
+			Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out,
+			MakerFeePct: makerFeePct, TakerFeePct: takerFeePct,
+		})
 	})
 
 	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
@@ -1157,6 +1196,62 @@ func validateAndPrepareOption(ctx context.Context, pool *pgxpool.Pool, symbols *
 	mdSvc.Register(o.Symbol, o.Market, eng)
 
 	return nil
+}
+
+// accumulatePortfolioGreeks prices one open options position with Black-
+// Scholes (spot from the underlying's live mark, vol from the IV surface
+// with the same interpolate-or-flat-assumedVol fallback /option-chain uses)
+// and adds its per-contract Greeks, weighted by signed position size, into
+// the running portfolio total. Silently skips a position it cannot price
+// (no live mark for its underlying yet, or it has already expired) rather
+// than erroring the whole /positions response over one bad position — the
+// account still sees its raw position list either way.
+func accumulatePortfolioGreeks(totals *PortfolioGreeksDTO, p *settlement.OptionsPosition, mdSvc *marketdata.Service, ivStore *volsurface.Store, ctx context.Context) {
+	const assumedVol = 0.6
+	const riskFreeRate = 0.03
+
+	underlying := underlyingFromOptionSymbol(p.Symbol, p.QuoteCurrency)
+	spotTicker, err := mdSvc.Ticker(underlying, models.Spot)
+	if err != nil || !spotTicker.MarkPrice.IsPositive() {
+		return
+	}
+	spot, _ := spotTicker.MarkPrice.Float64()
+	strike, _ := p.StrikePrice.Float64()
+	tYears := time.Until(p.Expiry).Hours() / 24 / 365
+	if tYears <= 0 {
+		return
+	}
+	vol := assumedVol
+	if iv, ok := ivStore.Interpolate(ctx, underlying, p.StrikePrice, p.Expiry, p.OptionType); ok {
+		vol = iv
+	}
+	isCall := p.OptionType == "CALL"
+	greeks := pricing.CalcGreeks(spot, strike, tYears, vol, riskFreeRate, isCall)
+	size, _ := p.Size.Float64() // signed: positive long, negative short
+
+	totals.Delta += greeks.Delta * size
+	totals.Gamma += greeks.Gamma * size
+	totals.Theta += greeks.Theta * size
+	totals.Vega += greeks.Vega * size
+}
+
+// underlyingFromOptionSymbol extracts the underlying spot symbol (e.g.
+// "BTC-BIUSD") from an option instrument symbol, using the same 5-part
+// BASE-QUOTE-STRIKE-EXPIRY-TYPE format splitOptionSymbol parses elsewhere in
+// this file. Mirrors settlement.underlyingFromSymbol and
+// risk.underlyingFromOrderSymbol — each package has its own tiny copy of
+// this parse rather than a shared export, since cmd/engine (main) already
+// depends on both and duplicating four lines here is simpler than
+// restructuring either package's public surface just for this.
+func underlyingFromOptionSymbol(symbol, quoteCurrency string) string {
+	parts := splitOptionSymbol(symbol)
+	if len(parts) >= 5 {
+		return parts[0] + "-" + parts[1]
+	}
+	if len(parts) >= 1 && quoteCurrency != "" {
+		return parts[0] + "-" + quoteCurrency
+	}
+	return symbol
 }
 
 // splitOptionSymbol splits an option instrument symbol on "-" into its

@@ -28,6 +28,9 @@ const liquidationSlippageTolerance = 0.01 // 1%
 
 // Engine sweeps futures positions on a timer and force-closes any that have
 // fallen below their maintenance margin requirement at the current mark price.
+// It also (optionally) alerts on options writer positions whose re-evaluated
+// collateral requirement has drifted close to what was originally reserved —
+// see checkOptionsMarginCalls's doc comment for why that path is alert-only.
 type Engine struct {
 	registry   *matching.Registry
 	settlement *settlement.FuturesSettlement
@@ -37,6 +40,10 @@ type Engine struct {
 	ledger     *risk.Ledger
 	bus        *events.Bus
 	log        *slog.Logger
+	// options is nil-safe: when unset (e.g. a deployment with options
+	// disabled, or a test harness that never wires it), the options
+	// margin-call sweep is simply skipped rather than panicking.
+	options *settlement.OptionsSettlement
 }
 
 // New creates a liquidation Engine.
@@ -52,6 +59,13 @@ func New(registry *matching.Registry, fs *settlement.FuturesSettlement, md *mark
 		bus:        bus,
 		log:        slog.Default(),
 	}
+}
+
+// SetOptionsSettlement wires the options margin-call sweep. Optional — call
+// once at startup if options trading is enabled; the sweep is skipped
+// entirely (nil-safe) if this is never called.
+func (e *Engine) SetOptionsSettlement(os *settlement.OptionsSettlement) {
+	e.options = os
 }
 
 // Run starts the sweep loop; call in a goroutine. Stops when ctx is cancelled.
@@ -99,6 +113,81 @@ func (e *Engine) sweep() {
 	// Check each cross-margin account group for aggregate under-capitalisation.
 	for k, positions := range crossGroups {
 		e.checkCross(positions, k.accountID, k.quoteAsset)
+	}
+
+	e.checkOptionsMarginCalls()
+}
+
+// optionsMarginCallThresholdPct: alert once a short position's re-evaluated
+// margin requirement reaches this fraction of what was originally reserved
+// for it (100% would mean the requirement has grown all the way back up to
+// full cash-secured — the ceiling the floor model can never exceed, so 100%
+// is the worst case, not a breach of it). 80% gives risk ops visibility
+// before a position is one further adverse move away from full cash-secured.
+const optionsMarginCallThresholdPct = 80
+
+// checkOptionsMarginCalls re-evaluates every open short (writer) options
+// position's collateral requirement against the CURRENT underlying mark and
+// alerts (does not force-close) when it has drifted close to the original
+// cash-secured reservation.
+//
+// This is deliberately alert-only, unlike checkIsolated/checkCross for
+// futures: a writer's collateral is reserved in full (cash-secured, capped
+// by risk.RequiredOptionsMargin at order time) and only ever released at
+// expiry (settlement.ExpiryProcessor) — it is never partially debited the
+// way futures margin is marked-to-market and eroded by unrealized losses.
+// Because the floor-model requirement (risk.RequiredOptionsMargin) is
+// mathematically bounded above by that same cash-secured amount, a position
+// can never actually become UNDER-collateralized relative to what is locked
+// specifically for it — there is no insolvency state to force-close out of.
+// What CAN happen is the position's real risk growing toward that ceiling as
+// the underlying moves against the writer, which is exactly what this alert
+// surfaces for risk ops/admin visibility ahead of expiry, per the roadmap's
+// explicit fallback ("document cash-secured-only as v1 scope" when a forced-
+// close path isn't meaningful).
+func (e *Engine) checkOptionsMarginCalls() {
+	if e.options == nil {
+		return
+	}
+	for _, pos := range e.options.AllPositions() {
+		if !pos.Size.IsNegative() {
+			continue // only writers (short) carry margin risk; longs already paid in full
+		}
+		qty := pos.Size.Abs()
+		reserved := pos.StrikePrice.Mul(qty) // the cash-secured ceiling locked at order time
+		if !reserved.IsPositive() {
+			continue
+		}
+		premiumPerUnit := decimal.Zero
+		if qty.IsPositive() {
+			// Premium is stored negative for a writer (credit); use its
+			// magnitude per unit as the "premium already received" input
+			// RequiredOptionsMargin needs, mirroring shortOptionMargin's
+			// order-time premium*qty term.
+			premiumPerUnit = pos.Premium.Abs().Div(qty)
+		}
+		required := risk.RequiredOptionsMargin(pos.Symbol, pos.OptionType, pos.StrikePrice, qty, premiumPerUnit, pos.QuoteCurrency)
+		utilization := required.Div(reserved).Mul(decimal.NewFromInt(100))
+		if utilization.LessThan(decimal.NewFromInt(optionsMarginCallThresholdPct)) {
+			continue
+		}
+		e.log.Warn("options writer margin call: requirement approaching reserved collateral",
+			"account", pos.AccountID, "symbol", pos.Symbol, "required", required, "reserved", reserved,
+			"utilizationPct", utilization.StringFixed(1))
+		if e.bus == nil {
+			continue
+		}
+		e.bus.Publish(&models.Event{
+			Type:           models.EventMarginCallAlert,
+			Symbol:         pos.Symbol,
+			Market:         string(models.Options),
+			SequenceNumber: e.bus.NextOutOfBandSequence(),
+			MarginCallInfo: &models.MarginCallInfo{
+				AccountID: pos.AccountID, Symbol: pos.Symbol, OptionType: pos.OptionType,
+				StrikePrice: pos.StrikePrice, Size: pos.Size,
+				RequiredMargin: required, ReservedMargin: reserved, UtilizationPct: utilization,
+			},
+		})
 	}
 }
 
