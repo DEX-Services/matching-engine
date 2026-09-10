@@ -24,15 +24,18 @@ const (
 	EventLiquidation           EventType = "LIQUIDATION"
 	EventFunding               EventType = "FUNDING"
 	// EventMarginCallAlert is published for a short options position whose
-	// re-evaluated collateral requirement (risk.RequiredOptionsMargin, priced
-	// against the CURRENT underlying mark) has drifted close to its original
-	// cash-secured reservation. Unlike EventLiquidation this is alert-only —
-	// see liquidation.Engine's options sweep doc comment for why an options
-	// writer's collateral cannot actually become insolvent under the
-	// cash-secured-at-open reservation model (the floor requirement is
-	// mathematically bounded by what was already reserved), so there is
-	// nothing to force-close; this event exists purely so risk ops/admin
-	// tooling can see a writer's risk growing before expiry.
+	// equity (reserved collateral + unrealized PnL, marked against the CURRENT
+	// option price) has fallen toward its re-evaluated maintenance requirement.
+	//
+	// Read MarginCallInfo.Stage to tell WHICH of the two stages this is:
+	// MarginCallWarning is the early heads-up, published while the position is
+	// still adequately capitalized and NOT closed, so the writer has a window
+	// to post collateral or close voluntarily. MarginCallLiquidated is the
+	// terminal notice, published at the moment the position is force-closed.
+	//
+	// Treating both as one event is a mistake a consumer can silently make —
+	// they carry opposite meanings ("act now" vs "it's already over") — which
+	// is why Stage is required rather than inferred.
 	EventMarginCallAlert EventType = "MARGIN_CALL_ALERT"
 	// EventRealizedPnl is published whenever a futures position is (fully or
 	// partially) closed, carrying the authoritative realized PnL/fee/margin
@@ -58,18 +61,38 @@ type Event struct {
 	MarginCallInfo *MarginCallInfo `json:"marginCallInfo,omitempty"`
 }
 
-// MarginCallInfo describes one short options position whose re-evaluated
-// collateral requirement has drifted close to its original reservation. See
-// EventMarginCallAlert.
+// MarginCallStage distinguishes the two stages of the options margin-call
+// lifecycle, which carry opposite meanings for whoever receives them.
+type MarginCallStage string
+
+const (
+	// MarginCallWarning: equity has fallen below the warning threshold but is
+	// still at or above the maintenance requirement. The position is NOT
+	// closed — this is the writer's window to post collateral or close out.
+	MarginCallWarning MarginCallStage = "WARNING"
+	// MarginCallLiquidated: equity has fallen below the maintenance
+	// requirement and the position is being force-closed now. Terminal.
+	MarginCallLiquidated MarginCallStage = "LIQUIDATED"
+)
+
+// MarginCallInfo describes one short options position whose equity has fallen
+// toward (Stage=WARNING) or through (Stage=LIQUIDATED) its maintenance
+// requirement. See EventMarginCallAlert.
 type MarginCallInfo struct {
-	AccountID      string          `json:"accountId"`
-	Symbol         string          `json:"symbol"`
-	OptionType     string          `json:"optionType"`
-	StrikePrice    decimal.Decimal `json:"strikePrice"`
-	Size           decimal.Decimal `json:"size"` // negative (short)
+	AccountID   string          `json:"accountId"`
+	Symbol      string          `json:"symbol"`
+	OptionType  string          `json:"optionType"`
+	StrikePrice decimal.Decimal `json:"strikePrice"`
+	Size        decimal.Decimal `json:"size"` // negative (short)
+	// Stage says whether this is the early warning or the liquidation notice.
+	// Always set; never infer it from the other fields.
+	Stage          MarginCallStage `json:"stage"`
 	RequiredMargin decimal.Decimal `json:"requiredMargin"`
 	ReservedMargin decimal.Decimal `json:"reservedMargin"` // the cash-secured amount originally locked (strike*|size|)
-	UtilizationPct decimal.Decimal `json:"utilizationPct"` // RequiredMargin / ReservedMargin * 100
+	// Equity is reserved collateral + unrealized PnL at the current mark —
+	// the number actually compared against RequiredMargin to decide the stage.
+	Equity         decimal.Decimal `json:"equity"`
+	UtilizationPct decimal.Decimal `json:"utilizationPct"` // RequiredMargin / Equity * 100
 }
 
 // Liquidation describes a forced position close.

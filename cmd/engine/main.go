@@ -361,6 +361,27 @@ func main() {
 		}
 		fmt.Fprintf(w, "resumed %s/%s\n", sym, mkt)
 	}))
+	// Halt STATUS. Without this, a halted symbol was invisible: a settlement
+	// failure halts a market for every account trading it, and the only way
+	// to discover that had happened was to read the engine's own logs or to
+	// notice every order suddenly rejecting. Nothing could list what was
+	// halted, so nothing could offer to un-halt it — recovery meant a manual
+	// curl carrying the engine shared secret. Dex-Backend proxies this behind
+	// the admin session so the admin UI can show and clear halts.
+	mux.HandleFunc("/admin/halted", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
+		records := haltReg.HaltedSymbols()
+		out := make([]map[string]string, 0, len(records))
+		for _, rec := range records {
+			out = append(out, map[string]string{
+				"symbol": rec.Symbol,
+				"market": rec.Market,
+				"reason": string(rec.Reason),
+				"note":   rec.Note,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"halted": out})
+	}))
 	mux.HandleFunc("/order", requireEngineServiceAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
