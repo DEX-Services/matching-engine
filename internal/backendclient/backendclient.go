@@ -59,7 +59,21 @@ func New() *Client {
 		// A lock/unlock touches a remote Postgres instance. Five seconds was too
 		// short during a full market-maker ladder cancellation and left durable
 		// locks behind, starving the next quote cycle.
-		http: &http.Client{Timeout: 20 * time.Second},
+		//
+		// Custom Transport: this Client is shared by every settlement, lock,
+		// and unlock call the engine makes to Dex-Backend, all to the same
+		// host. Go's default transport caps idle connections per host at 2,
+		// so under concurrent trading most of these calls paid a fresh
+		// TCP+TLS handshake instead of reusing a pooled connection — pure
+		// overhead on top of the real Aiven round trip each call already pays.
+		http: &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 }
 
