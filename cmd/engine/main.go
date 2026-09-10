@@ -1222,42 +1222,39 @@ func validateAndPrepareOption(ctx context.Context, pool *pgxpool.Pool, symbols *
 	return nil
 }
 
-// validateAndPrepareCombo resolves a combo order's two legs (o.ComboBuySymbol/
-// o.ComboSellSymbol, already set by the caller — see the /spread handler),
-// validates they form a real vertical spread, registers the combo
-// instrument (creating it on first use, same lazy pattern as individual
-// option contracts), rewrites o.Symbol to the combo's own deterministic
-// symbol so it gets its own dedicated order book, and sets QuoteCurrency.
+// validateAndPrepareCombo resolves a combo order's N legs (o.ComboLegs,
+// already set by the caller — see cmd/engine's combo submission path),
+// validates they form a coherent combo (same underlying/expiry, at least 2
+// legs, every leg a real instrument), registers the combo instrument
+// (creating it on first use, same lazy pattern as individual option
+// contracts), rewrites o.Symbol to the combo's own deterministic symbol so
+// it gets its own dedicated order book, and sets QuoteCurrency.
 //
 // This is what makes combo orders match natively: after this runs, o.Symbol
 // is a real registered instrument with a real order book — matching against
 // OTHER resting combo orders on the exact same book, atomically, the same
-// way any other instrument matches. There is no client-side coordination of
-// two separate orders left anywhere in this path.
+// way any other instrument matches, regardless of how many legs it has.
+// There is no client-side coordination of separate orders left anywhere in
+// this path.
 func validateAndPrepareCombo(ctx context.Context, pool *pgxpool.Pool, reg *matching.Registry, mdSvc *marketdata.Service, o *models.Order) error {
-	if o.ComboBuySymbol == "" || o.ComboSellSymbol == "" {
-		return fmt.Errorf("comboBuySymbol and comboSellSymbol are required")
+	if len(o.ComboLegs) == 0 {
+		return fmt.Errorf("comboLegs is required")
 	}
-	buyInst, err := loadOptionInstrument(ctx, pool, o.ComboBuySymbol)
-	if err != nil || buyInst == nil {
-		return fmt.Errorf("comboBuySymbol %s is not a known option instrument", o.ComboBuySymbol)
-	}
-	sellInst, err := loadOptionInstrument(ctx, pool, o.ComboSellSymbol)
-	if err != nil || sellInst == nil {
-		return fmt.Errorf("comboSellSymbol %s is not a known option instrument", o.ComboSellSymbol)
-	}
-	if err := validateVerticalPair(buyInst, sellInst); err != nil {
+	insts, underlying, err := validateComboLegs(ctx, pool, o.ComboLegs)
+	if err != nil {
 		return err
 	}
 
-	combo, err := getOrCreateComboInstrument(ctx, pool, buyInst, sellInst)
+	combo, err := getOrCreateComboInstrument(ctx, pool, o.ComboLegs, underlying)
 	if err != nil {
 		return err
 	}
 	o.Symbol = combo.Symbol
 	o.QuoteCurrency = "BIUSD"
-	if parts := splitOptionSymbol(buyInst.Symbol); len(parts) >= 2 {
-		o.QuoteCurrency = parts[1]
+	if len(insts) > 0 {
+		if parts := splitOptionSymbol(insts[0].Symbol); len(parts) >= 2 {
+			o.QuoteCurrency = parts[1]
+		}
 	}
 
 	eng := reg.GetOrCreate(o.Symbol, o.Market)

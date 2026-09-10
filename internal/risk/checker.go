@@ -151,55 +151,205 @@ func RequiredOptionsMargin(symbol, optionType string, strike, qty, premiumPerUni
 // construction — see cmd/engine's /spread handler) contract count on both
 // legs; netCredit is (premium RECEIVED for the short leg) − (premium PAID
 // for the long leg): positive means the spread was opened for a net credit,
-// negative means a net debit was paid to open it.
+// negative means a net debit was paid to open it, exactly zero means no
+// premium changed hands at all (e.g. a synthetic/test position, or two legs
+// that happened to trade at the same price).
 //
-// A net-debit spread needs NO additional collateral beyond the debit
-// already paid — that debit is cash already handed over, and it IS the
-// spread's maximum possible loss (if both legs expire worthless, the buyer
-// loses exactly what they paid, no more). A net-credit spread's maximum
-// loss is the strike distance minus the credit already banked (the credit
-// offsets part of the worst case), so that residual is what must be posted
-// as margin.
+// Three genuinely distinct cases, not one continuous formula:
+//   - netCredit < 0 (a debit was PAID): margin = 0. A net-debit buyer's
+//     maximum possible future outflow is already zero — the debit is cash
+//     already handed over, and by construction (buying the cheaper side of
+//     a vertical) that debit can never be less than the position's own
+//     worst-case loss, so nothing further can ever be owed.
+//   - netCredit == 0 (no premium moved either way): margin = the full
+//     worst-case loss. With no cash already paid AND no cash already
+//     banked as an offsetting cushion, the entire worst case is
+//     uncollateralized and must be posted in full. (An earlier version of
+//     this function treated netCredit==0 the same as a debit, which
+//     silently left a zero-premium position with NO margin at all — a real
+//     gap, not a deliberate design choice; fixed together with
+//     ComboMaxLossMargin, which shares this exact three-way structure.)
+//   - netCredit > 0 (a credit was RECEIVED): margin = worst-case loss minus
+//     the credit already banked (floored at 0) — the credit is real cash
+//     sitting in the account that directly offsets part of the future
+//     obligation.
 //
 // Returns the quote-currency margin to reserve, always >= 0 and always <=
 // the strike distance × qty (a vertical's collateral requirement can never
 // exceed its own defined maximum loss).
+//
+// Deprecated: this is the 2-leg special case of ComboMaxLossMargin, kept
+// only because its exact formula is simpler to read and test in isolation
+// for the vertical case specifically. New combo margin checks should use
+// ComboMaxLossMargin, which handles any number of legs (butterflies, iron
+// condors, ratio spreads) via real payoff-diagram math instead of a
+// closed-form shortcut. VerticalSpreadMargin(a, b, qty, c) ==
+// ComboMaxLossMargin([]ComboLegSpec{{Strike: a, OptionType: "CALL", Ratio: 1},
+// {Strike: b, OptionType: "CALL", Ratio: -1}}, qty, c) whenever both legs are
+// the same option type — verified by TestComboMaxLossMargin_MatchesVerticalSpreadMargin.
 func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit decimal.Decimal) decimal.Decimal {
 	if !qty.IsPositive() {
 		return decimal.Zero
 	}
 	strikeDistance := buyStrike.Sub(sellStrike).Abs().Mul(qty)
-	if !netCredit.IsPositive() {
-		// Net debit (or exactly zero): no additional margin — the debit
-		// paid up front already IS the maximum loss.
+	switch {
+	case netCredit.IsNegative():
 		return decimal.Zero
+	case netCredit.IsZero():
+		return strikeDistance
+	default:
+		required := strikeDistance.Sub(netCredit)
+		if required.IsNegative() {
+			return decimal.Zero
+		}
+		return required
 	}
-	required := strikeDistance.Sub(netCredit)
-	if required.IsNegative() {
-		return decimal.Zero
-	}
-	return required
 }
 
-// comboLegStrikes parses the strike price out of each leg symbol
+// ComboLegSpec is one leg of a multi-leg options combo, for
+// ComboMaxLossMargin's payoff-diagram calculation.
+type ComboLegSpec struct {
+	Strike     decimal.Decimal
+	OptionType string // "CALL" | "PUT"
+	// Ratio is signed: positive = long this leg (bought), negative = short
+	// (written), magnitude = how many contracts of this leg per 1 unit of
+	// the combo (1 for a plain vertical/iron condor, 2 for the short middle
+	// strikes of a butterfly, etc.).
+	Ratio int
+}
+
+// ComboMaxLossMargin computes the margin required to open an N-leg options
+// combo as ONE defined-risk position, by finding the true minimum of the
+// combo's expiry payoff function — a real payoff-diagram calculation, not a
+// closed-form shortcut specific to one structure. This generalizes
+// VerticalSpreadMargin (2 legs, ratios ±1) to butterflies, iron condors,
+// and ratio spreads.
+//
+// The combo's payoff at expiry, as a function of the underlying price S, is
+//
+//	payoff(S) = netCredit + Σ ratio_i * legPayoff_i(S)
+//
+// where legPayoff_i(S) = max(0, S - K_i) for a CALL leg or max(0, K_i - S)
+// for a PUT leg. Each term is piecewise-linear in S with its only kink at
+// S = K_i, so the whole sum is piecewise-linear with kinks exactly at the
+// combo's strikes — meaning its minimum over all S >= 0 is always attained
+// either at S = 0 or at one of the strikes (a piecewise-linear function's
+// extrema can only occur at its breakpoints or at the domain's boundary;
+// there is no need to also check S -> infinity separately, since the slope
+// beyond the highest strike is constant and whichever direction it points,
+// the function is monotonic out there — so if the minimum were beyond the
+// highest strike the function would be unbounded below, which never happens
+// for a real (net-zero-far-OTM-both-directions) options combo).
+//
+// This is the SAME reasoning that makes VerticalSpreadMargin's simpler
+// formula correct for exactly 2 legs; ComboMaxLossMargin just evaluates the
+// general case numerically across all N breakpoints instead of hand-solving
+// the 2-leg formula algebraically.
+//
+// netCredit follows the same sign convention as VerticalSpreadMargin:
+// positive = net credit received to open, negative = net debit paid.
+// Returns the required margin (>= 0); a combo whose worst-case payoff is
+// still non-negative (a true "cannot lose" structure, e.g. impossible in
+// practice but not excluded by the math) returns 0.
+func ComboMaxLossMargin(legs []ComboLegSpec, qty, netCredit decimal.Decimal) decimal.Decimal {
+	if !qty.IsPositive() || len(legs) == 0 {
+		return decimal.Zero
+	}
+
+	// Breakpoints: S=0 plus every leg's strike (deduplicated implicitly by
+	// just evaluating the payoff at each one — duplicates cost nothing).
+	breakpoints := make([]decimal.Decimal, 0, len(legs)+1)
+	breakpoints = append(breakpoints, decimal.Zero)
+	for _, leg := range legs {
+		breakpoints = append(breakpoints, leg.Strike)
+	}
+
+	// worstIntrinsic is the combo's worst-case PURE OPTIONS payoff — the
+	// premium/netCredit cash flow is deliberately excluded from this sum and
+	// folded in afterward (see below), because premium is already applied
+	// as a separate ledger debit/credit by settlement.ComboSettlement at
+	// trade time. Including it here too would double-count it: a net-debit
+	// spread's premium is money already spent (no further collateral is
+	// needed for it, matching VerticalSpreadMargin's identical rule), and a
+	// net-credit spread's premium is money already banked that offsets part
+	// of the pure-options worst case, again matching VerticalSpreadMargin.
+	worstIntrinsic := decimal.Zero
+	first := true
+	for _, s := range breakpoints {
+		intrinsic := decimal.Zero
+		for _, leg := range legs {
+			var legPayoff decimal.Decimal
+			if strings.EqualFold(leg.OptionType, "CALL") {
+				legPayoff = decimal.Max(decimal.Zero, s.Sub(leg.Strike))
+			} else {
+				legPayoff = decimal.Max(decimal.Zero, leg.Strike.Sub(s))
+			}
+			intrinsic = intrinsic.Add(legPayoff.Mul(decimal.NewFromInt(int64(leg.Ratio))))
+		}
+		if first || intrinsic.LessThan(worstIntrinsic) {
+			worstIntrinsic = intrinsic
+			first = false
+		}
+	}
+
+	// worstLoss is the combo's worst-case pure-options loss, scaled by qty
+	// (>= 0) — the amount the writer side would owe if the underlying
+	// settles at the single worst breakpoint.
+	worstLoss := worstIntrinsic.Neg().Mul(qty)
+
+	// Same three-way split as VerticalSpreadMargin (see its doc comment for
+	// the full worked reasoning, including why netCredit==0 must NOT be
+	// folded into the debit case — a real gap in an earlier version of this
+	// codebase that silently left zero-premium positions uncollateralized):
+	//   - net DEBIT (netCredit < 0): already paid in full via
+	//     ComboSettlement.Settle's separate premium transfer; margin = 0.
+	//   - exactly zero premium: nothing paid, nothing banked as a cushion;
+	//     the ENTIRE worst-case loss is uncollateralized; margin = worstLoss.
+	//   - net CREDIT (netCredit > 0): real cash already banked that offsets
+	//     part of the worst case; margin = worstLoss - netCredit (floored
+	//     at 0).
+	switch {
+	case netCredit.IsNegative():
+		return decimal.Zero
+	case netCredit.IsZero():
+		return worstLoss
+	default:
+		required := worstLoss.Sub(netCredit)
+		if required.IsNegative() {
+			return decimal.Zero
+		}
+		return required
+	}
+}
+
+// comboLegSpecs parses strike + option type out of every leg symbol
 // (BASE-QUOTE-STRIKE-EXPIRY-TYPE) directly, without any Postgres lookup —
 // the risk package has no database access and must stay that way (it's on
-// the hot order-check path); the strike is already encoded in the symbol
+// the hot order-check path); both fields are already encoded in the symbol
 // string itself, put there by whichever handler built the combo order (see
-// cmd/engine's /spread handler), so parsing it back out is sufficient and
-// keeps this package's dependency-free design intact.
-func comboLegStrikes(order *models.Order) (buyStrike, sellStrike decimal.Decimal, ok bool) {
-	buyParts := strings.Split(order.ComboBuySymbol, "-")
-	sellParts := strings.Split(order.ComboSellSymbol, "-")
-	if len(buyParts) < 5 || len(sellParts) < 5 {
-		return decimal.Zero, decimal.Zero, false
+// cmd/engine's combo.go), so parsing them back out is sufficient and keeps
+// this package's dependency-free design intact.
+func comboLegSpecs(order *models.Order) ([]ComboLegSpec, bool) {
+	if len(order.ComboLegs) == 0 {
+		return nil, false
 	}
-	buyStrike, err1 := decimal.NewFromString(buyParts[2])
-	sellStrike, err2 := decimal.NewFromString(sellParts[2])
-	if err1 != nil || err2 != nil || !buyStrike.IsPositive() || !sellStrike.IsPositive() {
-		return decimal.Zero, decimal.Zero, false
+	specs := make([]ComboLegSpec, 0, len(order.ComboLegs))
+	for _, leg := range order.ComboLegs {
+		parts := strings.Split(leg.Symbol, "-")
+		if len(parts) < 5 {
+			return nil, false
+		}
+		strike, err := decimal.NewFromString(parts[2])
+		if err != nil || !strike.IsPositive() {
+			return nil, false
+		}
+		optionType := parts[len(parts)-1]
+		if optionType != "CALL" && optionType != "PUT" {
+			return nil, false
+		}
+		specs = append(specs, ComboLegSpec{Strike: strike, OptionType: optionType, Ratio: leg.Ratio})
 	}
-	return buyStrike, sellStrike, true
+	return specs, true
 }
 
 // underlyingFromOrderSymbol extracts the underlying spot symbol (e.g.
@@ -410,10 +560,12 @@ func assetFor(order *models.Order) string {
 	// A combo's own Symbol is the synthetic "COMBO:<hash>" identifier, not
 	// a real BASE-QUOTE pair — its quote currency must come from
 	// QuoteCurrency (set by the handler, same as a standalone option order)
-	// or, failing that, from parsing one of its two real leg symbols.
+	// or, failing that, from parsing its first real leg symbol.
 	if order.Market == models.ComboOptions {
-		if parts := strings.Split(order.ComboBuySymbol, "-"); len(parts) >= 2 {
-			return parts[1]
+		if len(order.ComboLegs) > 0 {
+			if parts := strings.Split(order.ComboLegs[0].Symbol, "-"); len(parts) >= 2 {
+				return parts[1]
+			}
 		}
 		return order.Symbol
 	}
@@ -455,28 +607,29 @@ func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decima
 		return MarginRequired(notional, order.Leverage)
 	case models.ComboOptions:
 		// A combo order's margin is netted from the moment it is placed —
-		// VerticalSpreadMargin(strikeDistance, netCredit) — not each leg
+		// ComboMaxLossMargin's true payoff-diagram worst case, not each leg
 		// margined independently and reconciled after the fact. This is the
 		// real difference from the old /spread endpoint (two independent
 		// orders, netted only after both confirmed open): the native combo
 		// book's own risk check IS the netted number, with no transient
 		// window where more than the net-defined-risk amount is locked.
+		// Generalizes cleanly to any N-leg structure (vertical, butterfly,
+		// iron condor, ratio spread) since ComboMaxLossMargin itself does.
 		//
 		// price here is the combo's quoted NET price: positive = a net
 		// debit (a BUY order paying to open the spread; margin required is
-		// zero, matching VerticalSpreadMargin's rule that a debit already
-		// paid needs no further collateral), negative = a net credit
-		// received (margin required is the strike distance minus that
-		// credit). A SELL order on the combo (closing/reversing) is priced
-		// with the opposite sign convention by the caller — see the /spread
-		// handler's order construction.
-		buyStrike, sellStrike, ok := comboLegStrikes(order)
+		// zero — a debit already paid needs no further collateral),
+		// negative = a net credit received (margin required is the
+		// worst-case loss minus that credit). A SELL order on the combo
+		// (closing/reversing) is priced with the opposite sign convention
+		// by the caller — see cmd/engine's combo order construction.
+		specs, ok := comboLegSpecs(order)
 		if !ok {
 			return decimal.Zero // malformed combo symbols: fail open to zero here, validateAndPrepareCombo already rejects this before Check ever runs
 		}
 		netCredit := price.Neg() // BUY at net debit price -> credit is negative; BUY at net credit -> credit is positive
 		if order.IsBuy() {
-			return VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit)
+			return ComboMaxLossMargin(specs, qty, netCredit)
 		}
 		// SELL (closing/reversing an existing combo position) needs no NEW
 		// margin reservation of its own — it reduces or reverses exposure

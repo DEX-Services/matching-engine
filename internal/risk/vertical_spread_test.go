@@ -16,10 +16,16 @@ func TestVerticalSpreadMargin_NetDebitNeedsNoAdditionalMargin(t *testing.T) {
 	}
 }
 
-func TestVerticalSpreadMargin_ExactZeroCreditNeedsNoMargin(t *testing.T) {
+func TestVerticalSpreadMargin_ExactZeroPremiumNeedsFullMargin(t *testing.T) {
+	// No premium changed hands at all (not a debit, not a credit) — nothing
+	// is already paid to cap the loss, and nothing is already banked to
+	// offset it. The full strike-distance worst case must be collateralized.
+	// (An earlier version of this function incorrectly treated this the
+	// same as a debit and returned 0 — a real margin gap.)
 	got := VerticalSpreadMargin(decimal.NewFromInt(60000), decimal.NewFromInt(65000), decimal.NewFromInt(1), decimal.Zero)
-	if !got.IsZero() {
-		t.Fatalf("zero-credit spread margin = %s, want 0", got)
+	want := decimal.NewFromInt(5000)
+	if !got.Equal(want) {
+		t.Fatalf("zero-premium spread margin = %s, want %s (full strike distance)", got, want)
 	}
 }
 
