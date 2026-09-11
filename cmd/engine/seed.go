@@ -42,30 +42,46 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// else. The futures row's symbol is "BTC-BIUSDB"/"ETH-BIUSDB" too — a
 		// distinct (symbol, market) row from the SPOT row of the same name,
 		// so the two coexist without collision.
+		// --- SPOT: BI2X and BTC only (2026-09-12 market-list restructure) ---
 		{"BTC-BIUSDB", "SPOT", "BTC", "BIUSDB", "", 0, 0, "0", "0", "", ""},
-		{"ETH-BIUSDB", "SPOT", "ETH", "BIUSDB", "", 0, 0, "0", "0", "", ""},
-		{"SOL-BIUSDB", "SPOT", "SOL", "BIUSDB", "", 0, 0, "0", "0", "", ""},
-		{"BNB-BIUSDB", "SPOT", "BNB", "BIUSDB", "", 0, 0, "0", "0", "", ""},
+		// BI2X: its actual index price feed is the dedicated BI2X data feed
+		// (Price-Fetcher's bitdxfeed client), not Binance.
+		{"BI2X-BIUSDB", "SPOT", "BI2X", "BIUSDB", "", 0, 0, "0", "0", "", ""},
+
+		// --- FUTURES: BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP ---
 		{"BTC-BIUSDB", "FUTURES", "BTC", "BIUSDB", "BTC-BIUSDB", 100, 8, "0.005", "0", "", ""},
-		{"ETH-BIUSDB", "FUTURES", "ETH", "BIUSDB", "ETH-BIUSDB", 75, 8, "0.0075", "0", "", ""},
+		// BI2X futures self-funds off its own SPOT row above, same as BTC.
+		// Leverage/margin match the other mid-cap crypto perps below rather
+		// than BTC's tighter numbers, since BI2X's real volatility profile
+		// isn't known yet.
+		{"BI2X-BIUSDB", "FUTURES", "BI2X", "BIUSDB", "BI2X-BIUSDB", 50, 8, "0.005", "0", "", ""},
 		// Options are DISABLED per the 2026-09-11 product decision (same
 		// crypto-only launch scope as the non-crypto perps below) — see
 		// submit.go/spread.go's order-rejection gates and main.go's disabled
 		// seedOptionInstruments call. Not deleted; uncomment together with
 		// those to bring options back.
 		// {"BTC-BIUSDB", "OPTIONS", "BTC", "BIUSDB", "BTC-BIUSDB", 0, 0, "0", "1", "", ""},
-		// SOL/BNB perps mirror BTC/ETH: the spot books above exist, so they
-		// double as the funding/index underlying.
-		{"SOL-BIUSDB", "FUTURES", "SOL", "BIUSDB", "SOL-BIUSDB", 50, 8, "0.005", "0", "", ""},
-		{"BNB-BIUSDB", "FUTURES", "BNB", "BIUSDB", "BNB-BIUSDB", 50, 8, "0.005", "0", "", ""},
-		// BI2X: same shape as SOL/BNB above — its own spot row doubles as the
-		// futures funding/index underlying. Its actual index price feed is a
-		// separate data-feed API pending as of 2026-09-12 (see markets.go's
-		// comment on this pair); leverage/margin here match the other
-		// mid-cap crypto perps (SOL/BNB) rather than BTC/ETH's tighter
-		// numbers, since BI2X's real volatility profile isn't known yet.
-		{"BI2X-BIUSDB", "SPOT", "BI2X", "BIUSDB", "", 0, 0, "0", "0", "", ""},
-		{"BI2X-BIUSDB", "FUTURES", "BI2X", "BIUSDB", "BI2X-BIUSDB", 50, 8, "0.005", "0", "", ""},
+		//
+		// ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, and XRP are FUTURES-ONLY — the
+		// 2026-09-12 restructure removed their spot rows (ETH/SOL previously
+		// had one; AVAX/LINK/DOGE/TAO/ADA/XRP never did), so none of them has
+		// a registered SPOT market to serve as its funding/index underlying —
+		// underlying_symbol stays empty and funding_interval_hours stays 0,
+		// same as the disabled non-crypto perps below, which have the
+		// identical shape (futures with no spot book). Their live index
+		// price still comes from Binance directly (all six are real
+		// <ASSET>USDT tickers, verified 2026-09-12) via Price-Fetcher's
+		// existing Binance client — this only affects the FUNDING rate
+		// calculation's reference price, not whether the market maker can
+		// quote at all.
+		{"ETH-BIUSDB", "FUTURES", "ETH", "BIUSDB", "", 75, 0, "0.0075", "0", "", ""},
+		{"AVAX-BIUSDB", "FUTURES", "AVAX", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"LINK-BIUSDB", "FUTURES", "LINK", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"SOL-BIUSDB", "FUTURES", "SOL", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"DOGE-BIUSDB", "FUTURES", "DOGE", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"TAO-BIUSDB", "FUTURES", "TAO", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"ADA-BIUSDB", "FUTURES", "ADA", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"XRP-BIUSDB", "FUTURES", "XRP", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
 		// Non-crypto perps (forex majors, commodities, US stocks) are
 		// DISABLED per the 2026-09-11 product decision to launch crypto-only
 		// — see markets.go's disabledMarkets for the matching engine-side
@@ -125,6 +141,38 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 			tick, lot)
 		if err != nil {
 			slog.Error("seed symbol_configs", "symbol", r.symbol, "market", r.market, "error", err)
+		}
+	}
+
+	deactivateRemovedMarkets(ctx, pool)
+}
+
+// deactivateRemovedMarkets marks the symbol_configs rows for markets taken
+// OUT of currentMarkets in the 2026-09-12 restructure (ETH/SOL/BNB spot,
+// BNB futures) as inactive, rather than deleting them. Deleting would lose
+// the row's history (tick/lot/leverage settings, created_at) for no benefit;
+// inactive is what bots.Store.LookupSymbol already checks (`AND active =
+// true`), so this alone blocks any NEW market-maker desk from being created
+// against one of these — combined with currentMarkets no longer registering
+// an engine for them (so /order already 404s the same way a disabled
+// forex/commodity market does), a removed market is fully inert without its
+// row ever needing to disappear.
+//
+// Idempotent: safe to run on every boot, matching this file's other seed
+// functions.
+func deactivateRemovedMarkets(ctx context.Context, pool *pgxpool.Pool) {
+	removed := []struct{ symbol, market string }{
+		{"ETH-BIUSDB", "SPOT"},
+		{"SOL-BIUSDB", "SPOT"},
+		{"BNB-BIUSDB", "SPOT"},
+		{"BNB-BIUSDB", "FUTURES"},
+	}
+	for _, r := range removed {
+		if _, err := pool.Exec(ctx,
+			`UPDATE symbol_configs SET active = false WHERE symbol = $1 AND market = $2`,
+			r.symbol, r.market,
+		); err != nil {
+			slog.Error("deactivate removed market", "symbol", r.symbol, "market", r.market, "error", err)
 		}
 	}
 }

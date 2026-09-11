@@ -38,29 +38,39 @@ const optionsEnabled = false
 // converts to/settles in BIUSDB at 1:1. Futures collateral used to be real
 // USDC (see the (symbol, market) key below — BTC-BIUSDB/FUTURES is a distinct
 // row from BTC-BIUSDB/SPOT, so the two coexist without collision).
+// currentMarkets was narrowed 2026-09-12 (product decision) to an explicit,
+// short list: SPOT is BI2X and BTC only; FUTURES is BI2X, BTC, ETH, AVAX,
+// LINK, SOL, DOGE, TAO, ADA, and XRP. ETH/SOL/BNB spot and BNB futures were
+// REMOVED entirely per that decision (not just disabled — see the removal
+// note below); AVAX/LINK/DOGE/TAO/ADA/XRP are new futures-only listings.
 var currentMarkets = []marketDefinition{
+	// --- SPOT: BI2X and BTC only ---
 	{displaySymbol: "BTC-BIUSDB", symbol: "BTC-BIUSDB", market: models.Spot, base: "BTC", quote: "BIUSDB"},
-	{displaySymbol: "ETH-BIUSDB", symbol: "ETH-BIUSDB", market: models.Spot, base: "ETH", quote: "BIUSDB"},
-	{displaySymbol: "SOL-BIUSDB", symbol: "SOL-BIUSDB", market: models.Spot, base: "SOL", quote: "BIUSDB"},
-	{displaySymbol: "BNB-BIUSDB", symbol: "BNB-BIUSDB", market: models.Spot, base: "BNB", quote: "BIUSDB"},
-	{displaySymbol: "BTC-PERP", symbol: "BTC-BIUSDB", market: models.Futures, base: "BTC", quote: "BIUSDB"},
-	{displaySymbol: "ETH-PERP", symbol: "ETH-BIUSDB", market: models.Futures, base: "ETH", quote: "BIUSDB"},
-	// Crypto perps beyond BTC/ETH: the SOL/BNB spot books above double as the
-	// index/funding underlying (see seedSymbolConfigs's underlying_symbol).
-	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSDB", market: models.Futures, base: "SOL", quote: "BIUSDB"},
-	{displaySymbol: "BNB-PERP", symbol: "BNB-BIUSDB", market: models.Futures, base: "BNB", quote: "BIUSDB"},
-
-	// BI2X: not a Binance-tracked asset like BTC/ETH/SOL/BNB above — its
-	// index price is meant to come from a separate data-feed API (link
-	// pending as of 2026-09-12). Until that feed is wired into Price-Fetcher
-	// (see its DefaultAssets/config), the MM desk for this pair has no live
-	// index to quote against and OnTick will correctly refuse to quote
-	// (price.Fresh check) rather than trade on a stale/fabricated price.
-	// The engine registration itself does not depend on the feed, so BI2X is
-	// already listed and orderable (manual orders, non-MM) same as any spot/
-	// futures pair.
+	// BI2X: not a Binance-tracked asset like BTC below — its index price
+	// comes from the dedicated BI2X data feed (internal Price-Fetcher
+	// bitdxfeed client, added 2026-09-12), not Binance.
 	{displaySymbol: "BI2X-BIUSDB", symbol: "BI2X-BIUSDB", market: models.Spot, base: "BI2X", quote: "BIUSDB"},
+
+	// --- FUTURES: BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP ---
+	{displaySymbol: "BTC-PERP", symbol: "BTC-BIUSDB", market: models.Futures, base: "BTC", quote: "BIUSDB"},
 	{displaySymbol: "BI2X-PERP", symbol: "BI2X-BIUSDB", market: models.Futures, base: "BI2X", quote: "BIUSDB"},
+	// ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, and XRP are FUTURES-ONLY — none of
+	// them has a spot row above (unlike BTC/BI2X, or the old SOL/BNB rows
+	// this replaced, which self-funded off their own spot book). Each needs
+	// no engine spot book to serve as its funding/index underlying: all are
+	// real Binance <ASSET>USDT tickers (verified live 2026-09-12), so
+	// Price-Fetcher's Binance client is the index source directly —
+	// underlying_symbol stays empty in seed.go the same way the forex/
+	// commodity rows already did before this change, since there is no
+	// registered SPOT row for any of these to point at.
+	{displaySymbol: "ETH-PERP", symbol: "ETH-BIUSDB", market: models.Futures, base: "ETH", quote: "BIUSDB"},
+	{displaySymbol: "AVAX-PERP", symbol: "AVAX-BIUSDB", market: models.Futures, base: "AVAX", quote: "BIUSDB"},
+	{displaySymbol: "LINK-PERP", symbol: "LINK-BIUSDB", market: models.Futures, base: "LINK", quote: "BIUSDB"},
+	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSDB", market: models.Futures, base: "SOL", quote: "BIUSDB"},
+	{displaySymbol: "DOGE-PERP", symbol: "DOGE-BIUSDB", market: models.Futures, base: "DOGE", quote: "BIUSDB"},
+	{displaySymbol: "TAO-PERP", symbol: "TAO-BIUSDB", market: models.Futures, base: "TAO", quote: "BIUSDB"},
+	{displaySymbol: "ADA-PERP", symbol: "ADA-BIUSDB", market: models.Futures, base: "ADA", quote: "BIUSDB"},
+	{displaySymbol: "XRP-PERP", symbol: "XRP-BIUSDB", market: models.Futures, base: "XRP", quote: "BIUSDB"},
 
 	// Forex majors, commodities, and US stocks are deliberately DISABLED for
 	// now (product decision 2026-09-11: crypto-only for the current launch).
@@ -69,6 +79,15 @@ var currentMarkets = []marketDefinition{
 	// goroutine spins up for any of them. Re-enable by moving entries back
 	// into this slice.
 }
+
+// removedMarkets: ETH-BIUSDB/SOL-BIUSDB/BNB-BIUSDB (SPOT) and BNB-PERP
+// (FUTURES) were REMOVED, not disabled, per the 2026-09-12 market-list
+// restructure — unlike disabledMarkets below (a deliberate, reversible
+// product decision to relaunch crypto-only), these four are simply not part
+// of the platform's target list and were taken out along with their seed.go
+// rows, Price-Fetcher/frontend registrations, and (for ETH/SOL/BNB) their
+// user_balances ledger columns are left in place (a balance a user already
+// holds must remain readable/withdrawable) but no longer tradable.
 
 // disabledMarkets lists every non-crypto instrument the engine is CAPABLE of
 // running (spot/futures registration, margin, liquidation, and funding all
