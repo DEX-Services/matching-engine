@@ -59,11 +59,11 @@ func openWriterPosition(t *testing.T, ledger *risk.Ledger, os *OptionsSettlement
 	t.Helper()
 	buyOrder := &models.Order{
 		AccountID: "buyer", Symbol: symbol, Market: models.Options, Side: models.Buy,
-		OptionType: optionType, StrikePrice: strike, Expiry: expiry, QuoteCurrency: "BIUSD",
+		OptionType: optionType, StrikePrice: strike, Expiry: expiry, QuoteCurrency: "BIUSDB",
 	}
 	sellOrder := &models.Order{
 		AccountID: writer, Symbol: symbol, Market: models.Options, Side: models.Sell,
-		OptionType: optionType, StrikePrice: strike, Expiry: expiry, QuoteCurrency: "BIUSD",
+		OptionType: optionType, StrikePrice: strike, Expiry: expiry, QuoteCurrency: "BIUSDB",
 	}
 	trade := &models.Trade{
 		Symbol: symbol, Market: models.Options, Price: premium, Quantity: qty,
@@ -76,12 +76,12 @@ func openWriterPosition(t *testing.T, ledger *risk.Ledger, os *OptionsSettlement
 
 func TestForceClosePosition_DebitsLossAndRemovesPosition(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	os := NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	symbol := "BTC-BIUSD-60000-20260101-CALL"
+	symbol := "BTC-BIUSDB-60000-20260101-CALL"
 	strike := decimal.NewFromInt(60000)
 	openWriterPosition(t, ledger, os, "writer", symbol, "CALL", strike, decimal.NewFromInt(1), decimal.NewFromInt(500), expiry)
 
@@ -89,7 +89,7 @@ func TestForceClosePosition_DebitsLossAndRemovesPosition(t *testing.T) {
 	// what the order-time risk check actually reserves) so ForceClosePosition
 	// has something real to release.
 	reserved := decimal.NewFromInt(60000)
-	if err := ledger.Reserve("writer", "BIUSD", reserved); err != nil {
+	if err := ledger.Reserve("writer", "BIUSDB", reserved); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestForceClosePosition_DebitsLossAndRemovesPosition(t *testing.T) {
 	// Balance: started 1,000,000, received 500 premium already (via Settle),
 	// reserved 60000 (now released), then lost 200 on close ->
 	// 1,000,000 + 500 - 200 = 1,000,300.
-	got := ledger.Available("writer", "BIUSD")
+	got := ledger.Available("writer", "BIUSDB")
 	want := decimal.NewFromInt(1_000_000).Add(decimal.NewFromInt(500)).Sub(decimal.NewFromInt(200))
 	if !got.Equal(want) {
 		t.Fatalf("writer balance after force-close = %s, want %s", got, want)
@@ -120,7 +120,7 @@ func TestForceClosePosition_DebitsLossAndRemovesPosition(t *testing.T) {
 func TestForceClosePosition_UnknownPositionIsNoop(t *testing.T) {
 	ledger := risk.NewLedger()
 	os := NewOptionsSettlement(ledger, &backendclient.Client{})
-	pnl, err := os.ForceClosePosition("nobody", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(time.Hour), "CALL", decimal.Zero, decimal.NewFromInt(100))
+	pnl, err := os.ForceClosePosition("nobody", "BTC-BIUSDB-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(time.Hour), "CALL", decimal.Zero, decimal.NewFromInt(100))
 	if err != nil {
 		t.Fatalf("unexpected error for unknown position: %v", err)
 	}

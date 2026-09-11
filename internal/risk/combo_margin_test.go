@@ -11,14 +11,14 @@ func comboOrder(side models.OrderSide, legs []models.ComboLeg, price string) *mo
 	return &models.Order{
 		ID: "c1", AccountID: "acct", Market: models.ComboOptions, Side: side, Type: models.Limit,
 		Price: decimal.RequireFromString(price), Quantity: decimal.NewFromInt(1),
-		ComboLegs: legs, QuoteCurrency: "BIUSD",
+		ComboLegs: legs, QuoteCurrency: "BIUSDB",
 	}
 }
 
 func verticalLegs() []models.ComboLeg {
 	return []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	}
 }
 
@@ -41,10 +41,10 @@ func TestComboLegSpecs_ParsesAllLegs(t *testing.T) {
 
 func TestComboLegSpecs_ParsesIronCondor(t *testing.T) {
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-50000-20260101-PUT", Ratio: 1},
-		{Symbol: "BTC-BIUSD-55000-20260101-PUT", Ratio: -1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
-		{Symbol: "BTC-BIUSD-70000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-50000-20260101-PUT", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-55000-20260101-PUT", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-70000-20260101-CALL", Ratio: 1},
 	}
 	o := comboOrder(models.Buy, legs, "800")
 	specs, ok := comboLegSpecs(o)
@@ -56,7 +56,7 @@ func TestComboLegSpecs_ParsesIronCondor(t *testing.T) {
 func TestComboLegSpecs_RejectsMalformedSymbol(t *testing.T) {
 	legs := []models.ComboLeg{
 		{Symbol: "not-a-real-symbol", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	}
 	o := comboOrder(models.Buy, legs, "400")
 	if _, ok := comboLegSpecs(o); ok {
@@ -106,8 +106,8 @@ func TestNotionalFor_ComboCreditCollectingShortCallSpread(t *testing.T) {
 	// the combo — so a NEGATIVE price means the buyer is actually being
 	// paid (a credit) to take this position. price=-500 -> netCredit=500.
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: -1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: 1},
 	}
 	o := comboOrder(models.Buy, legs, "-500")
 	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(-500))
@@ -138,10 +138,10 @@ func TestNotionalFor_ComboMalformedLegsFailsClosedToZero(t *testing.T) {
 
 func TestNotionalFor_ComboIronCondor(t *testing.T) {
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-50000-20260101-PUT", Ratio: 1},
-		{Symbol: "BTC-BIUSD-55000-20260101-PUT", Ratio: -1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
-		{Symbol: "BTC-BIUSD-70000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-50000-20260101-PUT", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-55000-20260101-PUT", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-70000-20260101-CALL", Ratio: 1},
 	}
 	// Opened for an 800 credit -> margin = wing width (5000) - 800 = 4200.
 	o := comboOrder(models.Buy, legs, "-800")
@@ -154,13 +154,13 @@ func TestNotionalFor_ComboIronCondor(t *testing.T) {
 
 func TestAssetFor_ComboUsesQuoteCurrencyThenFirstLegSymbol(t *testing.T) {
 	withQuote := comboOrder(models.Buy, verticalLegs(), "400")
-	if got := assetFor(withQuote); got != "BIUSD" {
-		t.Fatalf("assetFor with QuoteCurrency set = %s, want BIUSD", got)
+	if got := assetFor(withQuote); got != "BIUSDB" {
+		t.Fatalf("assetFor with QuoteCurrency set = %s, want BIUSDB", got)
 	}
 
 	noQuote := comboOrder(models.Buy, verticalLegs(), "400")
 	noQuote.QuoteCurrency = ""
-	if got := assetFor(noQuote); got != "BIUSD" {
-		t.Fatalf("assetFor falling back to first-leg symbol parse = %s, want BIUSD", got)
+	if got := assetFor(noQuote); got != "BIUSDB" {
+		t.Fatalf("assetFor falling back to first-leg symbol parse = %s, want BIUSDB", got)
 	}
 }

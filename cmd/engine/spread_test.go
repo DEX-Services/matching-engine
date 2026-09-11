@@ -19,25 +19,25 @@ func sampleInstrument(symbol, underlying, optionType, strike string, expiry time
 func TestValidateComboLegSpecs_AcceptsValidVertical(t *testing.T) {
 	expiry := time.Now().Add(24 * time.Hour)
 	insts := []*optionInstrument{
-		sampleInstrument("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD", "CALL", "60000", expiry),
-		sampleInstrument("BTC-BIUSD-65000-20260101-CALL", "BTC-BIUSD", "CALL", "65000", expiry),
+		sampleInstrument("BTC-BIUSDB-60000-20260101-CALL", "BTC-BIUSDB", "CALL", "60000", expiry),
+		sampleInstrument("BTC-BIUSDB-65000-20260101-CALL", "BTC-BIUSDB", "CALL", "65000", expiry),
 	}
 	underlying, err := validateComboLegSpecs(insts)
 	if err != nil {
 		t.Fatalf("expected a valid vertical, got error: %v", err)
 	}
-	if underlying != "BTC-BIUSD" {
-		t.Fatalf("underlying = %s, want BTC-BIUSD", underlying)
+	if underlying != "BTC-BIUSDB" {
+		t.Fatalf("underlying = %s, want BTC-BIUSDB", underlying)
 	}
 }
 
 func TestValidateComboLegSpecs_AcceptsIronCondor(t *testing.T) {
 	expiry := time.Now().Add(24 * time.Hour)
 	insts := []*optionInstrument{
-		sampleInstrument("BTC-BIUSD-50000-20260101-PUT", "BTC-BIUSD", "PUT", "50000", expiry),
-		sampleInstrument("BTC-BIUSD-55000-20260101-PUT", "BTC-BIUSD", "PUT", "55000", expiry),
-		sampleInstrument("BTC-BIUSD-65000-20260101-CALL", "BTC-BIUSD", "CALL", "65000", expiry),
-		sampleInstrument("BTC-BIUSD-70000-20260101-CALL", "BTC-BIUSD", "CALL", "70000", expiry),
+		sampleInstrument("BTC-BIUSDB-50000-20260101-PUT", "BTC-BIUSDB", "PUT", "50000", expiry),
+		sampleInstrument("BTC-BIUSDB-55000-20260101-PUT", "BTC-BIUSDB", "PUT", "55000", expiry),
+		sampleInstrument("BTC-BIUSDB-65000-20260101-CALL", "BTC-BIUSDB", "CALL", "65000", expiry),
+		sampleInstrument("BTC-BIUSDB-70000-20260101-CALL", "BTC-BIUSDB", "CALL", "70000", expiry),
 	}
 	if _, err := validateComboLegSpecs(insts); err != nil {
 		t.Fatalf("expected a valid iron condor (4 legs, mixed types), got error: %v", err)
@@ -47,8 +47,8 @@ func TestValidateComboLegSpecs_AcceptsIronCondor(t *testing.T) {
 func TestValidateComboLegSpecs_RejectsDifferentUnderlying(t *testing.T) {
 	expiry := time.Now().Add(24 * time.Hour)
 	insts := []*optionInstrument{
-		sampleInstrument("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD", "CALL", "60000", expiry),
-		sampleInstrument("ETH-BIUSD-65000-20260101-CALL", "ETH-BIUSD", "CALL", "65000", expiry),
+		sampleInstrument("BTC-BIUSDB-60000-20260101-CALL", "BTC-BIUSDB", "CALL", "60000", expiry),
+		sampleInstrument("ETH-BIUSDB-65000-20260101-CALL", "ETH-BIUSDB", "CALL", "65000", expiry),
 	}
 	if _, err := validateComboLegSpecs(insts); err == nil {
 		t.Fatal("expected an error for mismatched underlyings")
@@ -57,8 +57,8 @@ func TestValidateComboLegSpecs_RejectsDifferentUnderlying(t *testing.T) {
 
 func TestValidateComboLegSpecs_RejectsDifferentExpiry(t *testing.T) {
 	insts := []*optionInstrument{
-		sampleInstrument("BTC-BIUSD-60000-20260101-CALL", "BTC-BIUSD", "CALL", "60000", time.Now().Add(24*time.Hour)),
-		sampleInstrument("BTC-BIUSD-65000-20260201-CALL", "BTC-BIUSD", "CALL", "65000", time.Now().Add(48*time.Hour)),
+		sampleInstrument("BTC-BIUSDB-60000-20260101-CALL", "BTC-BIUSDB", "CALL", "60000", time.Now().Add(24*time.Hour)),
+		sampleInstrument("BTC-BIUSDB-65000-20260201-CALL", "BTC-BIUSDB", "CALL", "65000", time.Now().Add(48*time.Hour)),
 	}
 	if _, err := validateComboLegSpecs(insts); err == nil {
 		t.Fatal("expected an error for mismatched expiries (calendars/diagonals unsupported)")
@@ -82,8 +82,8 @@ func TestValidateComboLegs_RejectsZeroRatio(t *testing.T) {
 
 func TestComboSymbolFor_DeterministicAndOrderInsensitive(t *testing.T) {
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	}
 	a := comboSymbolFor(legs)
 	b := comboSymbolFor(legs)
@@ -104,12 +104,12 @@ func TestComboSymbolFor_DistinguishesRatioSign(t *testing.T) {
 	// spread being traded (a bull call spread vs its mirror bear call
 	// spread) — these must be different instruments.
 	a := comboSymbolFor([]models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	})
 	b := comboSymbolFor([]models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: -1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: 1},
 	})
 	if a == b {
 		t.Fatal("comboSymbolFor must distinguish which leg is long vs short")
@@ -118,13 +118,13 @@ func TestComboSymbolFor_DistinguishesRatioSign(t *testing.T) {
 
 func TestComboSymbolFor_DistinguishesLegCount(t *testing.T) {
 	vertical := comboSymbolFor([]models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	})
 	butterfly := comboSymbolFor([]models.ComboLeg{
-		{Symbol: "BTC-BIUSD-55000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: -2},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-55000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: -2},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: 1},
 	})
 	if vertical == butterfly {
 		t.Fatal("comboSymbolFor must distinguish different leg counts/structures")
@@ -134,10 +134,10 @@ func TestComboSymbolFor_DistinguishesLegCount(t *testing.T) {
 func TestGetOrCreateComboInstrument_MemoryFallbackRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-60000-20260101-CALL", Ratio: 1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-60000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
 	}
-	created, err := getOrCreateComboInstrument(ctx, nil, legs, "BTC-BIUSD")
+	created, err := getOrCreateComboInstrument(ctx, nil, legs, "BTC-BIUSDB")
 	if err != nil {
 		t.Fatalf("getOrCreateComboInstrument: %v", err)
 	}
@@ -146,20 +146,20 @@ func TestGetOrCreateComboInstrument_MemoryFallbackRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadComboInstrument: %v", err)
 	}
-	if len(loaded.Legs) != 2 || loaded.Underlying != "BTC-BIUSD" {
-		t.Fatalf("loaded combo instrument = %+v, want 2 legs, underlying BTC-BIUSD", loaded)
+	if len(loaded.Legs) != 2 || loaded.Underlying != "BTC-BIUSDB" {
+		t.Fatalf("loaded combo instrument = %+v, want 2 legs, underlying BTC-BIUSDB", loaded)
 	}
 }
 
 func TestGetOrCreateComboInstrument_MemoryFallbackRoundTripsNLegs(t *testing.T) {
 	ctx := context.Background()
 	legs := []models.ComboLeg{
-		{Symbol: "BTC-BIUSD-50000-20260101-PUT", Ratio: 1},
-		{Symbol: "BTC-BIUSD-55000-20260101-PUT", Ratio: -1},
-		{Symbol: "BTC-BIUSD-65000-20260101-CALL", Ratio: -1},
-		{Symbol: "BTC-BIUSD-70000-20260101-CALL", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-50000-20260101-PUT", Ratio: 1},
+		{Symbol: "BTC-BIUSDB-55000-20260101-PUT", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-65000-20260101-CALL", Ratio: -1},
+		{Symbol: "BTC-BIUSDB-70000-20260101-CALL", Ratio: 1},
 	}
-	created, err := getOrCreateComboInstrument(ctx, nil, legs, "BTC-BIUSD")
+	created, err := getOrCreateComboInstrument(ctx, nil, legs, "BTC-BIUSDB")
 	if err != nil {
 		t.Fatalf("getOrCreateComboInstrument (iron condor): %v", err)
 	}

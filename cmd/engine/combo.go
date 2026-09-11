@@ -159,7 +159,7 @@ func (a *comboSettlementAdapter) LegSpec(ctx context.Context, legSymbol string) 
 	if err != nil || inst == nil {
 		return decimal.Zero, time.Time{}, "", "", false
 	}
-	quote := "BIUSD"
+	quote := "BIUSDB"
 	if parts := splitOptionSymbol(legSymbol); len(parts) >= 2 {
 		quote = parts[1]
 	}

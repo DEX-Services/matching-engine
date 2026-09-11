@@ -37,7 +37,7 @@ func TestSubmitOrderPipeline_UnregisteredSymbolIs404(t *testing.T) {
 		{
 			name: "market order for an unregistered symbol",
 			order: &models.Order{
-				ID: uuid.NewString(), AccountID: "acct1", Symbol: "EURUSD-BIUSD", Market: models.Futures,
+				ID: uuid.NewString(), AccountID: "acct1", Symbol: "EURUSD-BIUSDB", Market: models.Futures,
 				Side: models.Buy, Type: models.Market, Quantity: decimal.NewFromInt(1),
 				TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			},
@@ -45,7 +45,7 @@ func TestSubmitOrderPipeline_UnregisteredSymbolIs404(t *testing.T) {
 		{
 			name: "limit order for an unregistered symbol",
 			order: &models.Order{
-				ID: uuid.NewString(), AccountID: "acct1", Symbol: "GOLD-BIUSD", Market: models.Futures,
+				ID: uuid.NewString(), AccountID: "acct1", Symbol: "GOLD-BIUSDB", Market: models.Futures,
 				Side: models.Buy, Type: models.Limit, Price: decimal.NewFromInt(2000), Quantity: decimal.NewFromInt(1),
 				TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			},

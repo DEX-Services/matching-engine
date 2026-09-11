@@ -58,12 +58,12 @@ func openShortOption(t *testing.T, os *settlement.OptionsSettlement, writer, sym
 	buyOrder := &models.Order{
 		AccountID: "buyer", Symbol: symbol, Market: models.Options, Side: models.Buy,
 		OptionType: optionType, StrikePrice: strikeDec, Expiry: time.Now().Add(24 * time.Hour),
-		QuoteCurrency: "BIUSD",
+		QuoteCurrency: "BIUSDB",
 	}
 	sellOrder := &models.Order{
 		AccountID: writer, Symbol: symbol, Market: models.Options, Side: models.Sell,
 		OptionType: optionType, StrikePrice: strikeDec, Expiry: time.Now().Add(24 * time.Hour),
-		QuoteCurrency: "BIUSD",
+		QuoteCurrency: "BIUSDB",
 	}
 	trade := &models.Trade{
 		Symbol: symbol, Market: models.Options, Price: priceDec, Quantity: qtyDec,
@@ -81,18 +81,18 @@ func newTestOptionsEngine(os *settlement.OptionsSettlement, md *marketdata.Servi
 
 func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
-	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(50000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSDB": decimal.NewFromInt(50000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
 	// OTM call, spot far below strike: the writer's equity (reserved +
 	// unrealized gain, since an OTM short call is profitable for the
 	// writer) stays comfortably above the maintenance requirement.
-	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
+	openShortOption(t, os, "writer", "BTC-BIUSDB-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(50000))
+	md := mdWithUnderlyingSpot("BTC-BIUSDB", decimal.NewFromInt(50000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
 	eng := newTestOptionsEngine(os, md, bus)
@@ -104,7 +104,7 @@ func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	default:
 	}
 
-	pos := os.GetPosition("writer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	pos := os.GetPosition("writer", "BTC-BIUSDB-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
 	if pos == nil || pos.Size.IsZero() {
 		t.Fatal("expected the writer's position to still be open (not liquidated)")
 	}
@@ -112,17 +112,17 @@ func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 
 func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 	// Deep ITM call: spot far above strike makes the short call a large
 	// unrealized loss for the writer, eroding equity well below maintenance.
-	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(200000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSDB": decimal.NewFromInt(200000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
-	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
+	openShortOption(t, os, "writer", "BTC-BIUSDB-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(200000))
+	md := mdWithUnderlyingSpot("BTC-BIUSDB", decimal.NewFromInt(200000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
 	eng := newTestOptionsEngine(os, md, bus)
@@ -146,7 +146,7 @@ func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 		}
 	}
 
-	pos := os.GetPosition("writer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	pos := os.GetPosition("writer", "BTC-BIUSDB-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
 	if pos != nil && !pos.Size.IsZero() {
 		t.Fatalf("expected the writer's position to be force-closed, still open: %+v", pos)
 	}
@@ -154,22 +154,22 @@ func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 
 func TestCheckOptionsMarginCalls_IgnoresLongPositions(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
-	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(200000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSDB": decimal.NewFromInt(200000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
-	openShortOption(t, os, "writer", "BTC-BIUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
+	openShortOption(t, os, "writer", "BTC-BIUSDB-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(200000))
+	md := mdWithUnderlyingSpot("BTC-BIUSDB", decimal.NewFromInt(200000))
 	bus := events.NewBus()
 	eng := newTestOptionsEngine(os, md, bus)
 	eng.checkOptionsMarginCalls()
 
 	// The buyer's long position must never be force-closed — buyers can't be
 	// margin-called; they already paid the full premium up front.
-	buyerPos := os.GetPosition("buyer", "BTC-BIUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	buyerPos := os.GetPosition("buyer", "BTC-BIUSDB-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
 	if buyerPos == nil || buyerPos.Size.IsZero() {
 		t.Fatal("expected the buyer's long position to remain untouched")
 	}

@@ -68,23 +68,23 @@ func (f fakeMarkSource) LegSpec(ctx context.Context, legSymbol string) (decimal.
 func verticalSetup(t *testing.T) (*OptionsSettlement, *ComboSettlement, string, string, time.Time) {
 	t.Helper()
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("seller", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("seller", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	buySymbol := "BTC-BIUSD-60000-20260101-CALL"
-	sellSymbol := "BTC-BIUSD-65000-20260101-CALL"
+	buySymbol := "BTC-BIUSDB-60000-20260101-CALL"
+	sellSymbol := "BTC-BIUSDB-65000-20260101-CALL"
 
 	legs := fakeLegResolver{
 		legs:       []models.ComboLeg{{Symbol: buySymbol, Ratio: 1}, {Symbol: sellSymbol, Ratio: -1}},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fakeMarkSource{
 		spot: decimal.NewFromInt(62000), ok: true,
 		legs: map[string]legSpec{
-			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
-			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
+			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
+			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
 		},
 	}
 	combo := NewComboSettlement(options, legs, marks)
@@ -95,8 +95,8 @@ func comboTrade(comboSymbol, buyerAcct, sellerAcct string, netPrice decimal.Deci
 	return &models.Trade{
 		ID: "t1", Symbol: comboSymbol, Market: models.ComboOptions,
 		Price: netPrice, Quantity: decimal.NewFromInt(1), ExecutedAt: time.Now(),
-		BuyOrder:  &models.Order{AccountID: buyerAcct, QuoteCurrency: "BIUSD"},  // long the spread
-		SellOrder: &models.Order{AccountID: sellerAcct, QuoteCurrency: "BIUSD"}, // short the spread
+		BuyOrder:  &models.Order{AccountID: buyerAcct, QuoteCurrency: "BIUSDB"},  // long the spread
+		SellOrder: &models.Order{AccountID: sellerAcct, QuoteCurrency: "BIUSDB"}, // short the spread
 	}
 }
 
@@ -131,22 +131,22 @@ func TestComboSettle_FansOutIntoTwoLegPositions(t *testing.T) {
 
 func TestComboSettle_NetDebitCashFlowMatchesTradedPrice(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("seller", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("seller", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	buySymbol := "BTC-BIUSD-60000-20260101-CALL"
-	sellSymbol := "BTC-BIUSD-65000-20260101-CALL"
+	buySymbol := "BTC-BIUSDB-60000-20260101-CALL"
+	sellSymbol := "BTC-BIUSDB-65000-20260101-CALL"
 	legs := fakeLegResolver{
 		legs:       []models.ComboLeg{{Symbol: buySymbol, Ratio: 1}, {Symbol: sellSymbol, Ratio: -1}},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fakeMarkSource{
 		spot: decimal.NewFromInt(62000), ok: true,
 		legs: map[string]legSpec{
-			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
-			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
+			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
+			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
 		},
 	}
 	combo := NewComboSettlement(options, legs, marks)
@@ -157,36 +157,36 @@ func TestComboSettle_NetDebitCashFlowMatchesTradedPrice(t *testing.T) {
 		t.Fatalf("combo settle: %v", err)
 	}
 
-	// The buyer's net BIUSD outflow across both legs must equal exactly the
+	// The buyer's net BIUSDB outflow across both legs must equal exactly the
 	// traded net price (400), regardless of how the two legs' individual
 	// prices were split internally — this is the one hard invariant the
 	// whole design depends on for correctness.
-	buyerBalance := ledger.Available("buyer", "BIUSD")
+	buyerBalance := ledger.Available("buyer", "BIUSDB")
 	wantBuyer := decimal.NewFromInt(1_000_000).Sub(netPrice)
 	decimalAlmostEqual(t, buyerBalance, wantBuyer, "buyer balance after combo settle (net debit of", netPrice, ")")
-	sellerBalance := ledger.Available("seller", "BIUSD")
+	sellerBalance := ledger.Available("seller", "BIUSDB")
 	wantSeller := decimal.NewFromInt(1_000_000).Add(netPrice)
 	decimalAlmostEqual(t, sellerBalance, wantSeller, "seller balance after combo settle (net credit of", netPrice, ")")
 }
 
 func TestComboSettle_NetCreditCashFlowMatchesTradedPrice(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("seller", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("seller", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	buySymbol := "BTC-BIUSD-60000-20260101-CALL"
-	sellSymbol := "BTC-BIUSD-65000-20260101-CALL"
+	buySymbol := "BTC-BIUSDB-60000-20260101-CALL"
+	sellSymbol := "BTC-BIUSDB-65000-20260101-CALL"
 	legs := fakeLegResolver{
 		legs:       []models.ComboLeg{{Symbol: buySymbol, Ratio: 1}, {Symbol: sellSymbol, Ratio: -1}},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fakeMarkSource{
 		spot: decimal.NewFromInt(62000), ok: true,
 		legs: map[string]legSpec{
-			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
-			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
+			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
+			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
 		},
 	}
 	combo := NewComboSettlement(options, legs, marks)
@@ -196,7 +196,7 @@ func TestComboSettle_NetCreditCashFlowMatchesTradedPrice(t *testing.T) {
 	if err := combo.Settle(trade); err != nil {
 		t.Fatalf("combo settle: %v", err)
 	}
-	buyerBalance := ledger.Available("buyer", "BIUSD")
+	buyerBalance := ledger.Available("buyer", "BIUSDB")
 	wantBuyer := decimal.NewFromInt(1_000_000).Sub(netPrice) // subtracting a negative = crediting
 	if !buyerBalance.Equal(wantBuyer) {
 		t.Fatalf("buyer balance after net-credit combo settle = %s, want %s", buyerBalance, wantBuyer)
@@ -218,15 +218,15 @@ func TestComboSettle_FailsClosedOnUnresolvableLegs(t *testing.T) {
 
 func TestComboSettle_IronCondorFansOutIntoFourLegPositions(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("seller", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("seller", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	longPut := "BTC-BIUSD-50000-20260101-PUT"
-	shortPut := "BTC-BIUSD-55000-20260101-PUT"
-	shortCall := "BTC-BIUSD-65000-20260101-CALL"
-	longCall := "BTC-BIUSD-70000-20260101-CALL"
+	longPut := "BTC-BIUSDB-50000-20260101-PUT"
+	shortPut := "BTC-BIUSDB-55000-20260101-PUT"
+	shortCall := "BTC-BIUSDB-65000-20260101-CALL"
+	longCall := "BTC-BIUSDB-70000-20260101-CALL"
 
 	legs := fakeLegResolver{
 		legs: []models.ComboLeg{
@@ -235,15 +235,15 @@ func TestComboSettle_IronCondorFansOutIntoFourLegPositions(t *testing.T) {
 			{Symbol: shortCall, Ratio: -1},
 			{Symbol: longCall, Ratio: 1},
 		},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fakeMarkSource{
 		spot: decimal.NewFromInt(60000), ok: true,
 		legs: map[string]legSpec{
-			longPut:   {strike: decimal.NewFromInt(50000), expiry: expiry, optionType: "PUT", quoteCurrency: "BIUSD"},
-			shortPut:  {strike: decimal.NewFromInt(55000), expiry: expiry, optionType: "PUT", quoteCurrency: "BIUSD"},
-			shortCall: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
-			longCall:  {strike: decimal.NewFromInt(70000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSD"},
+			longPut:   {strike: decimal.NewFromInt(50000), expiry: expiry, optionType: "PUT", quoteCurrency: "BIUSDB"},
+			shortPut:  {strike: decimal.NewFromInt(55000), expiry: expiry, optionType: "PUT", quoteCurrency: "BIUSDB"},
+			shortCall: {strike: decimal.NewFromInt(65000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
+			longCall:  {strike: decimal.NewFromInt(70000), expiry: expiry, optionType: "CALL", quoteCurrency: "BIUSDB"},
 		},
 	}
 	combo := NewComboSettlement(options, legs, marks)
@@ -272,7 +272,7 @@ func TestComboSettle_IronCondorFansOutIntoFourLegPositions(t *testing.T) {
 	// comboTrade's doc: BuyOrder is "long the spread" — a negative netPrice
 	// here means the buyer RECEIVES 800, matching the credit-collecting
 	// short iron condor a real trader would open in this direction).
-	buyerBalance := ledger.Available("buyer", "BIUSD")
+	buyerBalance := ledger.Available("buyer", "BIUSDB")
 	wantBuyer := decimal.NewFromInt(1_000_000).Add(decimal.NewFromInt(800))
 	decimalAlmostEqual(t, buyerBalance, wantBuyer, "buyer balance after iron condor settle")
 }
@@ -287,7 +287,7 @@ func TestLegPricesInvariant_TwoLeg(t *testing.T) {
 	}
 	marks := fakeMarkSource{ok: false} // no live mark -> flat-split fallback path
 	netPrice := decimal.NewFromInt(400)
-	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSD", marks, decimal.NewFromFloat(0.03))
+	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSDB", marks, decimal.NewFromFloat(0.03))
 	if len(prices) != 2 {
 		t.Fatalf("got %d prices, want 2", len(prices))
 	}
@@ -314,7 +314,7 @@ func TestLegPricesInvariant_FourLeg(t *testing.T) {
 		specs[i].expiry = time.Now().Add(24 * time.Hour)
 	}
 	netPrice := decimal.NewFromInt(-800)
-	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSD", marks, decimal.NewFromFloat(0.03))
+	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSDB", marks, decimal.NewFromFloat(0.03))
 	if len(prices) != 4 {
 		t.Fatalf("got %d prices, want 4", len(prices))
 	}
@@ -341,7 +341,7 @@ func TestSplitComboNetPrice_SignMismatchFallback(t *testing.T) {
 	}
 	marks := fakeMarkSource{spot: decimal.NewFromInt(62000), ok: true}
 	netPrice := decimal.NewFromInt(-300)
-	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSD", marks, decimal.NewFromFloat(0.03))
+	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSDB", marks, decimal.NewFromFloat(0.03))
 
 	for i, p := range prices {
 		if !p.IsPositive() {
@@ -371,7 +371,7 @@ func TestSplitComboNetPrice_SignMismatchFallback_IronCondor(t *testing.T) {
 	// has, paired with a netPrice of the opposite sign.
 	marks := fakeMarkSource{spot: decimal.NewFromInt(60000), ok: true}
 	netPrice := decimal.NewFromInt(5000) // an intentionally large, likely-mismatched net price
-	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSD", marks, decimal.NewFromFloat(0.03))
+	prices := splitComboNetPrice(netPrice, specs, "BTC-BIUSDB", marks, decimal.NewFromFloat(0.03))
 
 	achieved := decimal.Zero
 	for i, spec := range specs {

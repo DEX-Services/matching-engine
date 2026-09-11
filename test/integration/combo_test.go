@@ -48,7 +48,7 @@ func (f fixedMarkSource) LegSpec(ctx context.Context, legSymbol string) (decimal
 	if !ok {
 		return decimal.Zero, time.Time{}, "", "", false
 	}
-	return l.strike, l.expiry, l.typ, "BIUSD", true
+	return l.strike, l.expiry, l.typ, "BIUSDB", true
 }
 
 // almostEqual tolerates float64-round-trip noise from the theoretical
@@ -76,16 +76,16 @@ func almostEqual(t *testing.T, got, want decimal.Decimal, msg string) {
 // atomic matching, not client-coordinated separate orders.
 func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	buySymbol := "BTC-BIUSD-60000-20260101-CALL"
-	sellSymbol := "BTC-BIUSD-65000-20260101-CALL"
+	buySymbol := "BTC-BIUSDB-60000-20260101-CALL"
+	sellSymbol := "BTC-BIUSDB-65000-20260101-CALL"
 	legs := fixedLegResolver{
 		legs:       []models.ComboLeg{{Symbol: buySymbol, Ratio: 1}, {Symbol: sellSymbol, Ratio: -1}},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fixedMarkSource{
 		spot: decimal.NewFromInt(62000),
@@ -147,9 +147,9 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	// Net cash flow must equal exactly the traded net price (200), on both
 	// sides — the buyer paid 200 net, the writer received 200 net, no matter
 	// how the two legs' individual synthetic prices were split.
-	buyerBalance := ledger.Available("buyer", "BIUSD")
+	buyerBalance := ledger.Available("buyer", "BIUSDB")
 	almostEqual(t, buyerBalance, decimal.NewFromInt(1_000_000-200), "buyer balance")
-	writerBalance := ledger.Available("writer", "BIUSD")
+	writerBalance := ledger.Available("writer", "BIUSDB")
 	almostEqual(t, writerBalance, decimal.NewFromInt(1_000_000+200), "writer balance")
 }
 
@@ -159,15 +159,15 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 // short legs all settle together from one real matched trade.
 func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(1_000_000))
 	options := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
-	longPut := "BTC-BIUSD-50000-20260101-PUT"
-	shortPut := "BTC-BIUSD-55000-20260101-PUT"
-	shortCall := "BTC-BIUSD-65000-20260101-CALL"
-	longCall := "BTC-BIUSD-70000-20260101-CALL"
+	longPut := "BTC-BIUSDB-50000-20260101-PUT"
+	shortPut := "BTC-BIUSDB-55000-20260101-PUT"
+	shortCall := "BTC-BIUSDB-65000-20260101-CALL"
+	longCall := "BTC-BIUSDB-70000-20260101-CALL"
 
 	legs := fixedLegResolver{
 		legs: []models.ComboLeg{
@@ -176,7 +176,7 @@ func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 			{Symbol: shortCall, Ratio: -1},
 			{Symbol: longCall, Ratio: 1},
 		},
-		underlying: "BTC-BIUSD",
+		underlying: "BTC-BIUSDB",
 	}
 	marks := fixedMarkSource{
 		spot: decimal.NewFromInt(60000),

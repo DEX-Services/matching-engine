@@ -153,7 +153,7 @@ func TestMaintenanceBarLeavesRoomToMove(t *testing.T) {
 // Before this fix both of these spot levels produced the same outcome —
 // immediate force-close with the "warning" event emitted in the same instant.
 func TestMarginCallStages_WarnsWhileSolventThenLiquidates(t *testing.T) {
-	const symbol = "BTC-BIUSD-60000-20260101-CALL"
+	const symbol = "BTC-BIUSDB-60000-20260101-CALL"
 
 	// Written when BTC was 50k (well OTM, cheap premium), then the underlying
 	// runs up through the strike. At 66.5k the writer has burned ~87% of their
@@ -200,17 +200,17 @@ func TestMarginCallStages_WarnsWhileSolventThenLiquidates(t *testing.T) {
 func openWriterThenMoveSpot(t *testing.T, symbol string, openSpot, nowSpot int64) (*settlement.OptionsSettlement, *Engine, <-chan *models.Event) {
 	t.Helper()
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BIUSD", decimal.NewFromInt(50_000_000))
-	ledger.Deposit("writer", "BIUSD", decimal.NewFromInt(50_000_000))
+	ledger.Deposit("buyer", "BIUSDB", decimal.NewFromInt(50_000_000))
+	ledger.Deposit("writer", "BIUSDB", decimal.NewFromInt(50_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
-	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(openSpot)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSDB": decimal.NewFromInt(openSpot)})
 	openShortOption(t, os, "writer", symbol, "CALL", "60000", "1", "500")
 
-	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSD": decimal.NewFromInt(nowSpot)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BIUSDB": decimal.NewFromInt(nowSpot)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
-	md := mdWithUnderlyingSpot("BTC-BIUSD", decimal.NewFromInt(nowSpot))
+	md := mdWithUnderlyingSpot("BTC-BIUSDB", decimal.NewFromInt(nowSpot))
 	bus := events.NewBus()
 	ch := bus.Subscribe(20)
 	eng := newTestOptionsEngine(os, md, bus)

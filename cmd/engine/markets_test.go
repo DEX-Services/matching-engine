@@ -26,7 +26,7 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	// now (see disabledMarkets in markets.go; not deleted, just not
 	// registered). (Options engines register lazily per contract and are not
 	// in this list.)
-	if len(got) != 8 || got[0].DisplaySymbol != "BTC-BIUSD" || got[4].Symbol != "BTC-BIUSD" || got[4].Market != "FUTURES" {
+	if len(got) != 8 || got[0].DisplaySymbol != "BTC-BIUSDB" || got[4].Symbol != "BTC-BIUSDB" || got[4].Market != "FUTURES" {
 		t.Fatalf("unexpected current markets: %#v", got)
 	}
 	if got[0].TickSize != "0.01" || len(got[0].EnabledOrderTypes) != 6 {

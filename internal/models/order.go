@@ -115,7 +115,7 @@ type Order struct {
 	Leverage   int    `json:"leverage,omitempty"`
 	MarginMode string `json:"marginMode,omitempty"` // "ISOLATED" | "CROSS"
 
-	// QuoteCurrency is the settlement currency for the order (e.g. "BIUSD").
+	// QuoteCurrency is the settlement currency for the order (e.g. "BIUSDB").
 	// For spot/futures it is derived from the symbol (BASE-QUOTE). For options
 	// it is set by the order handler from the instrument's underlying config,
 	// because option instrument symbols (BASE-STRIKE-EXPIRY-TYPE) do not

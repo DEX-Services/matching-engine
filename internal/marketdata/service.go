@@ -190,7 +190,7 @@ func (s *Service) SummaryAll() []Summary {
 }
 
 // UnderlyingMark returns the current Spot mark price for symbol (e.g.
-// "BTC-BIUSD"), or false if no Spot market data exists for it yet. Used by
+// "BTC-BIUSDB"), or false if no Spot market data exists for it yet. Used by
 // risk.Checker (via the UnderlyingMarkSource interface) to price options
 // writer margin against the real underlying instead of only the strike.
 func (s *Service) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
