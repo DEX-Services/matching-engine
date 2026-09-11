@@ -130,10 +130,18 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	// Options AND combos are DISABLED (see markets.go's optionsEnabled for the
 	// full context — same crypto-only launch decision as forex/commodities/
 	// stocks). Rejected here, before any per-instrument lookup/engine-creation
-	// work runs, with a message distinct from a generic validation failure so
-	// a client can tell "not live yet" apart from "you sent something wrong".
+	// work runs (validateAndPrepareOption/validateAndPrepareCombo would
+	// otherwise happily create a live order book on demand for any
+	// well-formed order — there's no static registration for options the way
+	// currentMarkets provides for spot/futures, so this check is the only
+	// thing standing between "seeding is off" and "orders still work
+	// anyway"). The rejection is deliberately the same generic shape the mux
+	// itself gives an unregistered symbol/market — not a "coming soon"
+	// message — since that messaging is frontend-only now; the API doesn't
+	// say anything about options being on a roadmap.
 	if !optionsEnabled && (o.Market == models.Options || o.Market == models.ComboOptions) {
-		return rejectPipeline(d, o, "options trading is coming soon", http.StatusServiceUnavailable, fmt.Errorf("options market disabled"))
+		notRegistered := fmt.Errorf("no engine registered for %s/%s", o.Symbol, o.Market)
+		return rejectPipeline(d, o, notRegistered.Error(), http.StatusNotFound, notRegistered)
 	}
 
 	// Options require per-instrument validation and engine creation. Each
@@ -151,6 +159,27 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	if o.Market == models.ComboOptions {
 		if err := validateAndPrepareCombo(ctx, d.pgPool, d.reg, d.mdSvc, o); err != nil {
 			return rejectPipeline(d, o, err.Error(), http.StatusBadRequest, fmt.Errorf("invalid combo order: %w", err))
+		}
+	}
+
+	// Every non-options market (SPOT/FUTURES) must already have a registered
+	// order book — checked here, early and generically, rather than only
+	// implicitly via whichever later step happens to call d.reg.Get() first
+	// (a market order's slippage/reservation lookup, or a limit order not
+	// hitting reg.Get() at all until the matching core itself does). Without
+	// this, forex/commodity/stock symbols (currently DISABLED — see
+	// markets.go's disabledMarkets, not currently in currentMarkets) fell
+	// through to whatever generic error happened to fire first: a market
+	// order got "no engine registered" wrapped as a 400 risk error, while a
+	// funded account's limit order could reach much further into the
+	// pipeline before failing. Checking registration up front, before any of
+	// that, gives every disabled market — options above, and these below —
+	// the exact same clean 404 "no engine registered for X/Y" regardless of
+	// order type or account balance, with nothing in the response distinguishing
+	// "genuinely never existed" from "disabled by policy".
+	if o.Market != models.Options && o.Market != models.ComboOptions {
+		if _, gerr := d.reg.Get(o.Symbol, o.Market); gerr != nil {
+			return rejectPipeline(d, o, gerr.Error(), http.StatusNotFound, gerr)
 		}
 	}
 

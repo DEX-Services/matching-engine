@@ -71,16 +71,6 @@ func spreadHandler(d submitDeps) http.HandlerFunc {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		// Options (and therefore combos/spreads) are DISABLED — see
-		// markets.go's optionsEnabled for the full context (same crypto-only
-		// launch decision as forex/commodities/stocks). Rejected up front so
-		// nothing below (leg validation, combo-instrument lookup/creation)
-		// runs for a market that isn't live.
-		if !optionsEnabled {
-			http.Error(w, "options trading is coming soon", http.StatusServiceUnavailable)
-			return
-		}
-
 		var req SpreadRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)

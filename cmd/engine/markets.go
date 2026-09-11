@@ -10,18 +10,20 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// optionsEnabled gates every options/combo entry point (order submission,
-// /spread, /option-chain — see submit.go, spread.go, and this file's
-// /option-chain handler in main.go) behind a single flag, per the 2026-09-11
-// product decision to launch crypto spot/futures only (same treatment as
+// optionsEnabled is the single switch for options/combos, per the product
+// decision to launch crypto spot/futures only (same treatment as
 // forex/commodities/stocks — see disabledMarkets below).
 //
-// A named bool rather than a bare `return` at each site for two reasons:
-// (1) `go vet` flags code after an unconditional return as unreachable,
-// which would otherwise force literally commenting out every disabled
-// handler body (100+ lines for /option-chain alone) instead of leaving it
-// intact and readable; (2) re-enabling options is flipping this one value,
-// not hunting down and uncommenting several handler bodies across files.
+// The /spread and /option-chain ROUTES are commented out of the mux
+// entirely in main.go/spread.go — not registered at all, so a request there
+// gets a plain 404 like any endpoint that doesn't exist, with no "coming
+// soon" message from the API. This flag is what remains: submit.go's /order
+// pipeline is shared with spot/futures and can't be commented out wholesale,
+// so it checks this flag to reject an OPTIONS/COMBO_OPTIONS order the same
+// generic way an unregistered symbol/market is rejected elsewhere — main.go
+// also checks it to skip seeding option_instruments (pure overhead for a
+// market nothing can submit an order to). Re-enabling options is flipping
+// this to true AND uncommenting the two routes.
 const optionsEnabled = false
 
 // currentMarkets is the deliberately small execution set for this delivery.
