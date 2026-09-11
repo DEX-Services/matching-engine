@@ -21,13 +21,17 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	// 4 spot + 4 futures (BTC, ETH, SOL, BNB) — crypto-only, per the
+	// 5 spot + 5 futures (BTC, ETH, SOL, BNB, BI2X) — crypto-only, per the
 	// 2026-09-11 product decision to disable forex/commodities/stocks for
 	// now (see disabledMarkets in markets.go; not deleted, just not
-	// registered). (Options engines register lazily per contract and are not
-	// in this list.)
-	if len(got) != 8 || got[0].DisplaySymbol != "BTC-BIUSDB" || got[4].Symbol != "BTC-BIUSDB" || got[4].Market != "FUTURES" {
+	// registered). BI2X added 2026-09-12 (see markets.go's comment on it —
+	// awaiting a separate index-price feed). (Options engines register
+	// lazily per contract and are not in this list.)
+	if len(got) != 10 || got[0].DisplaySymbol != "BTC-BIUSDB" || got[4].Symbol != "BTC-BIUSDB" || got[4].Market != "FUTURES" {
 		t.Fatalf("unexpected current markets: %#v", got)
+	}
+	if got[9].DisplaySymbol != "BI2X-PERP" || got[9].Symbol != "BI2X-BIUSDB" || got[9].Market != "FUTURES" {
+		t.Fatalf("expected BI2X-PERP as the last market: %#v", got[8:])
 	}
 	if got[0].TickSize != "0.01" || len(got[0].EnabledOrderTypes) != 6 {
 		t.Fatalf("missing usable metadata: %#v", got[0])

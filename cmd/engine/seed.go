@@ -58,6 +58,14 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// double as the funding/index underlying.
 		{"SOL-BIUSDB", "FUTURES", "SOL", "BIUSDB", "SOL-BIUSDB", 50, 8, "0.005", "0", "", ""},
 		{"BNB-BIUSDB", "FUTURES", "BNB", "BIUSDB", "BNB-BIUSDB", 50, 8, "0.005", "0", "", ""},
+		// BI2X: same shape as SOL/BNB above — its own spot row doubles as the
+		// futures funding/index underlying. Its actual index price feed is a
+		// separate data-feed API pending as of 2026-09-12 (see markets.go's
+		// comment on this pair); leverage/margin here match the other
+		// mid-cap crypto perps (SOL/BNB) rather than BTC/ETH's tighter
+		// numbers, since BI2X's real volatility profile isn't known yet.
+		{"BI2X-BIUSDB", "SPOT", "BI2X", "BIUSDB", "", 0, 0, "0", "0", "", ""},
+		{"BI2X-BIUSDB", "FUTURES", "BI2X", "BIUSDB", "BI2X-BIUSDB", 50, 8, "0.005", "0", "", ""},
 		// Non-crypto perps (forex majors, commodities, US stocks) are
 		// DISABLED per the 2026-09-11 product decision to launch crypto-only
 		// — see markets.go's disabledMarkets for the matching engine-side

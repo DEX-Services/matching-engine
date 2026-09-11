@@ -50,6 +50,18 @@ var currentMarkets = []marketDefinition{
 	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSDB", market: models.Futures, base: "SOL", quote: "BIUSDB"},
 	{displaySymbol: "BNB-PERP", symbol: "BNB-BIUSDB", market: models.Futures, base: "BNB", quote: "BIUSDB"},
 
+	// BI2X: not a Binance-tracked asset like BTC/ETH/SOL/BNB above — its
+	// index price is meant to come from a separate data-feed API (link
+	// pending as of 2026-09-12). Until that feed is wired into Price-Fetcher
+	// (see its DefaultAssets/config), the MM desk for this pair has no live
+	// index to quote against and OnTick will correctly refuse to quote
+	// (price.Fresh check) rather than trade on a stale/fabricated price.
+	// The engine registration itself does not depend on the feed, so BI2X is
+	// already listed and orderable (manual orders, non-MM) same as any spot/
+	// futures pair.
+	{displaySymbol: "BI2X-BIUSDB", symbol: "BI2X-BIUSDB", market: models.Spot, base: "BI2X", quote: "BIUSDB"},
+	{displaySymbol: "BI2X-PERP", symbol: "BI2X-BIUSDB", market: models.Futures, base: "BI2X", quote: "BIUSDB"},
+
 	// Forex majors, commodities, and US stocks are deliberately DISABLED for
 	// now (product decision 2026-09-11: crypto-only for the current launch).
 	// See disabledMarkets below — the implementation is untouched, just not
