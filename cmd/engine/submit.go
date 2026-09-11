@@ -127,6 +127,15 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		}
 	}
 
+	// Options AND combos are DISABLED (see markets.go's optionsEnabled for the
+	// full context — same crypto-only launch decision as forex/commodities/
+	// stocks). Rejected here, before any per-instrument lookup/engine-creation
+	// work runs, with a message distinct from a generic validation failure so
+	// a client can tell "not live yet" apart from "you sent something wrong".
+	if !optionsEnabled && (o.Market == models.Options || o.Market == models.ComboOptions) {
+		return rejectPipeline(d, o, "options trading is coming soon", http.StatusServiceUnavailable, fmt.Errorf("options market disabled"))
+	}
+
 	// Options require per-instrument validation and engine creation. Each
 	// option contract (unique strike/expiry/type) gets its own order book so
 	// different instruments never share a book.

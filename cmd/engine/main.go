@@ -230,23 +230,28 @@ func main() {
 				slog.Error("ensure combo_instruments schema", "error", err)
 			} else {
 				seedSymbolConfigs(ctx, pool)
-				seedOptionInstruments(ctx, pool)
-				// Re-check periodically, not just at boot: a long-lived
-				// process can outlive its seeded contracts' expiries (the
-				// shortest is 7 days) without ever restarting to trigger the
-				// boot-time reseed above.
-				go func() {
-					ticker := time.NewTicker(6 * time.Hour)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-ticker.C:
-							seedOptionInstruments(ctx, pool)
+				// See markets.go's optionsEnabled: seeding option_instruments
+				// rows and running the 6h re-seed ticker are pure overhead
+				// for a market nothing can trade on while it's flagged off.
+				if optionsEnabled {
+					seedOptionInstruments(ctx, pool)
+					// Re-check periodically, not just at boot: a long-lived
+					// process can outlive its seeded contracts' expiries (the
+					// shortest is 7 days) without ever restarting to trigger the
+					// boot-time reseed above.
+					go func() {
+						ticker := time.NewTicker(6 * time.Hour)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								seedOptionInstruments(ctx, pool)
+							}
 						}
-					}
-				}()
+					}()
+				}
 				if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
 					slog.Error("load symbol config registry", "error", err)
 				} else {
@@ -912,6 +917,21 @@ func main() {
 	}))
 
 	mux.HandleFunc("/option-chain", func(w http.ResponseWriter, r *http.Request) {
+		// Options are DISABLED (2026-09-11 product decision: crypto
+		// spot/futures only for the current launch) — see submit.go's order-
+		// rejection gate for the full context. Rejected here too, or the
+		// chain would still serve stale contracts left over from BEFORE
+		// seeding was disabled (option_instruments rows persist until their
+		// own expiry, up to 30 days) — a live-looking, seemingly-tradable
+		// chain that then rejects every order is worse than an honest
+		// "not available", and misleads the frontend's Coming Soon gate,
+		// which shows this data if this endpoint ever returns any. Not
+		// deleted: everything below still works exactly as before.
+		if !optionsEnabled {
+			http.Error(w, "options trading is coming soon", http.StatusServiceUnavailable)
+			return
+		}
+
 		q := r.URL.Query()
 		underlying := q.Get("underlying")
 		if underlying == "" {

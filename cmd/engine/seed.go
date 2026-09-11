@@ -48,11 +48,22 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		{"BNB-BIUSD", "SPOT", "BNB", "BIUSD", "", 0, 0, "0", "0", "", ""},
 		{"BTC-BIUSD", "FUTURES", "BTC", "BIUSD", "BTC-BIUSD", 100, 8, "0.005", "0", "", ""},
 		{"ETH-BIUSD", "FUTURES", "ETH", "BIUSD", "ETH-BIUSD", 75, 8, "0.0075", "0", "", ""},
-		{"BTC-BIUSD", "OPTIONS", "BTC", "BIUSD", "BTC-BIUSD", 0, 0, "0", "1", "", ""},
+		// Options are DISABLED per the 2026-09-11 product decision (same
+		// crypto-only launch scope as the non-crypto perps below) — see
+		// submit.go/spread.go's order-rejection gates and main.go's disabled
+		// seedOptionInstruments call. Not deleted; uncomment together with
+		// those to bring options back.
+		// {"BTC-BIUSD", "OPTIONS", "BTC", "BIUSD", "BTC-BIUSD", 0, 0, "0", "1", "", ""},
 		// SOL/BNB perps mirror BTC/ETH: the spot books above exist, so they
 		// double as the funding/index underlying.
 		{"SOL-BIUSD", "FUTURES", "SOL", "BIUSD", "SOL-BIUSD", 50, 8, "0.005", "0", "", ""},
 		{"BNB-BIUSD", "FUTURES", "BNB", "BIUSD", "BNB-BIUSD", 50, 8, "0.005", "0", "", ""},
+		// Non-crypto perps (forex majors, commodities, US stocks) are
+		// DISABLED per the 2026-09-11 product decision to launch crypto-only
+		// — see markets.go's disabledMarkets for the matching engine-side
+		// entries. Commented out rather than deleted so re-enabling is a
+		// matter of uncommenting both sides, not re-deriving these values:
+		//
 		// Non-crypto perps have no engine spot book to serve as a funding
 		// underlying, so funding_interval_hours = 0 keeps the funding
 		// scheduler off for them (underlying_symbol stays empty for the same
@@ -65,15 +76,15 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// to zero unless the desk is funded past roughly lot x price x levels,
 		// and a desk that quotes nothing looks identical to a broken one. The
 		// min_notional column is what actually floors order size.
-		{"EURUSD-BIUSD", "FUTURES", "EURUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		{"GBPUSD-BIUSD", "FUTURES", "GBPUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		{"AUDUSD-BIUSD", "FUTURES", "AUDUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		{"GOLD-BIUSD", "FUTURES", "GOLD", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		{"SILVER-BIUSD", "FUTURES", "SILVER", "BIUSD", "", 20, 0, "0.01", "0", "0.001", "0.01"},
-		{"CrudeOIL-BIUSD", "FUTURES", "CrudeOIL", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.01"},
-		{"AAPL.us-BIUSD", "FUTURES", "AAPL.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		{"TSLA.us-BIUSD", "FUTURES", "TSLA.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		{"NVDA.us-BIUSD", "FUTURES", "NVDA.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"EURUSD-BIUSD", "FUTURES", "EURUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"GBPUSD-BIUSD", "FUTURES", "GBPUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"AUDUSD-BIUSD", "FUTURES", "AUDUSD", "BIUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"GOLD-BIUSD", "FUTURES", "GOLD", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"SILVER-BIUSD", "FUTURES", "SILVER", "BIUSD", "", 20, 0, "0.01", "0", "0.001", "0.01"},
+		// {"CrudeOIL-BIUSD", "FUTURES", "CrudeOIL", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.01"},
+		// {"AAPL.us-BIUSD", "FUTURES", "AAPL.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"TSLA.us-BIUSD", "FUTURES", "TSLA.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"NVDA.us-BIUSD", "FUTURES", "NVDA.us", "BIUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
 	}
 	for _, r := range rows {
 		// "" means "unspecified" for the granularity columns; NULL lets the

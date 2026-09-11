@@ -10,6 +10,20 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// optionsEnabled gates every options/combo entry point (order submission,
+// /spread, /option-chain — see submit.go, spread.go, and this file's
+// /option-chain handler in main.go) behind a single flag, per the 2026-09-11
+// product decision to launch crypto spot/futures only (same treatment as
+// forex/commodities/stocks — see disabledMarkets below).
+//
+// A named bool rather than a bare `return` at each site for two reasons:
+// (1) `go vet` flags code after an unconditional return as unreachable,
+// which would otherwise force literally commenting out every disabled
+// handler body (100+ lines for /option-chain alone) instead of leaving it
+// intact and readable; (2) re-enabling options is flipping this one value,
+// not hunting down and uncommenting several handler bodies across files.
+const optionsEnabled = false
+
 // currentMarkets is the deliberately small execution set for this delivery.
 // It is separate from the wider list of assets the frontend displays: those
 // assets remain visible while their engines/configuration are implemented.
@@ -33,22 +47,46 @@ var currentMarkets = []marketDefinition{
 	// index/funding underlying (see seedSymbolConfigs's underlying_symbol).
 	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSD", market: models.Futures, base: "SOL", quote: "BIUSD"},
 	{displaySymbol: "BNB-PERP", symbol: "BNB-BIUSD", market: models.Futures, base: "BNB", quote: "BIUSD"},
-	// Non-crypto perps (forex majors, commodities, US stocks). There is no
-	// engine spot book for any of these, so no funding underlying exists —
-	// their symbol_configs rows leave underlying_symbol/funding unset (see
-	// seed.go). The base ticker is case-sensitive for Live-Rates.com
-	// instruments ("CrudeOIL", "AAPL.us") and doubles as the Price-Fetcher
-	// Redis key the MM quotes against.
-	{displaySymbol: "EURUSD", symbol: "EURUSD-BIUSD", market: models.Futures, base: "EURUSD", quote: "BIUSD"},
-	{displaySymbol: "GBPUSD", symbol: "GBPUSD-BIUSD", market: models.Futures, base: "GBPUSD", quote: "BIUSD"},
-	{displaySymbol: "AUDUSD", symbol: "AUDUSD-BIUSD", market: models.Futures, base: "AUDUSD", quote: "BIUSD"},
-	{displaySymbol: "XAU-USD", symbol: "GOLD-BIUSD", market: models.Futures, base: "GOLD", quote: "BIUSD"},
-	{displaySymbol: "XAG-USD", symbol: "SILVER-BIUSD", market: models.Futures, base: "SILVER", quote: "BIUSD"},
-	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-BIUSD", market: models.Futures, base: "CrudeOIL", quote: "BIUSD"},
-	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-BIUSD", market: models.Futures, base: "AAPL.us", quote: "BIUSD"},
-	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-BIUSD", market: models.Futures, base: "TSLA.us", quote: "BIUSD"},
-	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-BIUSD", market: models.Futures, base: "NVDA.us", quote: "BIUSD"},
+
+	// Forex majors, commodities, and US stocks are deliberately DISABLED for
+	// now (product decision 2026-09-11: crypto-only for the current launch).
+	// See disabledMarkets below — the implementation is untouched, just not
+	// registered, so no engine, no book, and no MM/liquidation/funding
+	// goroutine spins up for any of them. Re-enable by moving entries back
+	// into this slice.
 }
+
+// disabledMarkets lists every non-crypto instrument the engine is CAPABLE of
+// running (spot/futures registration, margin, liquidation, and funding all
+// already work for these the same as any FUTURES row above) but does not
+// currently register, per the 2026-09-11 product decision to launch
+// crypto-only. Nothing here is deleted: seed.go's symbol_configs rows,
+// Price-Fetcher's instrument list, and the frontend's backendMarkets.ts
+// mapping are all still intact and simply unused while this stays commented
+// out of currentMarkets.
+//
+// To bring one of these back: move its line into currentMarkets above,
+// uncomment the matching row in seed.go, uncomment the matching entry in
+// Price-Fetcher's instrument list, and uncomment the matching row in the
+// frontend's backendMarkets.ts REGISTERED map (see that file's own comment).
+//
+// var disabledMarkets = []marketDefinition{
+// 	// Non-crypto perps (forex majors, commodities, US stocks). There is no
+// 	// engine spot book for any of these, so no funding underlying exists —
+// 	// their symbol_configs rows leave underlying_symbol/funding unset (see
+// 	// seed.go). The base ticker is case-sensitive for Live-Rates.com
+// 	// instruments ("CrudeOIL", "AAPL.us") and doubles as the Price-Fetcher
+// 	// Redis key the MM quotes against.
+// 	{displaySymbol: "EURUSD", symbol: "EURUSD-BIUSD", market: models.Futures, base: "EURUSD", quote: "BIUSD"},
+// 	{displaySymbol: "GBPUSD", symbol: "GBPUSD-BIUSD", market: models.Futures, base: "GBPUSD", quote: "BIUSD"},
+// 	{displaySymbol: "AUDUSD", symbol: "AUDUSD-BIUSD", market: models.Futures, base: "AUDUSD", quote: "BIUSD"},
+// 	{displaySymbol: "XAU-USD", symbol: "GOLD-BIUSD", market: models.Futures, base: "GOLD", quote: "BIUSD"},
+// 	{displaySymbol: "XAG-USD", symbol: "SILVER-BIUSD", market: models.Futures, base: "SILVER", quote: "BIUSD"},
+// 	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-BIUSD", market: models.Futures, base: "CrudeOIL", quote: "BIUSD"},
+// 	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-BIUSD", market: models.Futures, base: "AAPL.us", quote: "BIUSD"},
+// 	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-BIUSD", market: models.Futures, base: "TSLA.us", quote: "BIUSD"},
+// 	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-BIUSD", market: models.Futures, base: "NVDA.us", quote: "BIUSD"},
+// }
 
 type marketDefinition struct {
 	displaySymbol string
