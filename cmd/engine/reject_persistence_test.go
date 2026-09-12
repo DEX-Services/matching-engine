@@ -28,7 +28,7 @@ func newTestSubmitDeps(bus *events.Bus) submitDeps {
 	ledger := risk.NewLedger()
 	checker := risk.NewChecker(ledger)
 	reg := matching.NewRegistry(bus, nil, checker.Release)
-	futuresSettlement := settlement.NewFuturesSettlement(ledger, nil, bus)
+	futuresSettlement := settlement.NewFuturesSettlement(ledger, nil, bus, nil)
 	return submitDeps{
 		reg: reg, ledger: ledger, backend: &backendclient.Client{}, checker: checker,
 		symbolRegistry: config.NewInMemoryRegistry(), futuresSettlement: futuresSettlement,

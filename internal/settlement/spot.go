@@ -12,10 +12,13 @@ import (
 	"github.com/shopspring/decimal"
 )
 
-// FeeLookup returns the maker/taker fee fractions for a symbol/market.
-// Returning zeros means no fees are charged. Satisfied by a closure over
-// config.Registry.
-type FeeLookup func(symbol string, market models.MarketType) (maker, taker decimal.Decimal)
+// FeeLookup returns the maker/taker fee fractions for a symbol/market and
+// account, with that account's active fee-tier discount already applied
+// (effective_rate = base_rate * (1 - discount) — see
+// FEE-TIER-SYSTEM-PLAN.md). Returning zeros means no fees are charged.
+// Satisfied by a closure over feeconfig.Registry + discounts.Registry, both
+// in-memory-only reads — safe to call on the settlement hot path.
+type FeeLookup func(symbol string, market models.MarketType, accountID string) (maker, taker decimal.Decimal)
 
 // SpotSettlement transfers base and quote assets between buyer and seller
 // immediately upon trade execution.
@@ -59,9 +62,14 @@ func (s *SpotSettlement) Settle(trade *models.Trade) error {
 	sellerID := trade.SellOrder.AccountID
 
 	// Resolve fees. Maker fee applies to the resting side, taker to the aggressor.
+	makerAccountID, takerAccountID := sellerID, buyerID
+	if trade.MakerSide == models.Buy {
+		makerAccountID, takerAccountID = buyerID, sellerID
+	}
 	var makerFee, takerFee decimal.Decimal
 	if s.fees != nil {
-		makerRate, takerRate := s.fees(trade.Symbol, trade.Market)
+		makerRate, _ := s.fees(trade.Symbol, trade.Market, makerAccountID)
+		_, takerRate := s.fees(trade.Symbol, trade.Market, takerAccountID)
 		makerFee = notional.Mul(makerRate)
 		takerFee = notional.Mul(takerRate)
 	}

@@ -72,6 +72,10 @@ type Engine struct {
 	// disabled, or a test harness that never wires it), the options
 	// margin-call sweep is simply skipped rather than panicking.
 	options *settlement.OptionsSettlement
+	// liquidationFee resolves the (discount-adjusted) liquidation penalty
+	// rate for an account — see feeconfig.KeyLiquidation. May be nil (no
+	// liquidation fee charged), e.g. in tests that predate this feature.
+	liquidationFee func(accountID string) decimal.Decimal
 }
 
 // New creates a liquidation Engine.
@@ -87,6 +91,13 @@ func New(registry *matching.Registry, fs *settlement.FuturesSettlement, md *mark
 		bus:        bus,
 		log:        slog.Default(),
 	}
+}
+
+// SetLiquidationFee wires the (discount-adjusted) liquidation penalty rate
+// lookup. Optional — call once at startup; if never called, liquidations
+// charge no fee (matching this package's pre-existing behavior).
+func (e *Engine) SetLiquidationFee(fn func(accountID string) decimal.Decimal) {
+	e.liquidationFee = fn
 }
 
 // SetOptionsSettlement wires the options margin-call sweep. Optional — call
@@ -681,7 +692,12 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 	// exists (i.e. the IOC order did not fully fill it). This avoids
 	// realizing PnL twice or at inconsistent prices for the same quantity.
 	if remaining := e.settlement.GetPosition(pos.AccountID, pos.Symbol); remaining != nil && !remaining.Size.IsZero() {
-		e.settlement.ClosePosition(pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice)
+		fee := decimal.Zero
+		if e.liquidationFee != nil {
+			notional := markPrice.Mul(remaining.Size.Abs())
+			fee = notional.Mul(e.liquidationFee(pos.AccountID))
+		}
+		e.settlement.ClosePosition(pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice, fee)
 	}
 
 	// Compute the actual closed size for the event (may be less than the

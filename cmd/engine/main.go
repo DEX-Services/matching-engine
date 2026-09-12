@@ -20,7 +20,9 @@ import (
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/cache"
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/discounts"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/feeconfig"
 	"github.com/dex/matching-engine/internal/liquidation"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
@@ -76,24 +78,52 @@ func main() {
 	// Futures/Options settlement handlers are shared singletons (not one per
 	// symbol) so the liquidation engine, funding scheduler, and expiry
 	// processor can see every open position across all registered markets.
-	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend, bus)
-	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
-
-	// Phase 6: Settlement factory. Fee lookup is late-bound: symbolRegistry is
-	// loaded further down (after Postgres init), so the closure reads it at
-	// settle time rather than capturing a nil value now.
+	// Phase 6: Settlement factory. Fee lookup is late-bound: symbolRegistry,
+	// feeConfigRegistry, and discountRegistry are all loaded further down
+	// (after Postgres init), so the closure reads them at settle time rather
+	// than capturing nil values now.
 	var symbolRegistryRef atomic.Pointer[config.Registry]
-	feeLookup := func(symbol string, market models.MarketType) (maker, taker decimal.Decimal) {
-		reg := symbolRegistryRef.Load()
-		if reg == nil {
-			return decimal.Zero, decimal.Zero
+	var feeConfigRegistryRef atomic.Pointer[feeconfig.Registry]
+	var discountRegistryRef atomic.Pointer[discounts.Registry]
+
+	// feeLookup returns maker/taker rates for symbol/market, with accountID's
+	// active fee-tier discount applied. Per-symbol maker_fee/taker_fee in
+	// symbol_configs (when non-zero) takes precedence as a promo override;
+	// otherwise it falls back to feeconfig's global per-market-type rate. See
+	// FEE-TIER-SYSTEM-PLAN.md §1a — every read here is a plain in-memory map
+	// lookup, never a DB/network call, so this is safe on the settlement hot
+	// path regardless of trade volume.
+	feeLookup := func(symbol string, market models.MarketType, accountID string) (maker, taker decimal.Decimal) {
+		var makerRate, takerRate decimal.Decimal
+		if symReg := symbolRegistryRef.Load(); symReg != nil {
+			if cfg, err := symReg.Get(symbol, market); err == nil && (cfg.MakerFee.IsPositive() || cfg.TakerFee.IsPositive()) {
+				makerRate, takerRate = cfg.MakerFee, cfg.TakerFee
+			}
 		}
-		cfg, err := reg.Get(symbol, market)
-		if err != nil {
-			return decimal.Zero, decimal.Zero
+		if makerRate.IsZero() && takerRate.IsZero() {
+			if feeReg := feeConfigRegistryRef.Load(); feeReg != nil {
+				switch market {
+				case models.Futures:
+					makerRate, takerRate = feeReg.Rate(feeconfig.KeyFuturesMaker), feeReg.Rate(feeconfig.KeyFuturesTaker)
+				default:
+					makerRate, takerRate = feeReg.Rate(feeconfig.KeySpotMaker), feeReg.Rate(feeconfig.KeySpotTaker)
+				}
+			}
 		}
-		return cfg.MakerFee, cfg.TakerFee
+		discount := decimal.Zero
+		if discReg := discountRegistryRef.Load(); discReg != nil {
+			discount = discReg.ActiveDiscountFor(accountID)
+		}
+		if discount.IsPositive() {
+			factor := decimal.NewFromInt(1).Sub(discount)
+			makerRate = makerRate.Mul(factor)
+			takerRate = takerRate.Mul(factor)
+		}
+		return makerRate, takerRate
 	}
+
+	futuresSettlement := settlement.NewFuturesSettlement(ledger, backend, bus, feeLookup)
+	optionsSettlement := settlement.NewOptionsSettlement(ledger, backend)
 	// comboSettlementRef is filled in once mdSvc/pgPool exist further down
 	// (settlementFactory is only INVOKED lazily, when an engine is actually
 	// created — by then this closure's captured comboSettlementRef will
@@ -227,8 +257,26 @@ func main() {
 				slog.Error("ensure iv_snapshots schema", "error", err)
 			} else if err := ensureComboSchema(ctx, pool); err != nil {
 				slog.Error("ensure combo_instruments schema", "error", err)
+			} else if err := feeconfig.EnsureSchema(ctx, pool); err != nil {
+				slog.Error("ensure fee_config schema", "error", err)
+			} else if err := discounts.EnsureSchema(ctx, pool); err != nil {
+				slog.Error("ensure fee_tiers/user_fee_subscriptions schema", "error", err)
 			} else {
 				seedSymbolConfigs(ctx, pool)
+				feeconfig.SeedDefaults(ctx, pool)
+				discounts.SeedTiers(ctx, pool)
+				if feeReg, err := feeconfig.NewRegistry(ctx, pool); err != nil {
+					slog.Error("load fee config registry", "error", err)
+				} else {
+					feeConfigRegistryRef.Store(feeReg)
+					go feeReg.StartHotReload(ctx, 10*time.Second)
+				}
+				if discReg, err := discounts.NewRegistry(ctx, pool); err != nil {
+					slog.Error("load discount registry", "error", err)
+				} else {
+					discountRegistryRef.Store(discReg)
+					go discReg.StartHotReload(ctx, 10*time.Second)
+				}
 				// See markets.go's optionsEnabled: seeding option_instruments
 				// rows and running the 6h re-seed ticker are pure overhead
 				// for a market nothing can trade on while it's flagged off.
@@ -267,6 +315,16 @@ func main() {
 		symbolRegistry = config.NewInMemoryRegistry()
 	}
 	symbolRegistryRef.Store(symbolRegistry)
+	if feeConfigRegistryRef.Load() == nil {
+		// Postgres disabled: fall back to an in-memory registry seeded with
+		// the platform's launch default rates (see feeconfig.defaultRates)
+		// rather than reading back as all-zero fees.
+		feeConfigRegistryRef.Store(feeconfig.NewInMemoryRegistry())
+	}
+	if discountRegistryRef.Load() == nil {
+		// Postgres disabled: every account reads back a zero discount.
+		discountRegistryRef.Store(discounts.NewInMemoryRegistry())
+	}
 
 	// IV surface store for /option-chain: nil-pool-safe (NewStore tolerates
 	// pgPool == nil, e.g. Postgres disabled locally), so this is always safe
@@ -293,6 +351,21 @@ func main() {
 	// Futures liquidation, funding, and options expiry background loops.
 	liqEngine := liquidation.New(reg, futuresSettlement, mdSvc, symbolRegistry, checker, bus, ledger)
 	liqEngine.SetOptionsSettlement(optionsSettlement)
+	// Liquidation penalty (feeconfig.KeyLiquidation, e.g. 2%), discount-adjusted
+	// per the confirmed product decision that it IS reduced by a user's fee
+	// tier like any other fee. In-memory-only reads, same as feeLookup above.
+	liqEngine.SetLiquidationFee(func(accountID string) decimal.Decimal {
+		rate := decimal.Zero
+		if feeReg := feeConfigRegistryRef.Load(); feeReg != nil {
+			rate = feeReg.Rate(feeconfig.KeyLiquidation)
+		}
+		if discReg := discountRegistryRef.Load(); discReg != nil {
+			if discount := discReg.ActiveDiscountFor(accountID); discount.IsPositive() {
+				rate = rate.Mul(decimal.NewFromInt(1).Sub(discount))
+			}
+		}
+		return rate
+	})
 	go liqEngine.Run(ctx, time.Second)
 
 	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus, pgPool)
@@ -924,115 +997,115 @@ func main() {
 		writeJSON(w, http.StatusOK, out)
 	}))
 
-// Options trading is DISABLED (product decision: crypto spot/futures only
-// for now). This whole route is commented out of the mux — not registered,
-// not a stub returning "coming soon" — so a request to /option-chain gets a
-// plain 404 like any endpoint that doesn't exist. The API surface says
-// nothing about options either way; "Coming Soon" is frontend-only
-// messaging now, driven by the frontend simply never calling this endpoint,
-// not by anything this endpoint says back. Nothing below is deleted —
-// uncomment this whole block (and submit.go/spread.go's matching sections)
-// to bring options back.
-//
-// 	mux.HandleFunc("/option-chain", func(w http.ResponseWriter, r *http.Request) {
+	// Options trading is DISABLED (product decision: crypto spot/futures only
+	// for now). This whole route is commented out of the mux — not registered,
+	// not a stub returning "coming soon" — so a request to /option-chain gets a
+	// plain 404 like any endpoint that doesn't exist. The API surface says
+	// nothing about options either way; "Coming Soon" is frontend-only
+	// messaging now, driven by the frontend simply never calling this endpoint,
+	// not by anything this endpoint says back. Nothing below is deleted —
+	// uncomment this whole block (and submit.go/spread.go's matching sections)
+	// to bring options back.
+	//
+	// 	mux.HandleFunc("/option-chain", func(w http.ResponseWriter, r *http.Request) {
 
-// 		q := r.URL.Query()
-// 		underlying := q.Get("underlying")
-// 		if underlying == "" {
-// 			http.Error(w, "underlying is required", http.StatusBadRequest)
-// 			return
-// 		}
-// 		spotTicker, err := mdSvc.Ticker(underlying, models.Spot)
-// 		if err != nil || spotTicker.MidPrice.IsZero() {
-// 			http.Error(w, "no mark price for underlying", http.StatusNotFound)
-// 			return
-// 		}
-// 		spot, _ := spotTicker.MidPrice.Float64()
-// 
-// 		const assumedVol = 0.6 // annualized IV assumption until a real vol surface exists
-// 		const riskFreeRate = 0.03
-// 
-// 		instruments, err := loadOptionInstruments(ctx, pgPool, underlying)
-// 		if err != nil {
-// 			http.Error(w, err.Error(), http.StatusInternalServerError)
-// 			return
-// 		}
-// 		out := make([]OptionChainEntry, 0, len(instruments))
-// 		for _, inst := range instruments {
-// 			strike, _ := inst.Strike.Float64()
-// 			tYears := time.Until(inst.Expiry).Hours() / 24 / 365
-// 			if tYears <= 0 {
-// 				continue
-// 			}
-// 			isCall := inst.OptionType == "CALL"
-// 
-// 			// vol starts from the IV surface's interpolation across this
-// 			// expiry's other observed strikes (nearby contracts that have
-// 			// recently had a live book) rather than a single flat guess for
-// 			// the whole chain — a strike near actively-quoted neighbors gets
-// 			// a much better estimate than one 60% assumption applied
-// 			// everywhere. Falls back to assumedVol only when there is
-// 			// nothing nearby to interpolate from yet (e.g. right after a
-// 			// fresh contract is seeded, before any strike on this expiry has
-// 			// ever traded).
-// 			vol := assumedVol
-// 			if iv, ok := ivStore.Interpolate(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType); ok {
-// 				vol = iv
-// 			}
-// 			theo := pricing.Price(spot, strike, tYears, vol, riskFreeRate, isCall)
-// 
-// 			// Blend with the instrument's own order book when it has live two-
-// 			// sided quotes: a thin/never-traded strike falls back to pure
-// 			// theoretical (mdSvc has no ticker for it at all until an order
-// 			// touches it — see validateAndPrepareOption's mdSvc.Register), but
-// 			// once quoted, the book mid is real price discovery and should not
-// 			// be ignored in favor of the (interpolated or flat) vol guess.
-// 			price := theo
-// 			if bookTicker, err := mdSvc.Ticker(inst.Symbol, models.Options); err == nil && bookTicker.MidPrice.IsPositive() {
-// 				bookMid, _ := bookTicker.MidPrice.Float64()
-// 				price = (theo + bookMid) / 2
-// 				// Re-imply vol from the blended price so the displayed
-// 				// IV/greeks match what's actually being quoted, not the
-// 				// interpolated/flat starting guess — bisection is cheap and
-// 				// this endpoint is polled, not hot-path. This freshly-implied
-// 				// IV is also what gets persisted below for OTHER strikes on
-// 				// this expiry to interpolate from next time.
-// 				if iv := pricing.ImpliedVol(price, spot, strike, tYears, riskFreeRate, isCall); iv > 0 {
-// 					vol = iv
-// 					ivStore.Record(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType, iv)
-// 				}
-// 			}
-// 			if price < 0 {
-// 				price = 0
-// 			}
-// 			greeks := pricing.CalcGreeks(spot, strike, tYears, vol, riskFreeRate, isCall)
-// 			spread := math.Max(price*0.02, 0.01)
-// 			out = append(out, OptionChainEntry{
-// 				Symbol: inst.Symbol, OptionType: inst.OptionType, Strike: inst.Strike.String(),
-// 				Expiry: inst.Expiry.Format(time.RFC3339),
-// 				Bid:    fmt.Sprintf("%.4f", math.Max(price-spread/2, 0)),
-// 				Ask:    fmt.Sprintf("%.4f", price+spread/2),
-// 				Mid:    fmt.Sprintf("%.4f", price),
-// 				IV:     vol * 100,
-// 				Delta:  greeks.Delta, Gamma: greeks.Gamma, Theta: greeks.Theta, Vega: greeks.Vega, Rho: greeks.Rho,
-// 			})
-// 		}
-// 		// Real per-instrument fee from symbol_configs (market=OPTIONS, keyed
-// 		// by the underlying — see seed.go's BTC-BIUSDB OPTIONS row), not a
-// 		// frontend-hardcoded literal. Falls back to the schema default
-// 		// (0.001 = 0.1%, matching the previous hardcoded value) if the
-// 		// registry has no row yet, so this never regresses to a worse
-// 		// default than what was already assumed.
-// 		makerFeePct, takerFeePct := "0.1", "0.1"
-// 		if cfg, err := symbolRegistryRef.Load().Get(underlying, models.Options); err == nil {
-// 			makerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
-// 			takerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
-// 		}
-// 		writeJSON(w, http.StatusOK, OptionChainResponse{
-// 			Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out,
-// 			MakerFeePct: makerFeePct, TakerFeePct: takerFeePct,
-// 		})
-// 	})
+	// 		q := r.URL.Query()
+	// 		underlying := q.Get("underlying")
+	// 		if underlying == "" {
+	// 			http.Error(w, "underlying is required", http.StatusBadRequest)
+	// 			return
+	// 		}
+	// 		spotTicker, err := mdSvc.Ticker(underlying, models.Spot)
+	// 		if err != nil || spotTicker.MidPrice.IsZero() {
+	// 			http.Error(w, "no mark price for underlying", http.StatusNotFound)
+	// 			return
+	// 		}
+	// 		spot, _ := spotTicker.MidPrice.Float64()
+	//
+	// 		const assumedVol = 0.6 // annualized IV assumption until a real vol surface exists
+	// 		const riskFreeRate = 0.03
+	//
+	// 		instruments, err := loadOptionInstruments(ctx, pgPool, underlying)
+	// 		if err != nil {
+	// 			http.Error(w, err.Error(), http.StatusInternalServerError)
+	// 			return
+	// 		}
+	// 		out := make([]OptionChainEntry, 0, len(instruments))
+	// 		for _, inst := range instruments {
+	// 			strike, _ := inst.Strike.Float64()
+	// 			tYears := time.Until(inst.Expiry).Hours() / 24 / 365
+	// 			if tYears <= 0 {
+	// 				continue
+	// 			}
+	// 			isCall := inst.OptionType == "CALL"
+	//
+	// 			// vol starts from the IV surface's interpolation across this
+	// 			// expiry's other observed strikes (nearby contracts that have
+	// 			// recently had a live book) rather than a single flat guess for
+	// 			// the whole chain — a strike near actively-quoted neighbors gets
+	// 			// a much better estimate than one 60% assumption applied
+	// 			// everywhere. Falls back to assumedVol only when there is
+	// 			// nothing nearby to interpolate from yet (e.g. right after a
+	// 			// fresh contract is seeded, before any strike on this expiry has
+	// 			// ever traded).
+	// 			vol := assumedVol
+	// 			if iv, ok := ivStore.Interpolate(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType); ok {
+	// 				vol = iv
+	// 			}
+	// 			theo := pricing.Price(spot, strike, tYears, vol, riskFreeRate, isCall)
+	//
+	// 			// Blend with the instrument's own order book when it has live two-
+	// 			// sided quotes: a thin/never-traded strike falls back to pure
+	// 			// theoretical (mdSvc has no ticker for it at all until an order
+	// 			// touches it — see validateAndPrepareOption's mdSvc.Register), but
+	// 			// once quoted, the book mid is real price discovery and should not
+	// 			// be ignored in favor of the (interpolated or flat) vol guess.
+	// 			price := theo
+	// 			if bookTicker, err := mdSvc.Ticker(inst.Symbol, models.Options); err == nil && bookTicker.MidPrice.IsPositive() {
+	// 				bookMid, _ := bookTicker.MidPrice.Float64()
+	// 				price = (theo + bookMid) / 2
+	// 				// Re-imply vol from the blended price so the displayed
+	// 				// IV/greeks match what's actually being quoted, not the
+	// 				// interpolated/flat starting guess — bisection is cheap and
+	// 				// this endpoint is polled, not hot-path. This freshly-implied
+	// 				// IV is also what gets persisted below for OTHER strikes on
+	// 				// this expiry to interpolate from next time.
+	// 				if iv := pricing.ImpliedVol(price, spot, strike, tYears, riskFreeRate, isCall); iv > 0 {
+	// 					vol = iv
+	// 					ivStore.Record(r.Context(), underlying, inst.Strike, inst.Expiry, inst.OptionType, iv)
+	// 				}
+	// 			}
+	// 			if price < 0 {
+	// 				price = 0
+	// 			}
+	// 			greeks := pricing.CalcGreeks(spot, strike, tYears, vol, riskFreeRate, isCall)
+	// 			spread := math.Max(price*0.02, 0.01)
+	// 			out = append(out, OptionChainEntry{
+	// 				Symbol: inst.Symbol, OptionType: inst.OptionType, Strike: inst.Strike.String(),
+	// 				Expiry: inst.Expiry.Format(time.RFC3339),
+	// 				Bid:    fmt.Sprintf("%.4f", math.Max(price-spread/2, 0)),
+	// 				Ask:    fmt.Sprintf("%.4f", price+spread/2),
+	// 				Mid:    fmt.Sprintf("%.4f", price),
+	// 				IV:     vol * 100,
+	// 				Delta:  greeks.Delta, Gamma: greeks.Gamma, Theta: greeks.Theta, Vega: greeks.Vega, Rho: greeks.Rho,
+	// 			})
+	// 		}
+	// 		// Real per-instrument fee from symbol_configs (market=OPTIONS, keyed
+	// 		// by the underlying — see seed.go's BTC-BIUSDB OPTIONS row), not a
+	// 		// frontend-hardcoded literal. Falls back to the schema default
+	// 		// (0.001 = 0.1%, matching the previous hardcoded value) if the
+	// 		// registry has no row yet, so this never regresses to a worse
+	// 		// default than what was already assumed.
+	// 		makerFeePct, takerFeePct := "0.1", "0.1"
+	// 		if cfg, err := symbolRegistryRef.Load().Get(underlying, models.Options); err == nil {
+	// 			makerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
+	// 			takerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+	// 		}
+	// 		writeJSON(w, http.StatusOK, OptionChainResponse{
+	// 			Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out,
+	// 			MakerFeePct: makerFeePct, TakerFeePct: takerFeePct,
+	// 		})
+	// 	})
 
 	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
 	listener, err := net.Listen("tcp", srv.Addr)

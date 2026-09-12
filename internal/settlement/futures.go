@@ -75,6 +75,7 @@ type FuturesSettlement struct {
 	ledger    *risk.Ledger
 	backend   *backendclient.Client
 	bus       *events.Bus
+	fees      FeeLookup // maker/taker fee rates, discount-adjusted per account; may be nil (no fees charged)
 	mu        sync.RWMutex
 	positions map[string]*Position // key: accountID+":"+symbol
 }
@@ -83,8 +84,9 @@ type FuturesSettlement struct {
 // backend is the shared Postgres balance-lock bridge (may be a disabled
 // no-op client); pass the same instance used elsewhere so config is loaded once.
 // bus may be nil (e.g. in tests); realized-PnL events are simply not
-// published in that case.
-func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client, bus *events.Bus) *FuturesSettlement {
+// published in that case. fees may be nil (no fees charged, e.g. in tests
+// that don't care about fee behavior).
+func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client, bus *events.Bus, fees FeeLookup) *FuturesSettlement {
 	if backend == nil {
 		backend = &backendclient.Client{}
 	}
@@ -92,11 +94,14 @@ func NewFuturesSettlement(ledger *risk.Ledger, backend *backendclient.Client, bu
 		ledger:    ledger,
 		backend:   backend,
 		bus:       bus,
+		fees:      fees,
 		positions: make(map[string]*Position),
 	}
 }
 
-// Settle updates positions and margin for both sides of a futures trade.
+// Settle updates positions and margin for both sides of a futures trade,
+// charging each side's maker/taker fee (discount-adjusted) out of the
+// account's quote-asset balance on top of the margin debit.
 func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	if trade.BuyOrder == nil || trade.SellOrder == nil {
 		return fmt.Errorf("futures settle: missing order references on trade %s", trade.ID)
@@ -115,11 +120,34 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	buyerID := trade.BuyOrder.AccountID
 	sellerID := trade.SellOrder.AccountID
 
-	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode, trade.BuyOrder.InternalLiquidation); err != nil {
+	notional := trade.Price.Mul(trade.Quantity)
+	makerAccountID, takerAccountID := sellerID, buyerID
+	if trade.MakerSide == models.Buy {
+		makerAccountID, takerAccountID = buyerID, sellerID
+	}
+	var makerFee, takerFee decimal.Decimal
+	if f.fees != nil {
+		makerRate, _ := f.fees(trade.Symbol, trade.Market, makerAccountID)
+		_, takerRate := f.fees(trade.Symbol, trade.Market, takerAccountID)
+		makerFee = notional.Mul(makerRate)
+		takerFee = notional.Mul(takerRate)
+	}
+	buyerFee, sellerFee := takerFee, makerFee
+	if trade.MakerSide == models.Buy {
+		buyerFee, sellerFee = makerFee, takerFee
+	}
+
+	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode, trade.BuyOrder.InternalLiquidation, buyerFee); err != nil {
 		return fmt.Errorf("futures: apply buyer fill: %w", err)
 	}
-	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode, trade.SellOrder.InternalLiquidation); err != nil {
+	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode, trade.SellOrder.InternalLiquidation, sellerFee); err != nil {
 		return fmt.Errorf("futures: apply seller fill: %w", err)
+	}
+
+	if trade.MakerSide == models.Buy {
+		trade.MakerFeePaid, trade.TakerFeePaid = buyerFee, sellerFee
+	} else {
+		trade.MakerFeePaid, trade.TakerFeePaid = sellerFee, buyerFee
 	}
 
 	return nil
@@ -131,8 +159,21 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 // an opposite-direction position, this closes it (fully or partially,
 // realizing PnL and releasing margin) and, on overfill, opens a new position
 // in the new direction with the remaining quantity.
+//
+// fee is this side's maker/taker fee (already discount-adjusted), charged
+// against the account's quote-asset balance in addition to the margin debit
+// — it is not held as position margin and is never returned to the account.
 func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side models.OrderSide,
-	qty, price decimal.Decimal, leverage int, marginMode string, isLiquidation bool) error {
+	qty, price decimal.Decimal, leverage int, marginMode string, isLiquidation bool, fee decimal.Decimal) error {
+	if fee.IsPositive() {
+		if err := f.ledger.Debit(accountID, quoteAsset, fee); err != nil {
+			return fmt.Errorf("debit futures fee: %w", err)
+		}
+		backendclient.Async("settle", func(ctx context.Context) error {
+			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee))
+		})
+	}
+
 	existing := f.GetPosition(accountID, symbol)
 
 	if existing == nil || existing.Side == side {
@@ -335,7 +376,16 @@ func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decim
 // liquidation), realizing PnL and released margin to the ledger. If the
 // position was already closed (e.g. its closing fill already ran through
 // Settle/applyFill), this is a no-op — safe to call defensively.
-func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, markPrice decimal.Decimal) {
+//
+// liquidationFee, when positive, is charged against the released
+// margin+PnL before crediting the account — the platform's liquidation
+// penalty (see feeconfig.KeyLiquidation). Per the confirmed product
+// decision, this fee IS discount-adjusted the same as any other fee (unlike
+// most exchanges' liquidation penalties); callers compute liquidationFee via
+// the discount-adjusted FeeLookup, same as maker/taker fees elsewhere in this
+// file, so this method itself stays fee-shape-agnostic and just deducts
+// whatever amount it's given.
+func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, markPrice, liquidationFee decimal.Decimal) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -349,6 +399,9 @@ func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, 
 	delete(f.positions, key)
 	f.mu.Unlock()
 
+	if liquidationFee.IsPositive() {
+		pnl = pnl.Sub(liquidationFee)
+	}
 	f.realizeAndCredit(accountID, quoteAsset, margin, pnl, !crossMargin)
 }
 

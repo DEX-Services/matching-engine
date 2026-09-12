@@ -30,7 +30,7 @@ func TestClosePortion_PublishesRealizedPnlEvent(t *testing.T) {
 	ledger := risk.NewLedger()
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
-	f := NewFuturesSettlement(ledger, nil, bus)
+	f := NewFuturesSettlement(ledger, nil, bus, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
 	qty := decimal.NewFromInt(1)
@@ -80,7 +80,7 @@ func TestClosePortion_MarksLiquidationCloses(t *testing.T) {
 	ledger := risk.NewLedger()
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
-	f := NewFuturesSettlement(ledger, nil, bus)
+	f := NewFuturesSettlement(ledger, nil, bus, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
 	qty := decimal.NewFromInt(1)
@@ -112,7 +112,7 @@ func TestClosePortion_MarksLiquidationCloses(t *testing.T) {
 
 func TestClosePortion_NoBusConfigured_DoesNotPanic(t *testing.T) {
 	ledger := risk.NewLedger()
-	f := NewFuturesSettlement(ledger, nil, nil) // nil bus
+	f := NewFuturesSettlement(ledger, nil, nil, nil) // nil bus
 	symbol, quote := "BTC-USDC", "USDC"
 	qty := decimal.NewFromInt(1)
 	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
