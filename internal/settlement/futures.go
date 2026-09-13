@@ -173,8 +173,14 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 		// Dex-Backend can route this fee's revenue to accountID's
 		// referral/affiliate beneficiary plus the platform treasury,
 		// instead of a bare debit with nowhere for the money to land.
+		// category distinguishes a liquidation penalty from an ordinary
+		// futures maker/taker fee for the admin fee-revenue breakdown.
+		category := "futures"
+		if isLiquidation {
+			category = "liquidation"
+		}
 		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.SettleFee(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee))
+			return f.backend.SettleFee(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee), category)
 		})
 	}
 

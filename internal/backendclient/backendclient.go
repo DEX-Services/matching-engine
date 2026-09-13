@@ -164,16 +164,46 @@ func (c *Client) Credit(ctx context.Context, userID, asset, amount string) error
 	return c.call(ctx, "/internal/balance/credit", userID, asset, amount)
 }
 
+type feeSettleReq struct {
+	UserID   string `json:"userId"`
+	Asset    string `json:"asset"`
+	Amount   string `json:"amount"`
+	Category string `json:"category"`
+}
+
 // SettleFee calls POST /internal/balance/fee, telling Dex-Backend that a
-// futures maker/taker fee of amount (raw units, already debited from the
-// engine's in-memory ledger for userID) needs to be routed: to userID's
-// referral/affiliate beneficiary's own balance (if one exists) plus the
-// platform treasury for the remainder, or 100% to the treasury if userID has
-// no referral source. Distinct from Settle/Credit, which only move money
+// futures maker/taker/liquidation fee of amount (raw units, already debited
+// from the engine's in-memory ledger for userID) needs to be routed: to
+// userID's referral/affiliate beneficiary's own balance (if one exists) plus
+// the platform treasury for the remainder, or 100% to the treasury if userID
+// has no referral source. Distinct from Settle/Credit, which only move money
 // into or out of one account and never record where a fee's revenue went.
-// See REFERRAL-AFFILIATE-PLAN.md.
-func (c *Client) SettleFee(ctx context.Context, userID, asset, amount string) error {
-	return c.call(ctx, "/internal/balance/fee", userID, asset, amount)
+// category is "futures" or "liquidation" — see the Fee Revenue admin
+// breakdown in REFERRAL-AFFILIATE-PLAN.md.
+func (c *Client) SettleFee(ctx context.Context, userID, asset, amount, category string) error {
+	if !c.Enabled() {
+		return nil
+	}
+	body, err := json.Marshal(feeSettleReq{UserID: userID, Asset: asset, Amount: amount, Category: category})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/internal/balance/fee", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Engine-Secret", c.secret)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("backendclient /internal/balance/fee: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("backendclient /internal/balance/fee: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 // SettleSpot atomically persists both legs of a completed spot trade.
