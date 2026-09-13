@@ -32,35 +32,35 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// ("BTC-USDC"), which isn't a registered spot market at all — every
 		// funding tick silently fell back to indexPrice == markPrice (zero
 		// drift, zero rate, nothing ever paid) instead of erroring loudly.
-		// Fixed to point at the real BTC-BIUSDB spot market.
+		// Fixed to point at the real BTC-BI2XUSD spot market.
 		//
-		// Every market — spot, futures, and options — quotes in BIUSDB, the
+		// Every market — spot, futures, and options — quotes in BI2XUSD, the
 		// platform's internal stable currency pegged 1:1 to USDT — see
 		// Dex-Backend's chain.Listener. USDT/USDC are no longer tradable
 		// quote currencies anywhere on the exchange; futures collateral used
-		// to be real USDC, now converts to/settles in BIUSDB like everything
-		// else. The futures row's symbol is "BTC-BIUSDB"/"ETH-BIUSDB" too — a
+		// to be real USDC, now converts to/settles in BI2XUSD like everything
+		// else. The futures row's symbol is "BTC-BI2XUSD"/"ETH-BI2XUSD" too — a
 		// distinct (symbol, market) row from the SPOT row of the same name,
 		// so the two coexist without collision.
 		// --- SPOT: BI2X and BTC only (2026-09-12 market-list restructure) ---
-		{"BTC-BIUSDB", "SPOT", "BTC", "BIUSDB", "", 0, 0, "0", "0", "", ""},
+		{"BTC-BI2XUSD", "SPOT", "BTC", "BI2XUSD", "", 0, 0, "0", "0", "", ""},
 		// BI2X: its actual index price feed is the dedicated BI2X data feed
 		// (Price-Fetcher's bitdxfeed client), not Binance.
-		{"BI2X-BIUSDB", "SPOT", "BI2X", "BIUSDB", "", 0, 0, "0", "0", "", ""},
+		{"BI2X-BI2XUSD", "SPOT", "BI2X", "BI2XUSD", "", 0, 0, "0", "0", "", ""},
 
 		// --- FUTURES: BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP ---
-		{"BTC-BIUSDB", "FUTURES", "BTC", "BIUSDB", "BTC-BIUSDB", 100, 8, "0.005", "0", "", ""},
+		{"BTC-BI2XUSD", "FUTURES", "BTC", "BI2XUSD", "BTC-BI2XUSD", 100, 8, "0.005", "0", "", ""},
 		// BI2X futures self-funds off its own SPOT row above, same as BTC.
 		// Leverage/margin match the other mid-cap crypto perps below rather
 		// than BTC's tighter numbers, since BI2X's real volatility profile
 		// isn't known yet.
-		{"BI2X-BIUSDB", "FUTURES", "BI2X", "BIUSDB", "BI2X-BIUSDB", 50, 8, "0.005", "0", "", ""},
+		{"BI2X-BI2XUSD", "FUTURES", "BI2X", "BI2XUSD", "BI2X-BI2XUSD", 50, 8, "0.005", "0", "", ""},
 		// Options are DISABLED per the 2026-09-11 product decision (same
 		// crypto-only launch scope as the non-crypto perps below) — see
 		// submit.go/spread.go's order-rejection gates and main.go's disabled
 		// seedOptionInstruments call. Not deleted; uncomment together with
 		// those to bring options back.
-		// {"BTC-BIUSDB", "OPTIONS", "BTC", "BIUSDB", "BTC-BIUSDB", 0, 0, "0", "1", "", ""},
+		// {"BTC-BI2XUSD", "OPTIONS", "BTC", "BI2XUSD", "BTC-BI2XUSD", 0, 0, "0", "1", "", ""},
 		//
 		// ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, and XRP are FUTURES-ONLY — the
 		// 2026-09-12 restructure removed their spot rows (ETH/SOL previously
@@ -74,14 +74,14 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// existing Binance client — this only affects the FUNDING rate
 		// calculation's reference price, not whether the market maker can
 		// quote at all.
-		{"ETH-BIUSDB", "FUTURES", "ETH", "BIUSDB", "", 75, 0, "0.0075", "0", "", ""},
-		{"AVAX-BIUSDB", "FUTURES", "AVAX", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"LINK-BIUSDB", "FUTURES", "LINK", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"SOL-BIUSDB", "FUTURES", "SOL", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"DOGE-BIUSDB", "FUTURES", "DOGE", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"TAO-BIUSDB", "FUTURES", "TAO", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"ADA-BIUSDB", "FUTURES", "ADA", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
-		{"XRP-BIUSDB", "FUTURES", "XRP", "BIUSDB", "", 50, 0, "0.005", "0", "", ""},
+		{"ETH-BI2XUSD", "FUTURES", "ETH", "BI2XUSD", "", 75, 0, "0.0075", "0", "", ""},
+		{"AVAX-BI2XUSD", "FUTURES", "AVAX", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"LINK-BI2XUSD", "FUTURES", "LINK", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"SOL-BI2XUSD", "FUTURES", "SOL", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"DOGE-BI2XUSD", "FUTURES", "DOGE", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"TAO-BI2XUSD", "FUTURES", "TAO", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"ADA-BI2XUSD", "FUTURES", "ADA", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
+		{"XRP-BI2XUSD", "FUTURES", "XRP", "BI2XUSD", "", 50, 0, "0.005", "0", "", ""},
 		// Non-crypto perps (forex majors, commodities, US stocks) are
 		// DISABLED per the 2026-09-11 product decision to launch crypto-only
 		// — see markets.go's disabledMarkets for the matching engine-side
@@ -100,15 +100,15 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// to zero unless the desk is funded past roughly lot x price x levels,
 		// and a desk that quotes nothing looks identical to a broken one. The
 		// min_notional column is what actually floors order size.
-		// {"EURUSD-BIUSDB", "FUTURES", "EURUSD", "BIUSDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		// {"GBPUSD-BIUSDB", "FUTURES", "GBPUSD", "BIUSDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		// {"AUDUSD-BIUSDB", "FUTURES", "AUDUSD", "BIUSDB", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
-		// {"GOLD-BIUSDB", "FUTURES", "GOLD", "BIUSDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		// {"SILVER-BIUSDB", "FUTURES", "SILVER", "BIUSDB", "", 20, 0, "0.01", "0", "0.001", "0.01"},
-		// {"CrudeOIL-BIUSDB", "FUTURES", "CrudeOIL", "BIUSDB", "", 20, 0, "0.01", "0", "0.01", "0.01"},
-		// {"AAPL.us-BIUSDB", "FUTURES", "AAPL.us", "BIUSDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		// {"TSLA.us-BIUSDB", "FUTURES", "TSLA.us", "BIUSDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
-		// {"NVDA.us-BIUSDB", "FUTURES", "NVDA.us", "BIUSDB", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"EURUSD-BI2XUSD", "FUTURES", "EURUSD", "BI2XUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"GBPUSD-BI2XUSD", "FUTURES", "GBPUSD", "BI2XUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"AUDUSD-BI2XUSD", "FUTURES", "AUDUSD", "BI2XUSD", "", 20, 0, "0.01", "0", "0.0001", "0.01"},
+		// {"GOLD-BI2XUSD", "FUTURES", "GOLD", "BI2XUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"SILVER-BI2XUSD", "FUTURES", "SILVER", "BI2XUSD", "", 20, 0, "0.01", "0", "0.001", "0.01"},
+		// {"CrudeOIL-BI2XUSD", "FUTURES", "CrudeOIL", "BI2XUSD", "", 20, 0, "0.01", "0", "0.01", "0.01"},
+		// {"AAPL.us-BI2XUSD", "FUTURES", "AAPL.us", "BI2XUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"TSLA.us-BI2XUSD", "FUTURES", "TSLA.us", "BI2XUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
+		// {"NVDA.us-BI2XUSD", "FUTURES", "NVDA.us", "BI2XUSD", "", 20, 0, "0.01", "0", "0.01", "0.001"},
 	}
 	for _, r := range rows {
 		// "" means "unspecified" for the granularity columns; NULL lets the
@@ -162,10 +162,10 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 // functions.
 func deactivateRemovedMarkets(ctx context.Context, pool *pgxpool.Pool) {
 	removed := []struct{ symbol, market string }{
-		{"ETH-BIUSDB", "SPOT"},
-		{"SOL-BIUSDB", "SPOT"},
-		{"BNB-BIUSDB", "SPOT"},
-		{"BNB-BIUSDB", "FUTURES"},
+		{"ETH-BI2XUSD", "SPOT"},
+		{"SOL-BI2XUSD", "SPOT"},
+		{"BNB-BI2XUSD", "SPOT"},
+		{"BNB-BI2XUSD", "FUTURES"},
 	}
 	for _, r := range removed {
 		if _, err := pool.Exec(ctx,
@@ -177,7 +177,7 @@ func deactivateRemovedMarkets(ctx context.Context, pool *pgxpool.Pool) {
 	}
 }
 
-// seedOptionInstruments inserts a small BTC-BIUSDB option chain (a handful of
+// seedOptionInstruments inserts a small BTC-BI2XUSD option chain (a handful of
 // strikes at two expiries) whenever there are no unexpired contracts left,
 // so /option-chain always has data instead of going empty forever once the
 // first seeded batch expires.
@@ -194,7 +194,7 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 	var liveCount int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*) FROM option_instruments
-		WHERE underlying_symbol = 'BTC-BIUSDB' AND active = true AND expiry > now()`).Scan(&liveCount); err != nil {
+		WHERE underlying_symbol = 'BTC-BI2XUSD' AND active = true AND expiry > now()`).Scan(&liveCount); err != nil {
 		slog.Error("count live option_instruments", "error", err)
 		return
 	}
@@ -211,12 +211,12 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 				// Instrument symbol encodes BASE-QUOTE-STRIKE-EXPIRY-TYPE so
 				// each contract gets its own order book and the underlying
 				// spot pair can be parsed from the symbol.
-				symbol := fmt.Sprintf("BTC-BIUSDB-%d-%s-%s", strike, expiry.Format("20060102"), optType)
+				symbol := fmt.Sprintf("BTC-BI2XUSD-%d-%s-%s", strike, expiry.Format("20060102"), optType)
 				_, err := pool.Exec(ctx, `
 					INSERT INTO option_instruments (symbol, underlying_symbol, strike_price, expiry, option_type)
 					VALUES ($1, $2, $3, $4, $5)
 					ON CONFLICT DO NOTHING`,
-					symbol, "BTC-BIUSDB", decimal.NewFromInt(int64(strike)), expiry, optType)
+					symbol, "BTC-BI2XUSD", decimal.NewFromInt(int64(strike)), expiry, optType)
 				if err != nil {
 					slog.Error("seed option_instruments", "symbol", symbol, "error", err)
 				}

@@ -31,15 +31,15 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	if len(got) != 12 {
 		t.Fatalf("got %d markets, want 12: %#v", len(got), got)
 	}
-	if got[0].DisplaySymbol != "BTC-BIUSDB" || got[0].Market != "SPOT" {
-		t.Fatalf("expected BTC-BIUSDB SPOT first: %#v", got[0])
+	if got[0].DisplaySymbol != "BTC-BI2XUSD" || got[0].Market != "SPOT" {
+		t.Fatalf("expected BTC-BI2XUSD SPOT first: %#v", got[0])
 	}
-	if got[1].DisplaySymbol != "BI2X-BIUSDB" || got[1].Market != "SPOT" {
-		t.Fatalf("expected BI2X-BIUSDB SPOT second: %#v", got[1])
+	if got[1].DisplaySymbol != "BI2X-BI2XUSD" || got[1].Market != "SPOT" {
+		t.Fatalf("expected BI2X-BI2XUSD SPOT second: %#v", got[1])
 	}
 	// No SPOT row beyond BTC/BI2X — the whole point of the restructure.
 	for _, m := range got {
-		if m.Market == "SPOT" && m.DisplaySymbol != "BTC-BIUSDB" && m.DisplaySymbol != "BI2X-BIUSDB" {
+		if m.Market == "SPOT" && m.DisplaySymbol != "BTC-BI2XUSD" && m.DisplaySymbol != "BI2X-BI2XUSD" {
 			t.Fatalf("unexpected SPOT market %q survived the restructure: %#v", m.DisplaySymbol, m)
 		}
 	}

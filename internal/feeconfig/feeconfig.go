@@ -27,8 +27,8 @@ const (
 	KeyFuturesTaker = "futures.taker"
 	KeyP2PBuyer     = "p2p.buyer"
 	KeyP2PSeller    = "p2p.seller"
-	KeySwapIn       = "swap.in"  // USDT/USDC -> BIUSDB
-	KeySwapOut      = "swap.out" // BIUSDB -> USDT/USDC
+	KeySwapIn       = "swap.in"  // USDT/USDC -> BI2XUSD
+	KeySwapOut      = "swap.out" // BI2XUSD -> USDT/USDC
 	KeyLiquidation  = "liquidation"
 )
 

@@ -29,15 +29,15 @@ const optionsEnabled = false
 // currentMarkets is the deliberately small execution set for this delivery.
 // It is separate from the wider list of assets the frontend displays: those
 // assets remain visible while their engines/configuration are implemented.
-// Every market — spot AND futures — quotes in BIUSDB, the platform's internal
+// Every market — spot AND futures — quotes in BI2XUSD, the platform's internal
 // stable currency (pegged 1:1 to USDT, no on-chain contract of its own) —
 // see Dex-Backend's chain.Listener and repo/ledger.go for the credit side.
 // USDT/USDC are no longer tradable quote currencies anywhere on the
 // exchange; a real USDC deposit still lands as USDC in the deposit-intake
 // ledger, but every tradable balance and every market (spot or futures)
-// converts to/settles in BIUSDB at 1:1. Futures collateral used to be real
-// USDC (see the (symbol, market) key below — BTC-BIUSDB/FUTURES is a distinct
-// row from BTC-BIUSDB/SPOT, so the two coexist without collision).
+// converts to/settles in BI2XUSD at 1:1. Futures collateral used to be real
+// USDC (see the (symbol, market) key below — BTC-BI2XUSD/FUTURES is a distinct
+// row from BTC-BI2XUSD/SPOT, so the two coexist without collision).
 // currentMarkets was narrowed 2026-09-12 (product decision) to an explicit,
 // short list: SPOT is BI2X and BTC only; FUTURES is BI2X, BTC, ETH, AVAX,
 // LINK, SOL, DOGE, TAO, ADA, and XRP. ETH/SOL/BNB spot and BNB futures were
@@ -45,15 +45,15 @@ const optionsEnabled = false
 // note below); AVAX/LINK/DOGE/TAO/ADA/XRP are new futures-only listings.
 var currentMarkets = []marketDefinition{
 	// --- SPOT: BI2X and BTC only ---
-	{displaySymbol: "BTC-BIUSDB", symbol: "BTC-BIUSDB", market: models.Spot, base: "BTC", quote: "BIUSDB"},
+	{displaySymbol: "BTC-BI2XUSD", symbol: "BTC-BI2XUSD", market: models.Spot, base: "BTC", quote: "BI2XUSD"},
 	// BI2X: not a Binance-tracked asset like BTC below — its index price
 	// comes from the dedicated BI2X data feed (internal Price-Fetcher
 	// bitdxfeed client, added 2026-09-12), not Binance.
-	{displaySymbol: "BI2X-BIUSDB", symbol: "BI2X-BIUSDB", market: models.Spot, base: "BI2X", quote: "BIUSDB"},
+	{displaySymbol: "BI2X-BI2XUSD", symbol: "BI2X-BI2XUSD", market: models.Spot, base: "BI2X", quote: "BI2XUSD"},
 
 	// --- FUTURES: BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP ---
-	{displaySymbol: "BTC-PERP", symbol: "BTC-BIUSDB", market: models.Futures, base: "BTC", quote: "BIUSDB"},
-	{displaySymbol: "BI2X-PERP", symbol: "BI2X-BIUSDB", market: models.Futures, base: "BI2X", quote: "BIUSDB"},
+	{displaySymbol: "BTC-PERP", symbol: "BTC-BI2XUSD", market: models.Futures, base: "BTC", quote: "BI2XUSD"},
+	{displaySymbol: "BI2X-PERP", symbol: "BI2X-BI2XUSD", market: models.Futures, base: "BI2X", quote: "BI2XUSD"},
 	// ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, and XRP are FUTURES-ONLY — none of
 	// them has a spot row above (unlike BTC/BI2X, or the old SOL/BNB rows
 	// this replaced, which self-funded off their own spot book). Each needs
@@ -63,14 +63,14 @@ var currentMarkets = []marketDefinition{
 	// underlying_symbol stays empty in seed.go the same way the forex/
 	// commodity rows already did before this change, since there is no
 	// registered SPOT row for any of these to point at.
-	{displaySymbol: "ETH-PERP", symbol: "ETH-BIUSDB", market: models.Futures, base: "ETH", quote: "BIUSDB"},
-	{displaySymbol: "AVAX-PERP", symbol: "AVAX-BIUSDB", market: models.Futures, base: "AVAX", quote: "BIUSDB"},
-	{displaySymbol: "LINK-PERP", symbol: "LINK-BIUSDB", market: models.Futures, base: "LINK", quote: "BIUSDB"},
-	{displaySymbol: "SOL-PERP", symbol: "SOL-BIUSDB", market: models.Futures, base: "SOL", quote: "BIUSDB"},
-	{displaySymbol: "DOGE-PERP", symbol: "DOGE-BIUSDB", market: models.Futures, base: "DOGE", quote: "BIUSDB"},
-	{displaySymbol: "TAO-PERP", symbol: "TAO-BIUSDB", market: models.Futures, base: "TAO", quote: "BIUSDB"},
-	{displaySymbol: "ADA-PERP", symbol: "ADA-BIUSDB", market: models.Futures, base: "ADA", quote: "BIUSDB"},
-	{displaySymbol: "XRP-PERP", symbol: "XRP-BIUSDB", market: models.Futures, base: "XRP", quote: "BIUSDB"},
+	{displaySymbol: "ETH-PERP", symbol: "ETH-BI2XUSD", market: models.Futures, base: "ETH", quote: "BI2XUSD"},
+	{displaySymbol: "AVAX-PERP", symbol: "AVAX-BI2XUSD", market: models.Futures, base: "AVAX", quote: "BI2XUSD"},
+	{displaySymbol: "LINK-PERP", symbol: "LINK-BI2XUSD", market: models.Futures, base: "LINK", quote: "BI2XUSD"},
+	{displaySymbol: "SOL-PERP", symbol: "SOL-BI2XUSD", market: models.Futures, base: "SOL", quote: "BI2XUSD"},
+	{displaySymbol: "DOGE-PERP", symbol: "DOGE-BI2XUSD", market: models.Futures, base: "DOGE", quote: "BI2XUSD"},
+	{displaySymbol: "TAO-PERP", symbol: "TAO-BI2XUSD", market: models.Futures, base: "TAO", quote: "BI2XUSD"},
+	{displaySymbol: "ADA-PERP", symbol: "ADA-BI2XUSD", market: models.Futures, base: "ADA", quote: "BI2XUSD"},
+	{displaySymbol: "XRP-PERP", symbol: "XRP-BI2XUSD", market: models.Futures, base: "XRP", quote: "BI2XUSD"},
 
 	// Forex majors, commodities, and US stocks are deliberately DISABLED for
 	// now (product decision 2026-09-11: crypto-only for the current launch).
@@ -80,7 +80,7 @@ var currentMarkets = []marketDefinition{
 	// into this slice.
 }
 
-// removedMarkets: ETH-BIUSDB/SOL-BIUSDB/BNB-BIUSDB (SPOT) and BNB-PERP
+// removedMarkets: ETH-BI2XUSD/SOL-BI2XUSD/BNB-BI2XUSD (SPOT) and BNB-PERP
 // (FUTURES) were REMOVED, not disabled, per the 2026-09-12 market-list
 // restructure — unlike disabledMarkets below (a deliberate, reversible
 // product decision to relaunch crypto-only), these four are simply not part
@@ -110,15 +110,15 @@ var currentMarkets = []marketDefinition{
 // 	// seed.go). The base ticker is case-sensitive for Live-Rates.com
 // 	// instruments ("CrudeOIL", "AAPL.us") and doubles as the Price-Fetcher
 // 	// Redis key the MM quotes against.
-// 	{displaySymbol: "EURUSD", symbol: "EURUSD-BIUSDB", market: models.Futures, base: "EURUSD", quote: "BIUSDB"},
-// 	{displaySymbol: "GBPUSD", symbol: "GBPUSD-BIUSDB", market: models.Futures, base: "GBPUSD", quote: "BIUSDB"},
-// 	{displaySymbol: "AUDUSD", symbol: "AUDUSD-BIUSDB", market: models.Futures, base: "AUDUSD", quote: "BIUSDB"},
-// 	{displaySymbol: "XAU-USD", symbol: "GOLD-BIUSDB", market: models.Futures, base: "GOLD", quote: "BIUSDB"},
-// 	{displaySymbol: "XAG-USD", symbol: "SILVER-BIUSDB", market: models.Futures, base: "SILVER", quote: "BIUSDB"},
-// 	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-BIUSDB", market: models.Futures, base: "CrudeOIL", quote: "BIUSDB"},
-// 	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-BIUSDB", market: models.Futures, base: "AAPL.us", quote: "BIUSDB"},
-// 	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-BIUSDB", market: models.Futures, base: "TSLA.us", quote: "BIUSDB"},
-// 	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-BIUSDB", market: models.Futures, base: "NVDA.us", quote: "BIUSDB"},
+// 	{displaySymbol: "EURUSD", symbol: "EURUSD-BI2XUSD", market: models.Futures, base: "EURUSD", quote: "BI2XUSD"},
+// 	{displaySymbol: "GBPUSD", symbol: "GBPUSD-BI2XUSD", market: models.Futures, base: "GBPUSD", quote: "BI2XUSD"},
+// 	{displaySymbol: "AUDUSD", symbol: "AUDUSD-BI2XUSD", market: models.Futures, base: "AUDUSD", quote: "BI2XUSD"},
+// 	{displaySymbol: "XAU-USD", symbol: "GOLD-BI2XUSD", market: models.Futures, base: "GOLD", quote: "BI2XUSD"},
+// 	{displaySymbol: "XAG-USD", symbol: "SILVER-BI2XUSD", market: models.Futures, base: "SILVER", quote: "BI2XUSD"},
+// 	{displaySymbol: "WTI-USD", symbol: "CrudeOIL-BI2XUSD", market: models.Futures, base: "CrudeOIL", quote: "BI2XUSD"},
+// 	{displaySymbol: "AAPL-PERP", symbol: "AAPL.us-BI2XUSD", market: models.Futures, base: "AAPL.us", quote: "BI2XUSD"},
+// 	{displaySymbol: "TSLA-PERP", symbol: "TSLA.us-BI2XUSD", market: models.Futures, base: "TSLA.us", quote: "BI2XUSD"},
+// 	{displaySymbol: "NVDA-PERP", symbol: "NVDA.us-BI2XUSD", market: models.Futures, base: "NVDA.us", quote: "BI2XUSD"},
 // }
 
 type marketDefinition struct {

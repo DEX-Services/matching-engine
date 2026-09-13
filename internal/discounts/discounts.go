@@ -119,7 +119,7 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS fee_tiers (
 		    tier         INT PRIMARY KEY,
-		    biusdb_value NUMERIC(20,2) NOT NULL,
+		    bi2xusd_value NUMERIC(20,2) NOT NULL,
 		    discount_pct NUMERIC(5,2) NOT NULL,
 		    active       BOOLEAN NOT NULL DEFAULT true
 		)`); err != nil {
@@ -145,13 +145,13 @@ func EnsureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// tierDefaults are the platform's 10 launch discount tiers (tier, BIUSDB
+// tierDefaults are the platform's 10 launch discount tiers (tier, BI2XUSD
 // value, discount %). Seeded once via SeedTiers; admin edits (if ever
 // enabled) are never clobbered by a restart.
 var tierDefaults = []struct {
-	tier        int
-	biusdbValue string
-	discountPct string
+	tier         int
+	bi2xusdValue string
+	discountPct  string
 }{
 	{1, "500", "5"},
 	{2, "1000", "10"},
@@ -169,8 +169,8 @@ var tierDefaults = []struct {
 func SeedTiers(ctx context.Context, pool *pgxpool.Pool) {
 	for _, t := range tierDefaults {
 		if _, err := pool.Exec(ctx,
-			`INSERT INTO fee_tiers (tier, biusdb_value, discount_pct) VALUES ($1, $2, $3) ON CONFLICT (tier) DO NOTHING`,
-			t.tier, t.biusdbValue, t.discountPct,
+			`INSERT INTO fee_tiers (tier, bi2xusd_value, discount_pct) VALUES ($1, $2, $3) ON CONFLICT (tier) DO NOTHING`,
+			t.tier, t.bi2xusdValue, t.discountPct,
 		); err != nil {
 			slog.Error("seed fee_tiers default", "tier", t.tier, "error", err)
 		}

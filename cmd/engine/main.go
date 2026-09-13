@@ -1091,7 +1091,7 @@ func main() {
 	// 			})
 	// 		}
 	// 		// Real per-instrument fee from symbol_configs (market=OPTIONS, keyed
-	// 		// by the underlying — see seed.go's BTC-BIUSDB OPTIONS row), not a
+	// 		// by the underlying — see seed.go's BTC-BI2XUSD OPTIONS row), not a
 	// 		// frontend-hardcoded literal. Falls back to the schema default
 	// 		// (0.001 = 0.1%, matching the previous hardcoded value) if the
 	// 		// registry has no row yet, so this never regresses to a worse
@@ -1368,7 +1368,7 @@ func validateAndPrepareCombo(ctx context.Context, pool *pgxpool.Pool, reg *match
 		return err
 	}
 	o.Symbol = combo.Symbol
-	o.QuoteCurrency = "BIUSDB"
+	o.QuoteCurrency = "BI2XUSD"
 	if len(insts) > 0 {
 		if parts := splitOptionSymbol(insts[0].Symbol); len(parts) >= 2 {
 			o.QuoteCurrency = parts[1]
@@ -1418,7 +1418,7 @@ func accumulatePortfolioGreeks(totals *PortfolioGreeksDTO, p *settlement.Options
 }
 
 // underlyingFromOptionSymbol extracts the underlying spot symbol (e.g.
-// "BTC-BIUSDB") from an option instrument symbol, using the same 5-part
+// "BTC-BI2XUSD") from an option instrument symbol, using the same 5-part
 // BASE-QUOTE-STRIKE-EXPIRY-TYPE format splitOptionSymbol parses elsewhere in
 // this file. Mirrors settlement.underlyingFromSymbol and
 // risk.underlyingFromOrderSymbol — each package has its own tiny copy of

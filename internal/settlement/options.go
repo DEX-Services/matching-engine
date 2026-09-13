@@ -25,7 +25,7 @@ type OptionsPosition struct {
 	Expiry        time.Time
 	Size          decimal.Decimal // positive = long, negative = short
 	Premium       decimal.Decimal // premium paid (positive) or received (negative)
-	QuoteCurrency string          // settlement currency (e.g. "BIUSDB")
+	QuoteCurrency string          // settlement currency (e.g. "BI2XUSD")
 }
 
 // PnL returns the position's unrealized profit/loss at the given current
