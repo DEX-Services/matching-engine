@@ -169,8 +169,12 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 		if err := f.ledger.Debit(accountID, quoteAsset, fee); err != nil {
 			return fmt.Errorf("debit futures fee: %w", err)
 		}
+		// SettleFee (not the plain Settle used for margin below) so
+		// Dex-Backend can route this fee's revenue to accountID's
+		// referral/affiliate beneficiary plus the platform treasury,
+		// instead of a bare debit with nowhere for the money to land.
 		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee))
+			return f.backend.SettleFee(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee))
 		})
 	}
 

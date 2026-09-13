@@ -86,7 +86,9 @@ func (s *SpotSettlement) Settle(trade *models.Trade) error {
 	if err := s.backend.SettleSpot(ctx, buyerID, sellerID, base, quote,
 		backendclient.ToRawUnits(trade.Quantity),
 		backendclient.ToRawUnits(notional.Add(buyerFee)),
-		backendclient.ToRawUnits(notional.Sub(sellerFee))); err != nil {
+		backendclient.ToRawUnits(notional.Sub(sellerFee)),
+		backendclient.ToRawUnits(buyerFee),
+		backendclient.ToRawUnits(sellerFee)); err != nil {
 		return fmt.Errorf("spot settle backend: %w", err)
 	}
 

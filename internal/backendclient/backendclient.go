@@ -101,6 +101,14 @@ type spotSettleReq struct {
 	BaseQuantity      string `json:"baseQuantity"`
 	BuyerQuoteDebit   string `json:"buyerQuoteDebit"`
 	SellerQuoteCredit string `json:"sellerQuoteCredit"`
+	// BuyerFee/SellerFee are each side's own fee (already discount-adjusted),
+	// in the same raw-unit scale as the other amounts above. Dex-Backend uses
+	// these to route fee revenue: a referral/affiliate share (if the paying
+	// account has one) to the beneficiary's own balance, the remainder to the
+	// platform treasury. Zero when no fee is configured for this market. See
+	// REFERRAL-AFFILIATE-PLAN.md.
+	BuyerFee  string `json:"buyerFee"`
+	SellerFee string `json:"sellerFee"`
 }
 
 // Lock calls POST /internal/balance/lock. Returns an error if the backend
@@ -156,12 +164,27 @@ func (c *Client) Credit(ctx context.Context, userID, asset, amount string) error
 	return c.call(ctx, "/internal/balance/credit", userID, asset, amount)
 }
 
+// SettleFee calls POST /internal/balance/fee, telling Dex-Backend that a
+// futures maker/taker fee of amount (raw units, already debited from the
+// engine's in-memory ledger for userID) needs to be routed: to userID's
+// referral/affiliate beneficiary's own balance (if one exists) plus the
+// platform treasury for the remainder, or 100% to the treasury if userID has
+// no referral source. Distinct from Settle/Credit, which only move money
+// into or out of one account and never record where a fee's revenue went.
+// See REFERRAL-AFFILIATE-PLAN.md.
+func (c *Client) SettleFee(ctx context.Context, userID, asset, amount string) error {
+	return c.call(ctx, "/internal/balance/fee", userID, asset, amount)
+}
+
 // SettleSpot atomically persists both legs of a completed spot trade.
-func (c *Client) SettleSpot(ctx context.Context, buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit string) error {
+// buyerFee/sellerFee are each side's own fee (raw units, zero if none),
+// used by Dex-Backend to route fee revenue to a referral/affiliate
+// beneficiary or the platform treasury — see REFERRAL-AFFILIATE-PLAN.md.
+func (c *Client) SettleSpot(ctx context.Context, buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit, buyerFee, sellerFee string) error {
 	if !c.Enabled() {
 		return nil
 	}
-	body, err := json.Marshal(spotSettleReq{buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit})
+	body, err := json.Marshal(spotSettleReq{buyerID, sellerID, base, quote, baseQuantity, buyerQuoteDebit, sellerQuoteCredit, buyerFee, sellerFee})
 	if err != nil {
 		return err
 	}
