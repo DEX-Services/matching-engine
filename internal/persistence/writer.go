@@ -357,6 +357,19 @@ func (w *Writer) persistBatch(ctx context.Context, evts []*models.Event) error {
 // idempotent anyway, but funding_payments/realized_pnl are blind inserts, so
 // without the claim two writers would double-pay. With it, concurrent
 // writers converge instead of duplicating.
+//
+// KNOWN BUG (found 2026-09-14, not yet fixed): this claim's uniqueness key
+// is (evt.Symbol, evt.SequenceNumber), but matching.Engine.seq (see its
+// comment) restarts at 0 on every engine process boot instead of being
+// restored from Postgres. After a restart, a genuinely NEW event can be
+// assigned a sequence number that collides with an old, already-claimed row
+// from before the restart — this function then sees ErrNoRows, assumes
+// "already persisted", and returns nil WITHOUT writing that event's
+// order/trade rows, silently. The trade still settles correctly (balances
+// are unaffected — this is a Kafka/Postgres-side gap only), but it vanishes
+// from order_history/fills. Confirmed live: a filled SPOT sell order was
+// lost this way. Fix belongs in matching.Engine's startup (restore seq from
+// MAX(sequence_number) per symbol), not here.
 func applyEvent(ctx context.Context, tx pgx.Tx, evt *models.Event, stmts []eventStmt) error {
 	var claimed bool
 	err := tx.QueryRow(ctx, stmts[0].sql+" RETURNING true", stmts[0].args...).Scan(&claimed)

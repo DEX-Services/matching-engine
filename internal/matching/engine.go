@@ -94,8 +94,39 @@ type Engine struct {
 	book   *orderbook.Book
 
 	inputCh chan request
-	seq     atomic.Uint64
-	halted  atomic.Bool
+	// seq is a per-symbol monotonic event sequence number, starting at 0
+	// every process boot — it is NEVER restored from Postgres on startup.
+	//
+	// KNOWN BUG (found 2026-09-14, not yet fixed — see AGENT NOTES or ask
+	// about "stuck lock / missing sell order" investigation from this date):
+	// internal/persistence/writer.go's applyEvent() uses (symbol,
+	// sequence_number) as the idempotency/dedupe key for writing an event's
+	// order/trade rows (`ON CONFLICT (symbol, sequence_number) DO NOTHING
+	// RETURNING true` — see events_symbol_seq unique index). Because this
+	// counter restarts at 0 on every engine restart while old (symbol,
+	// sequence_number) rows from BEFORE the restart are still in Postgres,
+	// any new event whose freshly-assigned sequence number collides with an
+	// old, already-persisted one for the same symbol is silently treated as
+	// "already claimed by a previous writer" and its order/trade rows are
+	// NEVER written — with no error logged anywhere. The trade still
+	// executes correctly (in-memory matching + real balance settlement are
+	// unaffected), so this is a HISTORY-ONLY gap, not a fund-safety bug —
+	// but it means an order (confirmed: a real filled SPOT sell) can vanish
+	// from order_history/fills/Trade History while the balance change it
+	// caused is completely correct. It recurs after every engine restart
+	// until live traffic on that symbol pushes sequence numbers past
+	// whatever high-water mark existed before the restart.
+	//
+	// Proper fix (not yet done — needs careful staging, not a rushed live
+	// change): restore this counter from
+	// `SELECT MAX(sequence_number) FROM events WHERE symbol = $1` before the
+	// engine starts accepting orders. This requires reordering cmd/engine/
+	// main.go's startup: today engines are registered (Registry.Register,
+	// which calls NewEngine) BEFORE pgPool is even connected, so Postgres
+	// needs to come up first and each engine's starting seq needs to be
+	// threaded through NewEngine/Registry rather than defaulting to zero.
+	seq    atomic.Uint64
+	halted atomic.Bool
 
 	pub        EventPublisher
 	settlement SettlementHandler
