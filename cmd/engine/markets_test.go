@@ -21,25 +21,24 @@ func TestMarketsHandlerReturnsOnlyCurrentExecutionSet(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	// 2026-09-12 market-list restructure: SPOT is BI2X + BTC only; FUTURES is
-	// BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP — 2 + 10 = 12
-	// total. ETH/SOL/BNB spot and BNB futures were REMOVED (not just
-	// disabled — see deactivateRemovedMarkets in seed.go); crypto-only
-	// forex/commodities/stocks remain separately disabled (disabledMarkets
-	// below, unrelated to this restructure). (Options engines register
-	// lazily per contract and are not in this list.)
-	if len(got) != 12 {
-		t.Fatalf("got %d markets, want 12: %#v", len(got), got)
+	// 2026-09-12 market-list restructure (SPOT: BI2X + BTC; FUTURES: BI2X,
+	// BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP) plus the 2026-09-13
+	// removal of BTC-BI2XUSD SPOT (BTC-PERP FUTURES is unaffected) — now
+	// SPOT is BI2X only: 1 + 10 = 11 total. ETH/SOL/BNB spot, BNB futures,
+	// and BTC spot were REMOVED (not just disabled — see
+	// deactivateRemovedMarkets in seed.go); crypto-only forex/commodities/
+	// stocks remain separately disabled (disabledMarkets below, unrelated to
+	// this restructure). (Options engines register lazily per contract and
+	// are not in this list.)
+	if len(got) != 11 {
+		t.Fatalf("got %d markets, want 11: %#v", len(got), got)
 	}
-	if got[0].DisplaySymbol != "BTC-BI2XUSD" || got[0].Market != "SPOT" {
-		t.Fatalf("expected BTC-BI2XUSD SPOT first: %#v", got[0])
+	if got[0].DisplaySymbol != "BI2X-BI2XUSD" || got[0].Market != "SPOT" {
+		t.Fatalf("expected BI2X-BI2XUSD SPOT first: %#v", got[0])
 	}
-	if got[1].DisplaySymbol != "BI2X-BI2XUSD" || got[1].Market != "SPOT" {
-		t.Fatalf("expected BI2X-BI2XUSD SPOT second: %#v", got[1])
-	}
-	// No SPOT row beyond BTC/BI2X — the whole point of the restructure.
+	// No SPOT row beyond BI2X — the whole point of this restructure.
 	for _, m := range got {
-		if m.Market == "SPOT" && m.DisplaySymbol != "BTC-BI2XUSD" && m.DisplaySymbol != "BI2X-BI2XUSD" {
+		if m.Market == "SPOT" && m.DisplaySymbol != "BI2X-BI2XUSD" {
 			t.Fatalf("unexpected SPOT market %q survived the restructure: %#v", m.DisplaySymbol, m)
 		}
 	}

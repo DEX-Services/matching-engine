@@ -42,14 +42,18 @@ func seedSymbolConfigs(ctx context.Context, pool *pgxpool.Pool) {
 		// else. The futures row's symbol is "BTC-BI2XUSD"/"ETH-BI2XUSD" too — a
 		// distinct (symbol, market) row from the SPOT row of the same name,
 		// so the two coexist without collision.
-		// --- SPOT: BI2X and BTC only (2026-09-12 market-list restructure) ---
-		{"BTC-BI2XUSD", "SPOT", "BTC", "BI2XUSD", "", 0, 0, "0", "0", "", ""},
+		// --- SPOT: BI2X only (BTC-BI2XUSD SPOT removed 2026-09-13; see
+		// removedMarkets in markets.go and deactivateRemovedMarkets below) ---
 		// BI2X: its actual index price feed is the dedicated BI2X data feed
 		// (Price-Fetcher's bitdxfeed client), not Binance.
 		{"BI2X-BI2XUSD", "SPOT", "BI2X", "BI2XUSD", "", 0, 0, "0", "0", "", ""},
 
 		// --- FUTURES: BI2X, BTC, ETH, AVAX, LINK, SOL, DOGE, TAO, ADA, XRP ---
-		{"BTC-BI2XUSD", "FUTURES", "BTC", "BI2XUSD", "BTC-BI2XUSD", 100, 8, "0.005", "0", "", ""},
+		// BTC-PERP lost its spot book on 2026-09-13 (BTC-BI2XUSD SPOT removed)
+		// and is now futures-only like ETH/AVAX/etc. below: underlying_symbol
+		// empty, funding_interval_hours 0, funding settlement simply off (same
+		// tradeoff already accepted for every other non-BI2X future).
+		{"BTC-BI2XUSD", "FUTURES", "BTC", "BI2XUSD", "", 100, 0, "0.005", "0", "", ""},
 		// BI2X futures self-funds off its own SPOT row above, same as BTC.
 		// Leverage/margin match the other mid-cap crypto perps below rather
 		// than BTC's tighter numbers, since BI2X's real volatility profile
@@ -166,6 +170,9 @@ func deactivateRemovedMarkets(ctx context.Context, pool *pgxpool.Pool) {
 		{"SOL-BI2XUSD", "SPOT"},
 		{"BNB-BI2XUSD", "SPOT"},
 		{"BNB-BI2XUSD", "FUTURES"},
+		// BTC-BI2XUSD SPOT removed 2026-09-13 — BTC-PERP FUTURES (same symbol
+		// string, different market) is untouched and stays active.
+		{"BTC-BI2XUSD", "SPOT"},
 	}
 	for _, r := range removed {
 		if _, err := pool.Exec(ctx,

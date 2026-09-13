@@ -44,8 +44,8 @@ const optionsEnabled = false
 // REMOVED entirely per that decision (not just disabled — see the removal
 // note below); AVAX/LINK/DOGE/TAO/ADA/XRP are new futures-only listings.
 var currentMarkets = []marketDefinition{
-	// --- SPOT: BI2X and BTC only ---
-	{displaySymbol: "BTC-BI2XUSD", symbol: "BTC-BI2XUSD", market: models.Spot, base: "BTC", quote: "BI2XUSD"},
+	// --- SPOT: BI2X only (BTC-BI2XUSD SPOT removed 2026-09-13 — see
+	// removedMarkets below; BTC-PERP FUTURES below is unaffected) ---
 	// BI2X: not a Binance-tracked asset like BTC below — its index price
 	// comes from the dedicated BI2X data feed (internal Price-Fetcher
 	// bitdxfeed client, added 2026-09-12), not Binance.
@@ -88,6 +88,12 @@ var currentMarkets = []marketDefinition{
 // rows, Price-Fetcher/frontend registrations, and (for ETH/SOL/BNB) their
 // user_balances ledger columns are left in place (a balance a user already
 // holds must remain readable/withdrawable) but no longer tradable.
+//
+// BTC-BI2XUSD (SPOT) was additionally REMOVED on 2026-09-13, same treatment:
+// taken out of currentMarkets and seed.go's SPOT seed row, and deactivated
+// via deactivateRemovedMarkets below. Its (symbol, market) key is shared
+// with BTC-PERP FUTURES above ("BTC-BI2XUSD"/models.Futures) — that row is
+// untouched; only the SPOT row for this symbol string is gone.
 
 // disabledMarkets lists every non-crypto instrument the engine is CAPABLE of
 // running (spot/futures registration, margin, liquidation, and funding all
