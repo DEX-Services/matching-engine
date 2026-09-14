@@ -382,6 +382,34 @@ func (c *Checker) Check(order *models.Order) error {
 		return fmt.Errorf("order quantity must be positive")
 	}
 
+	// User-initiated reduce-only close (futures): same reasoning as the
+	// InternalLiquidation short-circuit above, just triggered by a user
+	// clicking "Close" instead of the system force-closing a position.
+	//
+	// Bug fixed 2026-09-15: before this, a ReduceOnly futures order still
+	// fell through to the notional/leverage check below like any new
+	// position-opening order. submit.go's checkReduceOnly (called just
+	// before Check) already guarantees this order can only shrink an
+	// existing position — opposite side, quantity <= the position's current
+	// size — so it never adds net exposure and needs no fresh margin
+	// reservation of its own; the position's already-posted margin is what
+	// backs it, and closing releases that margin rather than requiring more.
+	// A live incident showed the real-world impact: a leverage value missing
+	// from the close request (e.g. the client not resending it, since a close
+	// conceptually shouldn't need it) made notionalFor's MarginRequired divide
+	// by the clamped default of 1 instead of the position's actual leverage,
+	// demanding near-FULL notional (e.g. $526 for a position whose real
+	// margin was $10.61 at 50x) instead of nothing — a user could not close a
+	// profitable position at all despite having more than enough margin
+	// actually backing it. Requires the caller to have already verified this
+	// order is reduce-only-valid (submit.go does, via checkReduceOnly, before
+	// calling Check) — Checker itself has no access to the position, only to
+	// balances, so it trusts the ReduceOnly flag the same way it already
+	// trusts InternalLiquidation.
+	if order.ReduceOnly && order.Market == models.Futures {
+		return nil
+	}
+
 	// Market orders (and stop-market orders, i.e. a STOP with no limit Price)
 	// cannot be checked for exact notional without a mark price: both have
 	// order.Price == 0, so notionalFor would otherwise compute a zero
@@ -413,6 +441,14 @@ func (c *Checker) Reserve(order *models.Order) error {
 	if order.Type == models.Market {
 		return nil // market orders have no known notional at this stage
 	}
+	// Mirrors Check's ReduceOnly-futures exemption: a validated reduce-only
+	// close needs no fresh reservation of its own (see Check's doc comment
+	// for the full incident this fixes) — reserving the same wrong notional
+	// here would silently reintroduce the bug even after Check stopped
+	// rejecting the order, since Reserve is what actually locks funds.
+	if order.ReduceOnly && order.Market == models.Futures {
+		return nil
+	}
 	asset, notional := required(order)
 	return c.ledger.Reserve(order.AccountID, asset, notional)
 }
@@ -423,6 +459,12 @@ func (c *Checker) Reserve(order *models.Order) error {
 // caller can release the unused residual after the order fills, or the full
 // amount if it is rejected/unfilled.
 func (c *Checker) ReserveMarket(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal, err error) {
+	// Mirrors Reserve/Check's ReduceOnly-futures exemption — a market-order
+	// close (e.g. "Close Position" submitted as MARKET) is exactly as much a
+	// reduce-only close as a limit one, and needs no fresh reservation.
+	if order.ReduceOnly && order.Market == models.Futures {
+		return assetFor(order), decimal.Zero, nil
+	}
 	asset, amount = requiredAt(order, estPrice)
 	if amount.IsZero() {
 		return asset, amount, nil
@@ -468,6 +510,14 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 	if order.Type == models.Market || (order.Type == models.Stop && !order.Price.IsPositive()) {
 		return "", decimal.Zero
 	}
+	// Mirrors Reserve's ReduceOnly-futures exemption exactly: this function's
+	// whole job is to tell an external caller (the Postgres balance-lock
+	// bridge) what Reserve locked, so it must agree with Reserve or that
+	// caller would durably lock funds for a reservation the engine's own
+	// in-memory ledger never actually took.
+	if order.ReduceOnly && order.Market == models.Futures {
+		return assetFor(order), decimal.Zero
+	}
 	return required(order)
 }
 
@@ -477,6 +527,14 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 // before a market order matches so an unfunded account can't receive base for
 // free when settlement's debit later fails.
 func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal) {
+	// Mirrors Reserve/RequiredFor's ReduceOnly-futures exemption — a MARKET
+	// "Close Position" order takes this path (submit.go routes Market-type
+	// orders here regardless of ReduceOnly), and needs the same treatment as
+	// a reduce-only limit close: no fresh reservation for an order that can
+	// only shrink an existing, already-margined position.
+	if order.ReduceOnly && order.Market == models.Futures {
+		return assetFor(order), decimal.Zero
+	}
 	return requiredAt(order, estPrice)
 }
 

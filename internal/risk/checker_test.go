@@ -157,3 +157,130 @@ func TestReserve_InsufficientBalance(t *testing.T) {
 		t.Fatalf("reserved after failed reserve = %s, want 0", got)
 	}
 }
+
+// newFuturesCloseOrder builds a ReduceOnly futures order shaped like the
+// "Close Position" action for a SHORT: a BUY that reduces/closes it. leverage
+// intentionally defaults to 0 to reproduce the exact live incident this fix
+// addresses -- a close request that omits leverage (Atoi("") == 0).
+func newFuturesCloseOrder(qty, price string, leverage int) *models.Order {
+	return &models.Order{
+		ID: "close1", AccountID: "trader", Symbol: "BI2X-BI2XUSD",
+		Side: models.Buy, Type: models.Limit, Market: models.Futures,
+		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		ReduceOnly: true, Leverage: leverage,
+	}
+}
+
+// TestCheck_ReduceOnlyFutures_RequiresNoMargin is a regression test for the
+// 2026-09-15 incident: a user could not close a profitable 50x SHORT
+// (position margin $10.61) because the close request's missing leverage made
+// the risk check demand near-full notional ($526.45) instead of nothing.
+// Mirrors the exact numbers from that incident: qty 214.00377 @ price 2.46
+// with leverage 0 (as if the field were omitted) previously computed a
+// required amount of ~526.45 via MarginRequired's default-to-1 clamp; Check
+// must now pass regardless, on an account with far less than that available.
+func TestCheck_ReduceOnlyFutures_RequiresNoMargin(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	// Only $10.81 available -- less than the old ~$526.45 requirement, more
+	// than enough for the correct ~$10.61 one, and (this is the point of the
+	// fix) irrelevant either way: a reduce-only futures close needs no fresh
+	// margin check at all.
+	ledger.Deposit("trader", "BI2XUSD", decimal.RequireFromString("10.8071913811"))
+
+	order := newFuturesCloseOrder("214.00377", "2.46", 0)
+	if err := checker.Check(order); err != nil {
+		t.Fatalf("Check on reduce-only futures close = %v, want nil (no margin required)", err)
+	}
+}
+
+// TestCheck_NonReduceOnlyFutures_StillRequiresMargin confirms the fix is
+// scoped to ReduceOnly only -- a normal position-opening futures order on the
+// same account/symbol must still be margin-checked exactly as before.
+func TestCheck_NonReduceOnlyFutures_StillRequiresMargin(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2XUSD", decimal.RequireFromString("10.8071913811"))
+
+	order := newFuturesCloseOrder("214.00377", "2.46", 0)
+	order.ReduceOnly = false // opening, not closing
+	if err := checker.Check(order); err == nil {
+		t.Fatal("expected Check to still reject an under-margined non-reduce-only futures order")
+	}
+}
+
+// TestReserve_ReduceOnlyFutures_LocksNothing confirms Reserve (which is what
+// actually locks funds via the ledger) agrees with Check -- fixing Check
+// alone while Reserve still locked the old wrong amount would have left the
+// bug's real-world symptom (funds unavailable for other use) in place even
+// after Check stopped rejecting the order.
+func TestReserve_ReduceOnlyFutures_LocksNothing(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2XUSD", decimal.NewFromInt(1000))
+
+	order := newFuturesCloseOrder("214.00377", "2.46", 0)
+	if err := checker.Reserve(order); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if got := ledger.Reserved("trader", "BI2XUSD"); !got.IsZero() {
+		t.Fatalf("reserved after reduce-only futures close = %s, want 0", got)
+	}
+	if got := ledger.Available("trader", "BI2XUSD"); !got.Equal(decimal.NewFromInt(1000)) {
+		t.Fatalf("available after reduce-only futures close reserve = %s, want unchanged 1000", got)
+	}
+}
+
+// TestReserveMarket_ReduceOnlyFutures_LocksNothing covers the MARKET-order
+// close path (submit.go routes Market-type orders through ReserveMarket
+// regardless of ReduceOnly), which required its own fix mirroring Reserve.
+func TestReserveMarket_ReduceOnlyFutures_LocksNothing(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2XUSD", decimal.NewFromInt(1000))
+
+	order := newFuturesCloseOrder("214.00377", "0", 0) // Market orders carry no own price
+	order.Type = models.Market
+	asset, amount, err := checker.ReserveMarket(order, decimal.RequireFromString("2.46"))
+	if err != nil {
+		t.Fatalf("reserveMarket: %v", err)
+	}
+	if !amount.IsZero() {
+		t.Fatalf("ReserveMarket amount for reduce-only futures close = %s, want 0", amount)
+	}
+	if asset != "BI2XUSD" {
+		t.Fatalf("ReserveMarket asset = %s, want BI2XUSD", asset)
+	}
+	if got := ledger.Reserved("trader", "BI2XUSD"); !got.IsZero() {
+		t.Fatalf("reserved after ReserveMarket reduce-only futures close = %s, want 0", got)
+	}
+}
+
+// TestRequiredFor_ReduceOnlyFutures_ReturnsZero covers the external-caller
+// mirror (the Postgres balance-lock bridge) -- it must agree with Reserve or
+// Dex-Backend would durably lock funds for a reservation the engine's own
+// in-memory ledger never took.
+func TestRequiredFor_ReduceOnlyFutures_ReturnsZero(t *testing.T) {
+	order := newFuturesCloseOrder("214.00377", "2.46", 0)
+	asset, amount := RequiredFor(order)
+	if !amount.IsZero() {
+		t.Fatalf("RequiredFor amount for reduce-only futures close = %s, want 0", amount)
+	}
+	if asset != "BI2XUSD" {
+		t.Fatalf("RequiredFor asset = %s, want BI2XUSD", asset)
+	}
+}
+
+// TestEstimatedRequired_ReduceOnlyFutures_ReturnsZero covers the MARKET-order
+// external-caller mirror, same reasoning as TestRequiredFor above.
+func TestEstimatedRequired_ReduceOnlyFutures_ReturnsZero(t *testing.T) {
+	order := newFuturesCloseOrder("214.00377", "0", 0)
+	order.Type = models.Market
+	asset, amount := EstimatedRequired(order, decimal.RequireFromString("2.46"))
+	if !amount.IsZero() {
+		t.Fatalf("EstimatedRequired amount for reduce-only futures close = %s, want 0", amount)
+	}
+	if asset != "BI2XUSD" {
+		t.Fatalf("EstimatedRequired asset = %s, want BI2XUSD", asset)
+	}
+}
