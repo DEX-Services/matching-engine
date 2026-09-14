@@ -37,16 +37,6 @@ const (
 	defaultConsumerGroup = "postgres-writer"
 )
 
-// processStart is captured at package initialization — before main() runs
-// any statement, therefore before the Kafka publisher can publish anything —
-// so every event published by THIS process has a later publish time and can
-// never be skipped as "pre-session". The cutoff used for skipping is
-// processStart minus a 30s margin to absorb broker/engine clock skew
-// (broker message timestamps vs. local clock); re-persisting ≤30s of the
-// previous session's tail is safe — the raw-event claim makes replaying
-// those rows a no-op.
-var processStart = time.Now()
-
 // Writer consumes events from Kafka and writes them to Postgres.
 // It is the sole reader of the TopicEvents topic in its consumer group
 // (KAFKA_WRITER_GROUP, default "postgres-writer").
@@ -66,37 +56,49 @@ var processStart = time.Now()
 // cannot persist; Kafka redelivers the rest.
 //
 // Bootstrap: the group starts at FirstOffset (earliest retained) by default
-// and SKIPS — commits without persisting — any message whose broker timestamp
-// predates this process's start (cutoff = processStart-30s, or the
-// KAFKA_WRITER_SKIP_BEFORE override). Those were all persisted by a previous
-// engine session or by the concurrently running hosted writer; skipping them
-// keeps replay from re-deriving rows, and the claim makes even a misjudged
-// skip safe. KAFKA_WRITER_START_OFFSET=latest instead jumps a FRESH group
-// straight to the live tail (instant catch-up on dev sandboxes; committed-
-// offset restarts are unaffected either way).
+// for a FRESH consumer group (one with no committed offset yet); a group
+// that has committed offsets before simply resumes from there, as any Kafka
+// consumer does. There is deliberately no time-based "skip messages older
+// than X" heuristic here anymore (removed 2026-09-14 — see
+// RECONCILE-BALANCE-WIPE-BUG.md's sibling incident,
+// SEQUENCE-RESET-HISTORY-LOSS-BUG.md, or ask about "writer skipPreSession
+// discarded real backlog" from that date for the full incident writeup).
+// That heuristic committed (permanently discarded) any message whose
+// broker timestamp predated this process's own start time, on the
+// assumption that anything older must already have been persisted by a
+// previous writer session. That assumption is only true if the previous
+// session had FULLY drained Kafka before dying — restart it under real
+// backlog (a burst of trading activity the writer hadn't yet caught up on,
+// or several restarts close together each leaving a bit more lag than the
+// last) and the "old" messages it skips were never persisted by anyone;
+// they are gone the moment their offset is committed. Confirmed live: one
+// restart discarded 17,291 backlogged events this way, including a real,
+// executed customer trade that never appeared in order_history/fills
+// anywhere. The claim protocol in applyEvent (ON CONFLICT ... DO NOTHING
+// RETURNING true) already makes reprocessing a genuine duplicate a safe
+// no-op — that mechanism, not a timestamp guess, is what should decide
+// whether an event has already been persisted. Removing the time-based
+// skip means a FRESH consumer group again replays the full retained
+// history on first boot (as the writer originally did, per the commit that
+// introduced FirstOffset — "fix Kafka offset" — before this heuristic was
+// added purely as a performance shortcut and inadvertently broke
+// correctness): slower to reach "caught up" once, for a brand-new group
+// name, but nothing genuine is ever thrown away. Set
+// KAFKA_WRITER_START_OFFSET=latest to accept that tradeoff deliberately
+// for a fresh group (instant catch-up, skipping pre-existing retained
+// history on purpose) — committed-offset restarts are unaffected either
+// way, exactly as before.
 type Writer struct {
 	reader        *kafka.Reader
 	pool          *pgxpool.Pool
 	log           *slog.Logger
-	startTime     time.Time    // skip cutoff (processStart-30s or KAFKA_WRITER_SKIP_BEFORE)
-	skipped       atomic.Int64 // pre-session messages skipped, for the status log
 	persisted     atomic.Int64 // events persisted this session, for the status log
-	bootDone      atomic.Bool  // set once the first post-cutoff message is seen
+	bootDone      atomic.Bool  // set once the first message this session is processed
 	statusStarted atomic.Bool  // guards the one-shot 30s status ticker
 }
 
 // NewWriter creates a Kafka→Postgres writer.
 func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
-	startTime := processStart.Add(-30 * time.Second)
-	if v := os.Getenv("KAFKA_WRITER_SKIP_BEFORE"); v != "" {
-		t, err := time.Parse(time.RFC3339, v)
-		if err != nil {
-			return nil, fmt.Errorf("KAFKA_WRITER_SKIP_BEFORE: %w", err)
-		}
-		startTime = t
-		slog.Default().Info("writer skip cutoff overridden", "skip_before", t.Format(time.RFC3339))
-	}
-
 	host := os.Getenv("KAFKA_HOST")
 	port := os.Getenv("KAFKA_PORT")
 	if host == "" || port == "" {
@@ -156,31 +158,15 @@ func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
 		StartOffset:    startOffset,
 	})
 
-	return &Writer{reader: reader, pool: pool, log: slog.Default(), startTime: startTime}, nil
-}
-
-// skipPreSession reports whether msg predates the skip cutoff and should be
-// committed without persisting. See the Bootstrap note on Writer.
-func (w *Writer) skipPreSession(msg *kafka.Message) bool {
-	if msg.Time.Before(w.startTime) {
-		w.skipped.Add(1)
-		return true
-	}
-	if !w.bootDone.Swap(true) {
-		// First message past the cutoff this session.
-		w.log.Info("event writer caught up to live stream",
-			"skipped_pre_session", w.skipped.Load())
-	}
-	return false
+	return &Writer{reader: reader, pool: pool, log: slog.Default()}, nil
 }
 
 // Run starts the consume-and-write loop. Call in a dedicated goroutine.
 func (w *Writer) Run(ctx context.Context) {
-	// Periodic status line: makes the skip phase observable (how many
-	// pre-session messages are behind us) and confirms liveness when
-	// investigating a quiet stream — the one-shot "caught up" line only
-	// fires when a message past the cutoff arrives, which can be never on
-	// an idle market.
+	// Periodic status line: confirms liveness and surfaces consumer lag
+	// (how far behind the live stream this writer currently is) when
+	// investigating a quiet stream or a slow catch-up after a restart with
+	// real backlog.
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -191,7 +177,6 @@ func (w *Writer) Run(ctx context.Context) {
 			case <-t.C:
 				st := w.reader.Stats()
 				w.log.Info("writer status",
-					"skipped_pre_session", w.skipped.Load(),
 					"persisted", w.persisted.Load(),
 					"caught_up", w.bootDone.Load(),
 					"fetches", st.Fetches,
@@ -214,49 +199,22 @@ func (w *Writer) Run(ctx context.Context) {
 			time.Sleep(time.Second) // back-off
 			continue
 		}
+		if !w.bootDone.Swap(true) {
+			w.log.Info("event writer started consuming")
+		}
 
 		msgs := make([]kafka.Message, 0, maxBatchSize)
-		pendingSkips := make([]kafka.Message, 0, 1000)
-		if !w.skipPreSession(&first) {
-			msgs = append(msgs, first)
-		}
+		msgs = append(msgs, first)
 
-		// Live mode drains on a short window (idle latency budget); before
-		// the first post-cutoff message, latency is irrelevant, so drain
-		// generously and keep the fat fetches flowing instead of aborting
-		// them mid-flight.
-		drainWindow := 50 * time.Millisecond
-		if !w.bootDone.Load() {
-			drainWindow = 2 * time.Second
-		}
-		drainCtx, cancel := context.WithTimeout(ctx, drainWindow)
+		drainCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 		for len(msgs) < maxBatchSize {
 			msg, err := w.reader.FetchMessage(drainCtx)
 			if err != nil {
 				break
 			}
-			if w.skipPreSession(&msg) {
-				// Skipped messages are committed in chunks: a fresh group
-				// replaying a long retention window can skip millions of
-				// pre-session messages at startup, and each commit advances
-				// the group offset so a restart never re-reads them.
-				pendingSkips = append(pendingSkips, msg)
-				if len(pendingSkips) == 1000 {
-					if cerr := w.reader.CommitMessages(ctx, pendingSkips...); cerr != nil && ctx.Err() == nil {
-						w.log.Error("kafka commit error", "error", cerr)
-					}
-					pendingSkips = pendingSkips[:0]
-				}
-				continue
-			}
 			msgs = append(msgs, msg)
 		}
 		cancel()
-		if len(pendingSkips) > 0 {
-			if cerr := w.reader.CommitMessages(ctx, pendingSkips...); cerr != nil && ctx.Err() == nil {
-				w.log.Error("kafka commit error", "error", cerr)
-			}
-		}
 		if len(msgs) == 0 {
 			continue
 		}
