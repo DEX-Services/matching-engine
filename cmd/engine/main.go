@@ -259,6 +259,15 @@ func main() {
 			go writer.Run(ctx)
 			slog.Info("postgres writer started")
 		}
+		// Second, independent writer for market-maker desk order events
+		// (events.TopicMMEvents — see that constant's doc comment). Its own
+		// consumer group, its own goroutine, its own pace: whatever backlog
+		// MM desk churn produces here can never delay the writer above from
+		// persisting a real user's order.
+		if mmWriter, err := persistence.NewMMWriter(pool); err == nil {
+			go mmWriter.Run(ctx)
+			slog.Info("postgres mm-events writer started")
+		}
 
 		// Durable outbox: give the (already-started) Kafka publisher a
 		// fallback for events a broker outage kept out of Kafka

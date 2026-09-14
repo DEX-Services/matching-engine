@@ -55,10 +55,18 @@ type Outbox interface {
 //
 // Aiven Kafka requires SASL/PLAIN over TLS. Credentials come from the
 // environment variables set in .env.
+//
+// Two underlying kafka.Writer instances, not one writer with a per-message
+// topic override: routing a market-maker desk's churn to a physically
+// separate writer means a backlog/backpressure event on the MM topic's
+// internal batching queue can never delay or block the user-events
+// writer's own queue — see mmWriter's doc comment for the full routing
+// rationale.
 type KafkaPublisher struct {
-	writer *kafka.Writer
-	sub    <-chan *models.Event
-	log    *slog.Logger
+	writer   *kafka.Writer // TopicEvents: real user order events + all trades
+	mmWriter *kafka.Writer // TopicMMEvents: market-maker desk order events only
+	sub      <-chan *models.Event
+	log      *slog.Logger
 
 	// outbox is set via SetOutbox once Postgres is available (Kafka is
 	// constructed before Postgres in main.go's boot order — see that call
@@ -98,24 +106,27 @@ func NewKafkaPublisher(bus *Bus) (*KafkaPublisher, error) {
 		},
 	}
 
-	writer := kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{fmt.Sprintf("%s:%s", host, port)},
-		Topic:        TopicEvents,
-		Dialer:       dialer,
-		Balancer:     &kafka.Hash{}, // route by symbol key for ordering
-		BatchSize:    100,
-		BatchTimeout: 10 * time.Millisecond,
-		Async:        true, // fire-and-forget; durability is Kafka's job
-		RequiredAcks: int(kafka.RequireOne),
-		ErrorLogger:  kafka.LoggerFunc(func(msg string, a ...interface{}) {
-			slog.Error("kafka writer error", "msg", fmt.Sprintf(msg, a...))
-		}),
-	})
+	newWriter := func(topic string) *kafka.Writer {
+		return kafka.NewWriter(kafka.WriterConfig{
+			Brokers:      []string{fmt.Sprintf("%s:%s", host, port)},
+			Topic:        topic,
+			Dialer:       dialer,
+			Balancer:     &kafka.Hash{}, // route by symbol key for ordering
+			BatchSize:    100,
+			BatchTimeout: 10 * time.Millisecond,
+			Async:        true, // fire-and-forget; durability is Kafka's job
+			RequiredAcks: int(kafka.RequireOne),
+			ErrorLogger: kafka.LoggerFunc(func(msg string, a ...interface{}) {
+				slog.Error("kafka writer error", "topic", topic, "msg", fmt.Sprintf(msg, a...))
+			}),
+		})
+	}
 
 	return &KafkaPublisher{
-		writer: writer,
-		sub:    bus.Subscribe(50_000),
-		log:    slog.Default(),
+		writer:   newWriter(TopicEvents),
+		mmWriter: newWriter(TopicMMEvents),
+		sub:      bus.Subscribe(50_000),
+		log:      slog.Default(),
 	}, nil
 }
 
@@ -135,6 +146,17 @@ func (p *KafkaPublisher) Run(ctx context.Context) {
 	}
 }
 
+// isMarketMakerEvent reports whether evt should route to TopicMMEvents
+// instead of TopicEvents — see TopicMMEvents' doc comment for the full
+// rationale. Only order-lifecycle events (open/partial/filled/cancelled/
+// rejected) carry evt.Order; a TRADE event carries evt.Trade instead (with
+// only maker/taker order IDs, not the full Order), so this is naturally
+// false for every trade regardless of which side is a desk — a real fill
+// always goes to the user topic for settlement/audit purposes.
+func isMarketMakerEvent(evt *models.Event) bool {
+	return evt.Order != nil && evt.Order.IsMarketMaker
+}
+
 func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 	payload, err := json.Marshal(evt)
 	if err != nil {
@@ -145,6 +167,10 @@ func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 		Key:   []byte(fmt.Sprintf("%s-%s-%d", evt.Symbol, evt.Market, evt.SequenceNumber)),
 		Value: payload,
 		Time:  time.Now(),
+	}
+	writer := p.writer
+	if isMarketMakerEvent(evt) {
+		writer = p.mmWriter
 	}
 	// Even with Async:true, kafka-go's WriteMessages blocks once its internal
 	// outstanding-message queue is full — it only fires-and-forgets the
@@ -164,7 +190,7 @@ func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 	// keeps "dropped" from meaning "lost".
 	publishCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := p.writer.WriteMessages(publishCtx, msg); err != nil {
+	if err := writer.WriteMessages(publishCtx, msg); err != nil {
 		// Async writer queues internally; an error here means the queue is
 		// full or the context was cancelled — Kafka never actually received
 		// this event. Fall back to the durable outbox (persistence.OutboxWriter,
@@ -182,5 +208,9 @@ func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
 
 // Close shuts down the Kafka writer gracefully.
 func (p *KafkaPublisher) Close() error {
-	return p.writer.Close()
+	err := p.writer.Close()
+	if mmErr := p.mmWriter.Close(); mmErr != nil && err == nil {
+		err = mmErr
+	}
+	return err
 }

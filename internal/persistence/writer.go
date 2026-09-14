@@ -97,8 +97,32 @@ type Writer struct {
 	statusStarted atomic.Bool  // guards the one-shot 30s status ticker
 }
 
-// NewWriter creates a Kafka→Postgres writer.
+// NewWriter creates a Kafka→Postgres writer for events.TopicEvents (real
+// user order events + all trades), using KAFKA_WRITER_GROUP/
+// KAFKA_WRITER_START_OFFSET as before. Equivalent to
+// newWriterForTopic(pool, events.TopicEvents, "").
 func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
+	return newWriterForTopic(pool, events.TopicEvents, "")
+}
+
+// NewMMWriter creates a second, independent Kafka→Postgres writer for
+// events.TopicMMEvents (market-maker desk order events only — see that
+// topic's doc comment for why it's split off from TopicEvents). Runs a
+// separate consumer group (KAFKA_WRITER_GROUP, if set, with "-mm"
+// appended, so the two writers never fight over one group's offsets even
+// when KAFKA_WRITER_GROUP is overridden) so this writer's pace, batching,
+// and any backlog it accumulates are entirely independent of the
+// user-events writer — a busy or lagging MM writer can never delay a real
+// user's order from reaching Postgres via the other writer.
+func NewMMWriter(pool *pgxpool.Pool) (*Writer, error) {
+	return newWriterForTopic(pool, events.TopicMMEvents, "-mm")
+}
+
+// newWriterForTopic is NewWriter/NewMMWriter's shared constructor.
+// groupSuffix is appended to KAFKA_WRITER_GROUP (or defaultConsumerGroup)
+// so multiple Writer instances against different topics never share one
+// consumer group's committed offsets.
+func newWriterForTopic(pool *pgxpool.Pool, topic, groupSuffix string) (*Writer, error) {
 	host := os.Getenv("KAFKA_HOST")
 	port := os.Getenv("KAFKA_PORT")
 	if host == "" || port == "" {
@@ -156,10 +180,11 @@ func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
 	if group == "" {
 		group = defaultConsumerGroup
 	}
+	group += groupSuffix
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:        []string{fmt.Sprintf("%s:%s", host, port)},
-		Topic:          events.TopicEvents,
+		Topic:          topic,
 		GroupID:        group,
 		Dialer:         dialer,
 		MinBytes:       1 << 10,  // 1 KB per fetch
