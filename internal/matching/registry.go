@@ -17,26 +17,49 @@ type SymbolKey struct {
 // Pass nil to use NoopSettlement for all symbols.
 type SettlementFactory func(symbol string, market models.MarketType) SettlementHandler
 
+// SeqLookup returns the starting event-sequence number a newly constructed
+// engine for symbol should resume from — see Engine.seq's doc comment for
+// why this exists (without it, every engine restarts its sequence counter
+// at 0, which collides with pre-restart (symbol, sequence_number) rows
+// already in Postgres and silently drops that event's persisted history).
+// Implementations should return the highest sequence_number already
+// persisted for that symbol (0 if none), e.g. via
+// `SELECT COALESCE(MAX(sequence_number), 0) FROM events WHERE symbol = $1`.
+// May be nil, in which case every engine starts at 0 as before (this is the
+// expected/correct behavior with Postgres disabled, e.g. local dev without
+// POSTGRES_HOST set — there is no persisted history to resume from).
+//
+// Called from newEngine while Registry.mu's write lock is held (both
+// Register at startup and GetOrCreate's lazy per-instrument creation for
+// options/combos), so it should be a bounded, single fast query — not
+// something that can block indefinitely — since it stalls every other
+// registry operation on ANY symbol for its duration, not just this one.
+type SeqLookup func(symbol string) uint64
+
 // Registry manages a collection of matching engines, one per SymbolKey.
 // Onboarding a new trading pair is a runtime operation — no code change required.
 type Registry struct {
 	mu      sync.RWMutex
 	engines map[SymbolKey]*Engine
 
-	pub     EventPublisher
-	factory SettlementFactory
-	release ReleaseFunc
+	pub       EventPublisher
+	factory   SettlementFactory
+	release   ReleaseFunc
+	seqLookup SeqLookup
 }
 
 // NewRegistry creates a Registry. release may be nil (defaults to a no-op),
 // and is invoked for any resting maker order cancelled by self-trade
-// prevention so its reserved funds are returned to the ledger.
-func NewRegistry(pub EventPublisher, factory SettlementFactory, release ReleaseFunc) *Registry {
+// prevention so its reserved funds are returned to the ledger. seqLookup may
+// be nil (every engine then starts its sequence counter at 0, the prior
+// behavior) — see SeqLookup's doc comment.
+func NewRegistry(pub EventPublisher, factory SettlementFactory, release ReleaseFunc, seqLookup SeqLookup) *Registry {
 	return &Registry{
-		engines: make(map[SymbolKey]*Engine),
-		pub:     pub,
-		factory: factory,
-		release: release,
+		engines:   make(map[SymbolKey]*Engine),
+		pub:       pub,
+		factory:   factory,
+		release:   release,
+		seqLookup: seqLookup,
 	}
 }
 
@@ -163,5 +186,9 @@ func (r *Registry) newEngine(symbol string, market models.MarketType) *Engine {
 	if r.factory != nil {
 		sh = r.factory(symbol, market)
 	}
-	return NewEngine(symbol, market, r.pub, sh, r.release)
+	var startSeq uint64
+	if r.seqLookup != nil {
+		startSeq = r.seqLookup(symbol)
+	}
+	return NewEngine(symbol, market, r.pub, sh, r.release, startSeq)
 }

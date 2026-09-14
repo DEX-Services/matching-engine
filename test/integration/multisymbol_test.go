@@ -24,7 +24,7 @@ type noopBus struct{}
 func (noopBus) Publish(_ *models.Event) {}
 
 func newRegistry() *matching.Registry {
-	return matching.NewRegistry(noopBus{}, nil, nil)
+	return matching.NewRegistry(noopBus{}, nil, nil, nil)
 }
 
 func order(symbol string, side models.OrderSide, price, qty string) *models.Order {
@@ -169,7 +169,7 @@ func TestSequenceNumbersAreMonotonic(t *testing.T) {
 		sb.mu.Unlock()
 	}}
 
-	reg := matching.NewRegistry(bus, nil, nil)
+	reg := matching.NewRegistry(bus, nil, nil, nil)
 	defer reg.StopAll()
 	_, err := reg.Register("BTC-USDT", models.Spot)
 	require.NoError(t, err)

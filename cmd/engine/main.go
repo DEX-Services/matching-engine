@@ -149,8 +149,35 @@ func main() {
 		}
 	}
 
-	// Phase 2: Registry
-	reg := matching.NewRegistry(bus, settlementFactory, checker.Release)
+	// Postgres connects here — earlier than the rest of "Phase 5" below —
+	// specifically so newEngineSeqLookup can be built and handed to
+	// NewRegistry before any engine is constructed. Every engine's event
+	// sequence counter (matching.Engine.seq) MUST start from the highest
+	// sequence_number already persisted for its symbol, not from zero: a
+	// zero-valued counter after a restart reissues sequence numbers already
+	// claimed by pre-restart events, and the Kafka→Postgres writer's
+	// (symbol, sequence_number) idempotency claim then silently treats the
+	// new event as a duplicate and drops its order/trade rows — see
+	// SEQUENCE-RESET-HISTORY-LOSS-BUG.md at the workspace root for the full
+	// incident this was found from, and matching.Engine.seq's own doc
+	// comment. `Migrate` runs immediately after connecting so the `events`
+	// table (and its sequence_number column) is guaranteed to exist before
+	// newEngineSeqLookup's queries run, including for a brand-new symbol
+	// that has never been registered before. Phase 5 further down reuses
+	// this same pgPool/connectedPostgres rather than reconnecting.
+	var pgPool *pgxpool.Pool
+	connectedPostgres := os.Getenv("POSTGRES_HOST") != ""
+	if connectedPostgres {
+		pool, err := persistence.NewPool(ctx)
+		if err != nil {
+			slog.Warn("postgres disabled", "reason", err)
+			connectedPostgres = false
+		} else {
+			pgPool = pool
+			persistence.Migrate(ctx, pool)
+		}
+	}
+	reg := matching.NewRegistry(bus, settlementFactory, checker.Release, newEngineSeqLookup(ctx, pgPool))
 	defer reg.StopAll()
 
 	// Phase 7: Halt Registry
@@ -222,89 +249,84 @@ func main() {
 		}
 	}
 
-	// Phase 5: Postgres
+	// Phase 5: Postgres — connection + migration already happened above
+	// (before Registry construction, so engines' sequence counters could be
+	// restored); everything else Postgres-backed is wired up here as before.
 	var symbolRegistry *config.Registry
-	var pgPool *pgxpool.Pool
-	if os.Getenv("POSTGRES_HOST") != "" {
-		pool, err := persistence.NewPool(ctx)
-		if err != nil {
-			slog.Warn("postgres disabled", "reason", err)
+	if connectedPostgres {
+		pool := pgPool
+		if writer, err := persistence.NewWriter(pool); err == nil {
+			go writer.Run(ctx)
+			slog.Info("postgres writer started")
+		}
+
+		// Durable outbox: give the (already-started) Kafka publisher a
+		// fallback for events a broker outage kept out of Kafka
+		// entirely (see KafkaPublisher.publish's doc comment), and start
+		// the sweeper that drains event_outbox back into the normal
+		// tables. Postgres is set up after Kafka in this boot sequence
+		// (see Phase 4 above), so this wiring has to happen here rather
+		// than at KafkaPublisher construction.
+		if kafkaPub != nil {
+			kafkaPub.SetOutbox(persistence.NewOutboxWriter(pool))
+		}
+		go persistence.NewOutboxSweeper(pool, 10*time.Second).Run(ctx)
+
+		if err := config.EnsureSchema(ctx, pool); err != nil {
+			slog.Error("ensure symbol_configs schema", "error", err)
+		} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {
+			slog.Error("ensure option_instruments schema", "error", err)
+		} else if err := volsurface.EnsureSchema(ctx, pool); err != nil {
+			slog.Error("ensure iv_snapshots schema", "error", err)
+		} else if err := ensureComboSchema(ctx, pool); err != nil {
+			slog.Error("ensure combo_instruments schema", "error", err)
+		} else if err := feeconfig.EnsureSchema(ctx, pool); err != nil {
+			slog.Error("ensure fee_config schema", "error", err)
+		} else if err := discounts.EnsureSchema(ctx, pool); err != nil {
+			slog.Error("ensure fee_tiers/user_fee_subscriptions schema", "error", err)
 		} else {
-			pgPool = pool
-			persistence.Migrate(ctx, pool)
-			if writer, err := persistence.NewWriter(pool); err == nil {
-				go writer.Run(ctx)
-				slog.Info("postgres writer started")
-			}
-
-			// Durable outbox: give the (already-started) Kafka publisher a
-			// fallback for events a broker outage kept out of Kafka
-			// entirely (see KafkaPublisher.publish's doc comment), and start
-			// the sweeper that drains event_outbox back into the normal
-			// tables. Postgres is set up after Kafka in this boot sequence
-			// (see Phase 4 above), so this wiring has to happen here rather
-			// than at KafkaPublisher construction.
-			if kafkaPub != nil {
-				kafkaPub.SetOutbox(persistence.NewOutboxWriter(pool))
-			}
-			go persistence.NewOutboxSweeper(pool, 10*time.Second).Run(ctx)
-
-			if err := config.EnsureSchema(ctx, pool); err != nil {
-				slog.Error("ensure symbol_configs schema", "error", err)
-			} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {
-				slog.Error("ensure option_instruments schema", "error", err)
-			} else if err := volsurface.EnsureSchema(ctx, pool); err != nil {
-				slog.Error("ensure iv_snapshots schema", "error", err)
-			} else if err := ensureComboSchema(ctx, pool); err != nil {
-				slog.Error("ensure combo_instruments schema", "error", err)
-			} else if err := feeconfig.EnsureSchema(ctx, pool); err != nil {
-				slog.Error("ensure fee_config schema", "error", err)
-			} else if err := discounts.EnsureSchema(ctx, pool); err != nil {
-				slog.Error("ensure fee_tiers/user_fee_subscriptions schema", "error", err)
+			seedSymbolConfigs(ctx, pool)
+			feeconfig.SeedDefaults(ctx, pool)
+			discounts.SeedTiers(ctx, pool)
+			if feeReg, err := feeconfig.NewRegistry(ctx, pool); err != nil {
+				slog.Error("load fee config registry", "error", err)
 			} else {
-				seedSymbolConfigs(ctx, pool)
-				feeconfig.SeedDefaults(ctx, pool)
-				discounts.SeedTiers(ctx, pool)
-				if feeReg, err := feeconfig.NewRegistry(ctx, pool); err != nil {
-					slog.Error("load fee config registry", "error", err)
-				} else {
-					feeConfigRegistryRef.Store(feeReg)
-					go feeReg.StartHotReload(ctx, 10*time.Second)
-				}
-				if discReg, err := discounts.NewRegistry(ctx, pool); err != nil {
-					slog.Error("load discount registry", "error", err)
-				} else {
-					discountRegistryRef.Store(discReg)
-					go discReg.StartHotReload(ctx, 10*time.Second)
-				}
-				// See markets.go's optionsEnabled: seeding option_instruments
-				// rows and running the 6h re-seed ticker are pure overhead
-				// for a market nothing can trade on while it's flagged off.
-				if optionsEnabled {
-					seedOptionInstruments(ctx, pool)
-					// Re-check periodically, not just at boot: a long-lived
-					// process can outlive its seeded contracts' expiries (the
-					// shortest is 7 days) without ever restarting to trigger the
-					// boot-time reseed above.
-					go func() {
-						ticker := time.NewTicker(6 * time.Hour)
-						defer ticker.Stop()
-						for {
-							select {
-							case <-ctx.Done():
-								return
-							case <-ticker.C:
-								seedOptionInstruments(ctx, pool)
-							}
+				feeConfigRegistryRef.Store(feeReg)
+				go feeReg.StartHotReload(ctx, 10*time.Second)
+			}
+			if discReg, err := discounts.NewRegistry(ctx, pool); err != nil {
+				slog.Error("load discount registry", "error", err)
+			} else {
+				discountRegistryRef.Store(discReg)
+				go discReg.StartHotReload(ctx, 10*time.Second)
+			}
+			// See markets.go's optionsEnabled: seeding option_instruments
+			// rows and running the 6h re-seed ticker are pure overhead
+			// for a market nothing can trade on while it's flagged off.
+			if optionsEnabled {
+				seedOptionInstruments(ctx, pool)
+				// Re-check periodically, not just at boot: a long-lived
+				// process can outlive its seeded contracts' expiries (the
+				// shortest is 7 days) without ever restarting to trigger the
+				// boot-time reseed above.
+				go func() {
+					ticker := time.NewTicker(6 * time.Hour)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							seedOptionInstruments(ctx, pool)
 						}
-					}()
-				}
-				if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
-					slog.Error("load symbol config registry", "error", err)
-				} else {
-					symbolRegistry = cfgReg
-					go cfgReg.StartHotReload(ctx, time.Minute)
-				}
+					}
+				}()
+			}
+			if cfgReg, err := config.NewRegistry(ctx, pool); err != nil {
+				slog.Error("load symbol config registry", "error", err)
+			} else {
+				symbolRegistry = cfgReg
+				go cfgReg.StartHotReload(ctx, time.Minute)
 			}
 		}
 	}
@@ -1160,6 +1182,50 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// newEngineSeqLookup builds the matching.SeqLookup passed to
+// matching.NewRegistry: for a given symbol, it returns the highest
+// sequence_number already persisted in the events table, so a freshly
+// constructed engine's sequence counter resumes from there instead of
+// restarting at 0. See matching.Engine.seq's doc comment and
+// SEQUENCE-RESET-HISTORY-LOSS-BUG.md at the workspace root for why this
+// matters — without it, a post-restart event can be assigned a sequence
+// number that collides with a pre-restart one for the same symbol, and the
+// Kafka→Postgres writer's idempotency claim then silently drops that
+// event's order/trade rows (matching and settlement are unaffected; only
+// the persisted history is lost).
+//
+// pool may be nil (Postgres disabled, e.g. local dev without POSTGRES_HOST)
+// — every symbol then reports 0, which is correct: there is no persisted
+// history to resume from, so starting at 0 cannot collide with anything.
+func newEngineSeqLookup(ctx context.Context, pool *pgxpool.Pool) matching.SeqLookup {
+	return func(symbol string) uint64 {
+		if pool == nil {
+			return 0
+		}
+		var maxSeq uint64
+		// Bounded, separate timeout: this runs synchronously inside engine
+		// registration (including a lazy GetOrCreate for an options/combo
+		// contract at request time), so it must not hang the caller
+		// indefinitely on a slow/stuck query.
+		qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		err := pool.QueryRow(qctx,
+			`SELECT COALESCE(MAX(sequence_number), 0) FROM events WHERE symbol = $1`, symbol,
+		).Scan(&maxSeq)
+		if err != nil {
+			// Fail safe to 0 rather than fail engine startup over this: a
+			// wrong/stale MAX(sequence_number) read here can only ever make
+			// this specific gap MORE likely (same failure mode as today,
+			// not a new one), never cause a different kind of failure —
+			// this lookup exists purely to reduce an existing collision
+			// window, not as a correctness precondition for trading itself.
+			slog.Error("engine seq lookup failed, starting from 0", "symbol", symbol, "err", err)
+			return 0
+		}
+		return maxSeq
+	}
 }
 
 // requireEngineServiceAuth protects account-scoped endpoints from direct

@@ -75,7 +75,7 @@ func openShortOption(t *testing.T, os *settlement.OptionsSettlement, writer, sym
 }
 
 func newTestOptionsEngine(os *settlement.OptionsSettlement, md *marketdata.Service, bus *events.Bus) *Engine {
-	reg := matching.NewRegistry(bus, nil, nil)
+	reg := matching.NewRegistry(bus, nil, nil, nil)
 	return &Engine{options: os, marketdata: md, registry: reg, bus: bus, log: slog.Default()}
 }
 

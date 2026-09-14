@@ -97,7 +97,7 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	comboSettlement := settlement.NewComboSettlement(options, legs, marks)
 
 	comboSymbol := "COMBO:test"
-	eng := matching.NewEngine(comboSymbol, models.ComboOptions, noopBus{}, comboSettlement, nil)
+	eng := matching.NewEngine(comboSymbol, models.ComboOptions, noopBus{}, comboSettlement, nil, 0)
 	defer eng.Stop()
 
 	// Writer rests a SELL order on the combo book: willing to receive a net
@@ -190,7 +190,7 @@ func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 	comboSettlement := settlement.NewComboSettlement(options, legs, marks)
 
 	comboSymbol := "COMBO:condor-test"
-	eng := matching.NewEngine(comboSymbol, models.ComboOptions, noopBus{}, comboSettlement, nil)
+	eng := matching.NewEngine(comboSymbol, models.ComboOptions, noopBus{}, comboSettlement, nil, 0)
 	defer eng.Stop()
 
 	// Writer sells the condor (collects a credit); price -300 expresses a

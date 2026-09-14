@@ -94,37 +94,23 @@ type Engine struct {
 	book   *orderbook.Book
 
 	inputCh chan request
-	// seq is a per-symbol monotonic event sequence number, starting at 0
-	// every process boot — it is NEVER restored from Postgres on startup.
-	//
-	// KNOWN BUG (found 2026-09-14, not yet fixed — see AGENT NOTES or ask
-	// about "stuck lock / missing sell order" investigation from this date):
-	// internal/persistence/writer.go's applyEvent() uses (symbol,
-	// sequence_number) as the idempotency/dedupe key for writing an event's
-	// order/trade rows (`ON CONFLICT (symbol, sequence_number) DO NOTHING
-	// RETURNING true` — see events_symbol_seq unique index). Because this
-	// counter restarts at 0 on every engine restart while old (symbol,
-	// sequence_number) rows from BEFORE the restart are still in Postgres,
-	// any new event whose freshly-assigned sequence number collides with an
-	// old, already-persisted one for the same symbol is silently treated as
-	// "already claimed by a previous writer" and its order/trade rows are
-	// NEVER written — with no error logged anywhere. The trade still
-	// executes correctly (in-memory matching + real balance settlement are
-	// unaffected), so this is a HISTORY-ONLY gap, not a fund-safety bug —
-	// but it means an order (confirmed: a real filled SPOT sell) can vanish
-	// from order_history/fills/Trade History while the balance change it
-	// caused is completely correct. It recurs after every engine restart
-	// until live traffic on that symbol pushes sequence numbers past
-	// whatever high-water mark existed before the restart.
-	//
-	// Proper fix (not yet done — needs careful staging, not a rushed live
-	// change): restore this counter from
-	// `SELECT MAX(sequence_number) FROM events WHERE symbol = $1` before the
-	// engine starts accepting orders. This requires reordering cmd/engine/
-	// main.go's startup: today engines are registered (Registry.Register,
-	// which calls NewEngine) BEFORE pgPool is even connected, so Postgres
-	// needs to come up first and each engine's starting seq needs to be
-	// threaded through NewEngine/Registry rather than defaulting to zero.
+	// seq is a per-symbol monotonic event sequence number. It MUST be
+	// initialized (via NewEngine's startSeq) to the highest sequence_number
+	// already persisted in Postgres for this symbol, not left at zero — see
+	// internal/persistence/writer.go's applyEvent(), which uses (symbol,
+	// sequence_number) as its idempotency/dedupe key (`ON CONFLICT (symbol,
+	// sequence_number) DO NOTHING RETURNING true`, backed by the
+	// events_symbol_seq unique index). A zero-valued seq after a restart
+	// would reissue sequence numbers already claimed by pre-restart events
+	// for the same symbol; the writer would then treat the new event as
+	// "already persisted by a previous writer" and silently drop its
+	// order/trade rows — no error, no log line, and the affected order
+	// permanently vanishes from order_history/fills even though matching
+	// and balance settlement are completely unaffected (history-only, but a
+	// real incident: see SEQUENCE-RESET-HISTORY-LOSS-BUG.md at the
+	// workspace root for the postmortem this fixed). Restoration happens in
+	// cmd/engine/main.go via matching.SeqLookup, backed by
+	// `SELECT COALESCE(MAX(sequence_number), 0) FROM events WHERE symbol = $1`.
 	seq    atomic.Uint64
 	halted atomic.Bool
 
@@ -138,8 +124,12 @@ type Engine struct {
 }
 
 // NewEngine creates and immediately starts a matching engine goroutine.
-// release may be nil (defaults to a no-op).
-func NewEngine(symbol string, market models.MarketType, pub EventPublisher, sh SettlementHandler, release ReleaseFunc) *Engine {
+// release may be nil (defaults to a no-op). startSeq is the first sequence
+// number this engine's events will be numbered from — see Engine.seq's doc
+// comment for why this must be the highest sequence_number already
+// persisted for this symbol (0 for a symbol with no persisted history yet,
+// e.g. Postgres disabled locally or a genuinely new symbol).
+func NewEngine(symbol string, market models.MarketType, pub EventPublisher, sh SettlementHandler, release ReleaseFunc, startSeq uint64) *Engine {
 	if sh == nil {
 		sh = NoopSettlement{}
 	}
@@ -157,6 +147,7 @@ func NewEngine(symbol string, market models.MarketType, pub EventPublisher, sh S
 		stopCh:     make(chan struct{}),
 		done:       make(chan struct{}),
 	}
+	e.seq.Store(startSeq)
 	go e.run()
 	return e
 }
