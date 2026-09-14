@@ -522,6 +522,7 @@ func main() {
 			Leverage: leverage, MarginMode: q.Get("marginMode"), ReduceOnly: reduceOnly,
 			StopPrice:  stopPrice,
 			OptionType: q.Get("optionType"), StrikePrice: strike, Expiry: expiry,
+			IsMarketMaker: models.IsMarketMakerAccount(q.Get("account")),
 		}
 
 		snap, trades, status, err := submitOrderPipeline(r.Context(), submitDeps{

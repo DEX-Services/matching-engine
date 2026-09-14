@@ -90,6 +90,7 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 			Side: side, Type: orderType, Price: price, Quantity: qty,
 			TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			Leverage: leverage, MarginMode: q.Get("marginMode"), ReduceOnly: reduceOnly,
+			IsMarketMaker: models.IsMarketMakerAccount(q.Get("account")),
 		}
 
 		if entry.Market != models.Futures {

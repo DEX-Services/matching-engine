@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -111,6 +112,23 @@ type Order struct {
 	// AccountID is required for risk/balance checks (Phase 3+).
 	AccountID string `json:"accountId"`
 
+	// IsMarketMaker marks an order placed by one of the platform's own
+	// market-maker desks (bots service, accountID prefix "mm:" — see
+	// IsMarketMakerAccount) rather than a real user. Set once, at order
+	// creation (cmd/engine's /order handler), from AccountID's prefix — not
+	// user-supplied, not trusted from any request field, so it can't be
+	// spoofed by a real user claiming to be a desk.
+	//
+	// Exists so publishEvent can route a desk's routine quote-refresh
+	// churn (cancel+replace of its resting ladder roughly once per second,
+	// per level — see bots/internal/strategy/marketmaker.go's OnTick) onto
+	// a separate Kafka topic/writer from real user order events, instead of
+	// both sharing one queue. Before this, a single busy desk's order
+	// events could and did delay a real user's own trade from reaching
+	// order_history/fills by tens of seconds to minutes under load — see
+	// the incident writeups this was built to fix.
+	IsMarketMaker bool `json:"isMarketMaker,omitempty"`
+
 	// Leverage and MarginMode apply to futures only; ignored by spot/options.
 	Leverage   int    `json:"leverage,omitempty"`
 	MarginMode string `json:"marginMode,omitempty"` // "ISOLATED" | "CROSS"
@@ -175,6 +193,21 @@ func (o *Order) IsTerminal() bool {
 
 // IsBuy is a convenience helper.
 func (o *Order) IsBuy() bool { return o.Side == Buy }
+
+// IsMarketMakerAccount reports whether accountID belongs to one of the
+// platform's own market-maker desks (bots service), by its wallet-address
+// convention — see bots/internal/mm/service.go's walletFor: "mm:<BASE>:
+// <market>" (e.g. "mm:BI2X:spot"), lowercase market segment. Not
+// user-suppliable: a real user's account is always allocated as
+// "DEXUSER_<n>" (Dex-Backend/internal/repo/users.go), so this prefix check
+// can't be spoofed by a real user's own account ID.
+//
+// Used at order-creation time (cmd/engine's /order, /attached-order
+// handlers) to set Order.IsMarketMaker — see that field's doc comment for
+// why this distinction exists.
+func IsMarketMakerAccount(accountID string) bool {
+	return strings.HasPrefix(accountID, "mm:")
+}
 
 // Copy returns a shallow copy safe for handing to callers outside the
 // engine goroutine (all fields are value types, so shallow == deep here).

@@ -101,7 +101,11 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 					return
 				}
 			}
-			o := &models.Order{ID: uuid.NewString(), AccountID: req.Account, Symbol: req.Symbol, Market: market, Side: side, Type: models.Limit, Price: price, Quantity: qty, TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now()}
+			// This whole handler exists only for the platform's own
+			// market-maker desks (see the type doc comment above) — every
+			// order it creates is, by definition, market-maker-origin, not
+			// just accounts happening to match the "mm:" prefix.
+			o := &models.Order{ID: uuid.NewString(), AccountID: req.Account, Symbol: req.Symbol, Market: market, Side: side, Type: models.Limit, Price: price, Quantity: qty, TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(), IsMarketMaker: true}
 			if err := validateOrderConfig(d.symbolRegistry, o); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return

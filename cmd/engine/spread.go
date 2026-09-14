@@ -112,7 +112,8 @@ func spreadHandler(d submitDeps) http.HandlerFunc {
 			ID: uuid.NewString(), AccountID: req.Account, Market: models.ComboOptions,
 			Side: side, Type: orderType, Price: price, Quantity: qty,
 			TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
-			ComboLegs: req.Legs,
+			ComboLegs:     req.Legs,
+			IsMarketMaker: models.IsMarketMakerAccount(req.Account),
 		}
 
 		snap, trades, status, err := submitOrderPipeline(r.Context(), d, order, req.SlippageBps)
