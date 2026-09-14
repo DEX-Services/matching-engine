@@ -157,7 +157,38 @@ func isMarketMakerEvent(evt *models.Event) bool {
 	return evt.Order != nil && evt.Order.IsMarketMaker
 }
 
+// shouldPublishMarketMakerEvent reports whether a market-maker-origin event
+// is worth persisting at all. Requested 2026-09-14: a desk's placed/
+// cancelled/replaced quotes (ORDER_ACCEPTED/OPEN/PARTIALLY_FILLED/CANCELLED/
+// REJECTED/EXPIRED) are pure requoting churn — a desk cancels and replaces
+// its resting quotes continuously just to track the price, so this dwarfs
+// real user traffic in volume while carrying no information anyone needs:
+// nobody debugs a live incident from a bot's routine quote churn, and the
+// live order book state itself lives in the engine's in-memory book, not in
+// Kafka/Postgres, so dropping these here has no effect on trading, matching,
+// balances, or what's rendered to users. Only ORDER_FILLED (the desk's order
+// fully filled, i.e. a real trade happened) is published: that IS real
+// trading history and must be durable for settlement/audit/PnL, same as any
+// user's fill.
+//
+// Deliberately not batching filled MM events either (each is published
+// immediately, same as before) — batching was considered and rejected: fill
+// volume is low relative to the churn being dropped here, so there is little
+// per-message overhead left to amortize, while batching would add both
+// staleness (fills invisible in history until the next flush) and a crash
+// window (an in-memory batch lost before it flushes). If this needs
+// revisiting, see the conversation from 2026-09-14 for the reasoning.
+//
+// User-origin events are entirely unaffected by this function — it is only
+// ever consulted for events where isMarketMakerEvent(evt) is already true.
+func shouldPublishMarketMakerEvent(evt *models.Event) bool {
+	return evt.Type == models.EventOrderFilled
+}
+
 func (p *KafkaPublisher) publish(ctx context.Context, evt *models.Event) {
+	if isMarketMakerEvent(evt) && !shouldPublishMarketMakerEvent(evt) {
+		return
+	}
 	payload, err := json.Marshal(evt)
 	if err != nil {
 		p.log.Error("failed to marshal event", "error", err)
