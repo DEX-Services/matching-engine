@@ -120,20 +120,31 @@ func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
 		},
 	}
 
-	// MinBytes is deliberately large: with MinBytes=1 the broker answers each
-	// fetch as soon as a single byte is ready, so every network round-trip
-	// (~200ms on the hosted broker link) carried only a handful of messages —
-	// replaying a multi-million-message backlog took hours and the writer
-	// appeared wedged. 512KB makes each round-trip carry thousands of
-	// messages; MaxWait=1s bounds the latency cost during normal live
-	// operation (persistence is an async analytics path, so ≤1s lag there is
-	// fine, and it also produces bigger, cheaper DB batches).
+	// MinBytes/MaxWait tuning history: this was originally MinBytes=512KB,
+	// MaxWait=1s, on the theory that MinBytes=1 made the broker answer every
+	// fetch as soon as a single byte was ready, wasting round-trips during a
+	// large backlog replay. In practice this made ordinary LIVE latency far
+	// worse than intended: confirmed live 2026-09-14 (see
+	// RECONCILE-BALANCE-WIPE-BUG.md and SEQUENCE-RESET-HISTORY-LOSS-BUG.md
+	// for the same incident session) — a freshly placed order sat in a
+	// consumer lag that only drained in ~200-message bursts roughly every
+	// 90 SECONDS, not the ~1s MaxWait should have bounded this to. A
+	// 512KB minimum on a topic whose messages are a few hundred bytes each
+	// means the broker holds the fetch open far longer than MaxWait alone
+	// would suggest is possible for kafka-go's batching semantics on this
+	// specific hosted (Aiven) broker. Lowered MinBytes to 1KB (a handful of
+	// messages, not a single byte) and MaxWait to 250ms: still batches
+	// reasonably under load (Run's own 50ms opportunistic drain window on
+	// top of this still coalesces a busy stream into large transactions),
+	// but live orders now reach order_history/fills within roughly the
+	// MaxWait bound instead of an unbounded, silently-growing wait.
 	//
 	// StartOffset applies only when the group has no committed offset yet.
-	// Default is FirstOffset (earliest retained): combined with the
-	// pre-session skip in Run, a fresh group replays and discards old history
-	// instead of either losing it or double-writing it; once the group has
-	// committed offsets, restarts resume from there as before. Set
+	// Default is FirstOffset (earliest retained) — a fresh group replays
+	// full retained history rather than skipping it (see the removed
+	// timestamp-based skip in this file's git history for why that must
+	// never silently discard real backlog); once the group has committed
+	// offsets, restarts resume from there as before. Set
 	// KAFKA_WRITER_START_OFFSET=latest to skip the replay on fresh groups
 	// (instant catch-up; only sensible when losing pre-boot history on a
 	// FRESH group is acceptable — committed-offset restarts are unaffected).
@@ -151,9 +162,9 @@ func NewWriter(pool *pgxpool.Pool) (*Writer, error) {
 		Topic:          events.TopicEvents,
 		GroupID:        group,
 		Dialer:         dialer,
-		MinBytes:       512 << 10, // 512 KB per fetch
-		MaxBytes:       10 << 20,  // 10 MB
-		MaxWait:        time.Second,
+		MinBytes:       1 << 10,  // 1 KB per fetch
+		MaxBytes:       10 << 20, // 10 MB
+		MaxWait:        250 * time.Millisecond,
 		CommitInterval: 0, // manual commits only (CommitMessages in Run)
 		StartOffset:    startOffset,
 	})
