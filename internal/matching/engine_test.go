@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -86,4 +87,92 @@ func TestNewEngineDefaultsToZeroStartSeq(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for the engine to publish an event")
 	}
+}
+
+// countingRelease is a ReleaseFunc that records every order it was called
+// with, safe for concurrent use — used below to prove release happens
+// exactly once per cancelled order no matter how many concurrent Cancel
+// calls raced for it.
+type countingRelease struct {
+	mu    sync.Mutex
+	calls []string // order IDs release was invoked for, in call order
+}
+
+func (c *countingRelease) release(o *models.Order) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, o.ID)
+}
+
+func (c *countingRelease) countFor(orderID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, id := range c.calls {
+		if id == orderID {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCancel_ReleasesExactlyOnceUnderConcurrentDuplicateCancels is a
+// regression test for a live incident: a resting SPOT order vanished from
+// the book (no fill, no error logged anywhere) while its reservation stayed
+// locked forever. Root cause: the release call used to happen in the HTTP
+// handler (cmd/engine/main.go's /cancel), as a THIRD, separate round-trip
+// into this same single-threaded engine goroutine, after a first
+// existence-check round-trip and a second Cancel round-trip — a genuine
+// check-then-act race window in which a duplicate/retried cancel (or a
+// fill, or an STP-cancel) for the same order could interleave. Fixed by
+// moving the release into the SAME atomic step that removes the order from
+// the book (the reqCancel case in Engine.handle), exactly like
+// postProcessAndCancel's e.release(c) call for STP-cancelled orders.
+//
+// This test fires many concurrent Cancel calls for the same resting order
+// (simulating a duplicate/retried cancel racing itself) and asserts: exactly
+// one succeeds, release is invoked for that order exactly once (not zero,
+// not more than once), and every other call gets a clean "already
+// gone"-shaped error rather than silently doing nothing.
+func TestCancel_ReleasesExactlyOnceUnderConcurrentDuplicateCancels(t *testing.T) {
+	bus := newCapturingBus()
+	rel := &countingRelease{}
+	eng := NewEngine("BI2X-BI2XUSD", models.Spot, bus, nil, rel.release, 0)
+	defer eng.Stop()
+
+	order := testOrder("BI2X-BI2XUSD", models.Buy, "8.70", "1")
+	_, err := eng.Submit(order)
+	require.NoError(t, err)
+
+	const concurrentCancels = 20
+	var wg sync.WaitGroup
+	successes := make(chan *models.Order, concurrentCancels)
+	errs := make(chan error, concurrentCancels)
+	wg.Add(concurrentCancels)
+	for i := 0; i < concurrentCancels; i++ {
+		go func() {
+			defer wg.Done()
+			o, err := eng.Cancel(order.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			successes <- o
+		}()
+	}
+	wg.Wait()
+	close(successes)
+	close(errs)
+
+	successCount := 0
+	for range successes {
+		successCount++
+	}
+	errCount := 0
+	for range errs {
+		errCount++
+	}
+	require.Equal(t, 1, successCount, "exactly one of the concurrent duplicate cancels should succeed")
+	require.Equal(t, concurrentCancels-1, errCount, "every other duplicate cancel should cleanly fail, not silently succeed or hang")
+	require.Equal(t, 1, rel.countFor(order.ID), "release must be invoked exactly once for the order regardless of how many duplicate cancels raced for it — either 0 (never released, funds stuck) or >1 (over-released, stealing a different order's reservation) would both be the bug this test guards against")
 }

@@ -339,6 +339,25 @@ func (e *Engine) handle(req request) {
 		res.order = order
 		res.err = err
 		if err == nil {
+			// Fixed 2026-09-15: release used to happen in the HTTP handler
+			// (cmd/engine/main.go's /cancel), as a SEPARATE round-trip into
+			// this same single-threaded engine goroutine after this one
+			// (OrderByID to check existence, then this reqCancel to remove
+			// it, then a THIRD, out-of-band call to checker.Release). Between
+			// those round-trips, arbitrary other requests for this symbol
+			// could be processed — a genuine check-then-act race, not a
+			// hypothetical one, found investigating a live incident where a
+			// resting SPOT order vanished from the book (no fill, no log)
+			// while its reservation stayed locked forever. Cancelling here,
+			// in the same atomic step that removes the order from the book
+			// (this whole switch runs on one goroutine per symbol, exactly
+			// like postProcessAndCancel's e.release(c) call for STP-cancelled
+			// orders above), makes "removed from book" and "funds released"
+			// the same indivisible action instead of two separate ones with
+			// a gap between them where a dropped connection, a retry racing
+			// itself, or any other interleaved request could leave the
+			// reservation stranded with no order left to release it against.
+			e.release(order)
 			e.publishEvent(models.EventOrderCancelled, order, nil)
 		}
 

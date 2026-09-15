@@ -600,19 +600,55 @@ func main() {
 		}
 		order, err := reg.Cancel(symbol, market, orderID)
 		if err != nil {
+			// Fixed 2026-09-15: this branch used to be completely silent — a
+			// bare 404 with no log line at all. Found investigating a live
+			// incident where a resting SPOT order vanished from the book (no
+			// fill, no error, no trace anywhere) while its reservation stayed
+			// locked forever: OrderByID (above) and this Cancel call are two
+			// SEPARATE round-trips into the single-threaded engine goroutine
+			// for this symbol, so anything else touching this order in
+			// between (a fill, a duplicate/retried cancel racing this one,
+			// an STP cancel) can make this second round-trip land on an
+			// order that's already gone. That is not itself a fund-safety
+			// bug anymore (see the reqCancel case in matching.Engine's
+			// handler, which now releases the reservation in the SAME atomic
+			// step it removes the order from the book, so whichever request
+			// actually wins the race still releases correctly) — but this
+			// request specifically did nothing, and previously nothing said
+			// so. Logging here turns "silently vanished, no trace" into a
+			// diagnosable, correlatable event if this ever recurs.
+			slog.Warn("cancel: order not found on second lookup (likely raced a fill/STP-cancel/duplicate cancel)",
+				"symbol", symbol, "market", market, "order_id", orderID, "account", accountID, "error", err)
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		// Release whatever remains reserved for the unfilled portion. Safe
-		// for partial fills: order.Filled reflects everything settled before
-		// cancel, so RemainingQty() is exactly what's still held.
+		// The reservation itself is now released inside matching.Engine's
+		// reqCancel handler (internal/matching/engine.go), in the same
+		// atomic step that removes the order from the book — see that call
+		// site's comment for why. This handler must NOT also call
+		// checker.Release/ledger.Release for the same order: Ledger.Release
+		// floors at zero rather than erroring on over-release, so a second,
+		// redundant call here would silently zero out a DIFFERENT still-open
+		// order's legitimate reservation for this account+asset instead of
+		// safely no-op'ing. What remains here is purely computing which
+		// asset/amount was released (a pure read, not a mutation) so the
+		// durable Postgres-side unlock can still happen.
 		if order.Type == models.Stop && !order.Price.IsPositive() {
 			// Stop-market orders were reserved at submission time against an
 			// estimated worst-case price (best opposite quote then), which
-			// the order itself doesn't retain. Re-estimate at cancel time —
-			// this is at least as conservative as the original reservation
-			// in a typical market and avoids leaving funds permanently
-			// locked for a cancelled, never-triggered stop.
+			// the order itself doesn't retain. Checker.Release (and so
+			// matching.Engine's reqCancel, which now calls it atomically —
+			// see that call site) is a documented no-op for this exact case,
+			// since it can't reconstruct the estimate from the order alone
+			// (see Checker.Release's own comment). This branch is therefore
+			// still the ONLY place that releases a cancelled stop-market's
+			// reservation — unlike the normal branch below, this one is not
+			// redundant with the engine's atomic release and must keep doing
+			// both the in-memory ledger release and the durable unlock.
+			// Re-estimating at cancel time is at least as conservative as
+			// the original reservation in a typical market and avoids
+			// leaving funds permanently locked for a cancelled,
+			// never-triggered stop.
 			asset := ""
 			if eng, gerr := reg.Get(order.Symbol, order.Market); gerr == nil {
 				var estPrice decimal.Decimal
@@ -638,14 +674,11 @@ func main() {
 					}
 				}
 			}
-		} else {
-			checker.Release(order)
-			if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
-				// Wait for the durable release before acknowledging cancellation;
-				// market makers immediately replace cancelled orders.
-				if err := backend.Unlock(r.Context(), order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount)); err != nil {
-					slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
-				}
+		} else if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
+			// Wait for the durable release before acknowledging cancellation;
+			// market makers immediately replace cancelled orders.
+			if err := backend.Unlock(r.Context(), order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount)); err != nil {
+				slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
 			}
 		}
 		writeJSON(w, http.StatusOK, OrderResponse{
