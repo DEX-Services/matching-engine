@@ -176,3 +176,61 @@ func TestCancel_ReleasesExactlyOnceUnderConcurrentDuplicateCancels(t *testing.T)
 	require.Equal(t, concurrentCancels-1, errCount, "every other duplicate cancel should cleanly fail, not silently succeed or hang")
 	require.Equal(t, 1, rel.countFor(order.ID), "release must be invoked exactly once for the order regardless of how many duplicate cancels raced for it — either 0 (never released, funds stuck) or >1 (over-released, stealing a different order's reservation) would both be the bug this test guards against")
 }
+
+// TestEngine_CheckMarkPriceTriggers_FiresThroughTheGoroutine is an
+// integration-level check that Engine.CheckMarkPriceTriggers (the new
+// reqCheckMarkPriceTriggers request kind, added 2026-09-16 alongside
+// orderbook.Book.CheckMarkPriceTriggers) correctly routes through the
+// engine's single-threaded request/response plumbing and publishes the
+// triggered order's resulting event — not just that the underlying Book
+// method itself works (covered directly in internal/orderbook's tests).
+func TestEngine_CheckMarkPriceTriggers_FiresThroughTheGoroutine(t *testing.T) {
+	bus := newCapturingBus()
+	eng := NewEngine("BI2X-BI2XUSD", models.Futures, bus, nil, nil, 0)
+	defer eng.Stop()
+
+	stop := testOrder("BI2X-BI2XUSD", models.Buy, "0", "1")
+	stop.Market = models.Futures
+	stop.AccountID = "buyer-acct" // distinct from the resting ask below: same account would self-trade-prevent and cancel instead of fill
+	stop.Type = models.Stop
+	stop.StopPrice = decimal.RequireFromString("100")
+	_, err := eng.Submit(stop)
+	require.NoError(t, err)
+	// Drain the OPEN event for the resting stop itself before asserting on
+	// what CheckMarkPriceTriggers publishes below.
+	select {
+	case <-bus.seqs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the resting stop order's OPEN event")
+	}
+
+	// Rest an ask for the triggered stop-buy to match against.
+	ask := testOrder("BI2X-BI2XUSD", models.Sell, "101", "1")
+	ask.Market = models.Futures
+	ask.AccountID = "seller-acct"
+	_, err = eng.Submit(ask)
+	require.NoError(t, err)
+	select {
+	case <-bus.seqs: // the resting ask's own OPEN event
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the resting ask order's OPEN event")
+	}
+
+	// Mark price at/above trigger: CheckMarkPriceTriggers should fire the
+	// stop and return the resulting trade, with NO trade ever having
+	// occurred on this book (lastTradePrice is still its zero value) —
+	// proving this really goes through the mark-price path, not
+	// processStopTriggers/lastTradePrice.
+	trades := eng.CheckMarkPriceTriggers(decimal.RequireFromString("100"))
+	require.Len(t, trades, 1, "mark price crossing the stop's trigger should produce exactly one trade")
+
+	// The engine must have published at least one resulting event for the
+	// activated stop — confirms handle()'s reqCheckMarkPriceTriggers case
+	// correctly drains and publishes activations rather than silently
+	// mutating the book with no visible event at all.
+	select {
+	case <-bus.seqs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for a post-trigger event; the activated stop's fill should have been published")
+	}
+}

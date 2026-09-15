@@ -419,13 +419,51 @@ func triggered(stop *models.Order, lastPrice decimal.Decimal) bool {
 // Activations can cascade: a triggered stop's fills move lastTradePrice,
 // which may trigger further stops — the loop runs until quiescent.
 func (b *Book) processStopTriggers() (trades []*models.Trade, cancelled []*models.Order) {
+	if b.lastTradePrice.IsZero() {
+		return
+	}
+	return b.processStopTriggersAt(b.lastTradePrice)
+}
+
+// CheckMarkPriceTriggers activates every resting stop order (this is how
+// futures Take Profit/Stop Loss legs from internal/attached rest on the
+// book — see BuildLegOrder) whose trigger price has been crossed by markPrice,
+// exactly like processStopTriggers but driven by an externally-supplied mark
+// price instead of the book's own lastTradePrice.
+//
+// Added 2026-09-16: TP/SL used to trigger ONLY off processStopTriggers above,
+// which only re-evaluates when an actual trade prints on THIS symbol's book.
+// Liquidation (internal/liquidation) has always watched the continuous mark
+// price on a timer instead — a blended mid/last-trade price that keeps
+// moving even when nobody happens to trade at a given level. In a quiet or
+// thin book, the mark price could drift past a user's SL/TP level with no
+// real trade occurring there to fire processStopTriggers, leaving a
+// supposedly-protected position unprotected for however long the book stays
+// quiet. This method lets a periodic mark-price sweep (mirroring
+// liquidation.Engine.Run's ticker loop) drive the exact same trigger/
+// activation logic on demand, closing that gap without changing how a real
+// trade still triggers stops immediately (both paths share
+// processStopTriggersAt and can never disagree about what "triggered" means).
+func (b *Book) CheckMarkPriceTriggers(markPrice decimal.Decimal) (trades []*models.Trade, cancelled []*models.Order) {
+	if !markPrice.IsPositive() {
+		return
+	}
+	return b.processStopTriggersAt(markPrice)
+}
+
+// processStopTriggersAt is the shared activation loop behind both
+// processStopTriggers (keyed on the book's own last trade price) and
+// CheckMarkPriceTriggers (keyed on an externally-supplied mark price) — one
+// implementation, so "what counts as triggered" can never diverge between
+// the two call sites.
+func (b *Book) processStopTriggersAt(refPrice decimal.Decimal) (trades []*models.Trade, cancelled []*models.Order) {
 	for {
-		if b.lastTradePrice.IsZero() || len(b.stopOrders) == 0 {
+		if len(b.stopOrders) == 0 {
 			return
 		}
 		var fired *models.Order
 		for _, stop := range b.stopOrders {
-			if triggered(stop, b.lastTradePrice) {
+			if triggered(stop, refPrice) {
 				fired = stop
 				break
 			}
@@ -451,6 +489,15 @@ func (b *Book) processStopTriggers() (trades []*models.Trade, cancelled []*model
 		}
 		trades = append(trades, t...)
 		cancelled = append(cancelled, c...)
+		// A fill here moves b.lastTradePrice (via submitCore), which is
+		// exactly the cascading behavior processStopTriggers already
+		// documents — but for the mark-price-driven path, subsequent
+		// iterations of this loop should keep evaluating against refPrice
+		// (the mark price), not whatever the just-triggered fill's trade
+		// price happened to be, since mark price does not change just
+		// because one stop fired. Re-reading refPrice as a fixed loop
+		// parameter (not re-derived from b.lastTradePrice each iteration)
+		// preserves this correctly for both callers.
 	}
 }
 

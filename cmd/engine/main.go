@@ -398,6 +398,7 @@ func main() {
 		return rate
 	})
 	go liqEngine.Run(ctx, time.Second)
+	go runMarkPriceTriggerSweep(ctx, reg, mdSvc, time.Second)
 
 	fundingScheduler := settlement.NewFundingScheduler(futuresSettlement, mdSvc, symbolRegistry, bus, pgPool)
 	go fundingScheduler.Run(ctx, time.Minute)
@@ -1225,6 +1226,56 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// runMarkPriceTriggerSweep periodically drives Engine.CheckMarkPriceTriggers
+// for every registered FUTURES symbol, on the same 1s cadence
+// liquidation.Engine already sweeps positions on.
+//
+// Added 2026-09-16: closes a real gap in Take Profit / Stop Loss protection.
+// A resting stop order (this is how a futures TP/SL leg from internal/
+// attached actually rests on the book — see BuildLegOrder) previously only
+// got re-evaluated automatically as a side effect of a NEW trade printing on
+// that same symbol's book (orderbook.Book.processStopTriggers, invoked from
+// every Submit). Liquidation, by contrast, has always watched the
+// continuous mark price (marketdata.Service's blended mid/last-trade price)
+// on this same kind of timer instead of waiting for a trade. In a quiet or
+// thin book, the mark price can drift past a user's SL/TP level with no
+// real trade occurring there to fire the old path — a supposedly-protected
+// position would stay unprotected until the next real trade happened to
+// occur at that price, however long that took. This sweep makes TP/SL use
+// the same continuously-watched mark price liquidation already relies on,
+// without changing how a real trade still triggers stops immediately (both
+// paths ultimately share orderbook.Book's processStopTriggersAt, so they
+// can never disagree about what "triggered" means).
+//
+// Iterates reg.Symbols() (not a static market list) so it automatically
+// covers every futures book that exists at sweep time, including any
+// created after startup.
+func runMarkPriceTriggerSweep(ctx context.Context, reg *matching.Registry, mdSvc *marketdata.Service, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			for _, key := range reg.Symbols() {
+				if key.Market != models.Futures {
+					continue // TP/SL is futures-only (see trade.go's attached-order handler)
+				}
+				eng, err := reg.Get(key.Symbol, key.Market)
+				if err != nil {
+					continue // unregistered between Symbols() and Get(): benign race, skip this tick
+				}
+				t, terr := mdSvc.Ticker(key.Symbol, key.Market)
+				if terr != nil || !t.MarkPrice.IsPositive() {
+					continue // no mark price yet for this symbol: nothing to check against
+				}
+				eng.CheckMarkPriceTriggers(t.MarkPrice)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // newEngineSeqLookup builds the matching.SeqLookup passed to

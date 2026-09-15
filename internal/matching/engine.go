@@ -29,19 +29,21 @@ const (
 	reqOrderByID
 	reqDepth
 	reqReplaceAccountOrders
+	reqCheckMarkPriceTriggers
 )
 
 type request struct {
-	kind     reqKind
-	order    *models.Order   // reqSubmit
-	orderID  string          // reqCancel / reqModify
-	newPrice decimal.Decimal // reqModify
-	newQty   decimal.Decimal // reqModify
-	levels   int             // reqDepth
-	account  string          // reqReplaceAccountOrders
-	orders   []*models.Order // reqReplaceAccountOrders
-	snapshot bool            // reqSubmit: also populate result.orderSnapshot
-	resultCh chan<- result
+	kind      reqKind
+	order     *models.Order   // reqSubmit
+	orderID   string          // reqCancel / reqModify
+	newPrice  decimal.Decimal // reqModify
+	newQty    decimal.Decimal // reqModify
+	levels    int             // reqDepth
+	account   string          // reqReplaceAccountOrders
+	orders    []*models.Order // reqReplaceAccountOrders
+	snapshot  bool            // reqSubmit: also populate result.orderSnapshot
+	markPrice decimal.Decimal // reqCheckMarkPriceTriggers
+	resultCh  chan<- result
 }
 
 type result struct {
@@ -194,6 +196,21 @@ func (e *Engine) Modify(orderID string, newPrice, newQty decimal.Decimal) (*mode
 	e.inputCh <- request{kind: reqModify, orderID: orderID, newPrice: newPrice, newQty: newQty, resultCh: ch}
 	r := <-ch
 	return r.order, r.trades, r.err
+}
+
+// CheckMarkPriceTriggers evaluates every resting stop order (this is how
+// futures TP/SL legs rest on the book, alongside manually-placed stops)
+// against markPrice, activating any whose trigger level has been crossed —
+// see reqCheckMarkPriceTriggers's doc comment in handle() for the gap this
+// closes (stop triggering used to depend entirely on an actual trade
+// printing at the trigger level). Safe to call frequently/periodically; a
+// no-op when nothing is triggered. Blocks until processed by the engine
+// goroutine, consistent with Submit/Cancel/Modify.
+func (e *Engine) CheckMarkPriceTriggers(markPrice decimal.Decimal) []*models.Trade {
+	ch := make(chan result, 1)
+	e.inputCh <- request{kind: reqCheckMarkPriceTriggers, markPrice: markPrice, resultCh: ch}
+	r := <-ch
+	return r.trades
 }
 
 // AllOrders returns every resting order in this engine's book. Blocks until
@@ -368,6 +385,43 @@ func (e *Engine) handle(req request) {
 		res.err = err
 		if err == nil {
 			e.postProcessAndCancel(order, trades, cancelled)
+		}
+
+	case reqCheckMarkPriceTriggers:
+		// Added 2026-09-16: closes a real gap in TP/SL protection.
+		// processStopTriggers (invoked automatically on every reqSubmit) only
+		// re-evaluates resting stop orders against the book's own last trade
+		// price — a real trade has to print at the trigger level. Liquidation
+		// has always instead watched the continuous mark price on a timer;
+		// TP/SL stop-loss legs (internal/attached's BuildLegOrder) had no
+		// equivalent, so a mark price drifting past a user's SL level in a
+		// quiet/thin book would not fire it until the next real trade
+		// happened to occur there. cmd/engine wires a periodic sweep (see
+		// that package's mark-price trigger loop, mirroring
+		// liquidation.Engine.Run) that calls this for every FUTURES symbol.
+		// No incoming "taker" order exists here (unlike reqSubmit/reqModify),
+		// so this publishes only the activated stops' own resulting state and
+		// releases whatever the triggering cancelled (e.g. an OCO sibling via
+		// internal/attached's listener reacting to the activation event) —
+		// there is deliberately no postProcess(order, ...) call to skip here.
+		trades, cancelled := e.book.CheckMarkPriceTriggers(req.markPrice)
+		res.trades = trades
+		for _, activated := range e.book.DrainActivated() {
+			switch activated.Status {
+			case models.StatusOpen:
+				e.publishEvent(models.EventOrderOpen, activated, nil)
+			case models.StatusPartiallyFilled:
+				e.publishEvent(models.EventOrderPartial, activated, nil)
+			case models.StatusFilled:
+				e.publishEvent(models.EventOrderFilled, activated, nil)
+			case models.StatusCancelled:
+				e.publishEvent(models.EventOrderCancelled, activated, nil)
+			case models.StatusRejected:
+				e.publishEvent(models.EventOrderRejected, activated, nil)
+			}
+		}
+		for _, c := range cancelled {
+			e.release(c)
 		}
 
 	case reqAllOrders:
