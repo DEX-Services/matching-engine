@@ -200,10 +200,32 @@ func (b *Book) Depth(levels int) (bids, asks []LevelSnapshot) {
 	return
 }
 
-// OrderByID returns a copy of a resting order without removing it.
+// OrderByID returns a copy of a resting order without removing it, checking
+// both the matchable book (orderIndex) and untriggered stop orders
+// (stopOrders — see Book's own field doc comment: these are deliberately
+// NOT part of the matchable book, but they are very much real, live,
+// cancellable orders).
+//
+// Fixed 2026-09-16: this only ever checked orderIndex, so any untriggered
+// stop order (a manually-placed STOP, or — the case that surfaced this live —
+// a Stop-Loss leg from internal/attached, which BuildLegOrder deliberately
+// builds as a STOP order so it activates as a market order once triggered)
+// was invisible here. cmd/engine's /cancel handler calls this FIRST as an
+// existence/ownership pre-check before ever calling Book.Cancel (which
+// itself already correctly handles stopOrders, and always has) — so a
+// perfectly real, resting, correctly-reserved stop order could never be
+// cancelled through the normal user-facing action at all: the pre-check
+// always 404'd "order not found" before Book.Cancel was ever reached, even
+// though cancelling it would have worked fine. Checking both maps here
+// closes that gap without touching Book.Cancel's already-correct logic.
 func (b *Book) OrderByID(orderID string) (*models.Order, bool) {
-	o, ok := b.orderIndex[orderID]
-	return o.Copy(), ok
+	if o, ok := b.orderIndex[orderID]; ok {
+		return o.Copy(), true
+	}
+	if o, ok := b.stopOrders[orderID]; ok {
+		return o.Copy(), true
+	}
+	return nil, false
 }
 
 // AllOrders returns a copy of every resting order in the book, unordered,

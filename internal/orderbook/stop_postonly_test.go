@@ -36,9 +36,15 @@ func TestStopMarket_RestsUntriggered_ThenFiresOnLastTradePrice(t *testing.T) {
 	if stop.Status != models.StatusOpen {
 		t.Fatalf("stop order status = %s, want OPEN (resting untriggered)", stop.Status)
 	}
-	// Not yet in the matchable book or its own resting order.
-	if _, ok := b.OrderByID("stop1"); ok {
-		t.Fatal("untriggered stop should not appear in the live order index")
+	// Not yet in the matchable book (bids/asks) — it only rests in
+	// stopOrders until triggered. It IS still a real, resting, cancellable
+	// order, and OrderByID must find it there: fixed 2026-09-16 after a live
+	// incident where a resting Stop-Loss leg (from internal/attached) could
+	// never be cancelled through /cancel at all, because OrderByID's
+	// pre-check only looked in orderIndex — this assertion used to require
+	// the OLD, buggy "not found" behavior; it now requires the fixed one.
+	if _, ok := b.OrderByID("stop1"); !ok {
+		t.Fatal("untriggered stop should still be findable via OrderByID — it is a real, resting, cancellable order, just not part of the matchable book")
 	}
 
 	// A trade at 99 (below trigger) must not fire it.
@@ -221,5 +227,81 @@ func TestCheckMarkPriceTriggers_NoOpWhenNothingCrosses(t *testing.T) {
 	// e.g. before any real price has ever been reported for this symbol.
 	if trades, cancelled := b.CheckMarkPriceTriggers(decimal.Zero); len(trades) != 0 || len(cancelled) != 0 {
 		t.Fatalf("zero mark price: got %d trades, %d cancelled, want 0/0 (must not panic or misfire)", len(trades), len(cancelled))
+	}
+}
+
+// TestUntriggeredStop_CancellableViaOrderByIDThenCancel is a regression test
+// for a live incident: a resting (untriggered) STOP order — this is exactly
+// how a Stop-Loss leg from internal/attached rests on the book — could never
+// be cancelled through the normal user-facing action at all. cmd/engine's
+// /cancel handler always calls OrderByID FIRST as an existence/ownership
+// pre-check before ever calling Cancel; OrderByID used to only look in
+// orderIndex, never stopOrders, so this pre-check always reported "not
+// found" for any untriggered stop and the handler returned 404 before
+// Cancel — which has always correctly handled stopOrders — was ever reached.
+// This test exercises the exact two-call sequence the real handler uses.
+func TestUntriggeredStop_CancellableViaOrderByIDThenCancel(t *testing.T) {
+	b := New("BTC-USDT", models.Spot)
+
+	stop := mkOrder("stop-cancel-1", models.Sell, models.Stop, "0", "1")
+	stop.StopPrice = decimal.RequireFromString("50")
+	if _, _, err := b.Submit(stop); err != nil {
+		t.Fatalf("stop order submission failed: %v", err)
+	}
+
+	// Step 1, exactly what /cancel's pre-check does: look the order up
+	// without removing it, to verify it exists (and, in the real handler,
+	// that the caller owns it) before attempting the actual cancel.
+	found, ok := b.OrderByID("stop-cancel-1")
+	if !ok {
+		t.Fatal("OrderByID pre-check failed to find a resting untriggered stop order — this is the exact bug: /cancel would 404 here and never even attempt Cancel")
+	}
+	if found.Status != models.StatusOpen {
+		t.Fatalf("found order status = %s, want OPEN", found.Status)
+	}
+
+	// Step 2, exactly what /cancel does next: the actual cancel.
+	cancelled, err := b.Cancel("stop-cancel-1")
+	if err != nil {
+		t.Fatalf("cancel failed: %v", err)
+	}
+	if cancelled.Status != models.StatusCancelled {
+		t.Fatalf("cancelled order status = %s, want CANCELLED", cancelled.Status)
+	}
+
+	// Cancelled, so a further lookup must correctly report "not found" (not
+	// still resting, not double-cancellable).
+	if _, ok := b.OrderByID("stop-cancel-1"); ok {
+		t.Fatal("cancelled stop order should no longer be findable via OrderByID")
+	}
+}
+
+// TestOrderByID_MatchableAndStopOrders_BothFindable is a broader sanity
+// check that OrderByID now correctly covers both maps in general, not just
+// the specific stop-order case above — a regular resting LIMIT order (in
+// orderIndex) and an untriggered STOP order (in stopOrders) coexisting on
+// the same book must both be findable, and a genuinely unknown ID must
+// still correctly report not-found from either map.
+func TestOrderByID_MatchableAndStopOrders_BothFindable(t *testing.T) {
+	b := New("BTC-USDT", models.Spot)
+
+	limit := mkOrder("limit-1", models.Buy, models.Limit, "50", "1")
+	if _, _, err := b.Submit(limit); err != nil {
+		t.Fatal(err)
+	}
+	stop := mkOrder("stop-1", models.Sell, models.Stop, "0", "1")
+	stop.StopPrice = decimal.RequireFromString("40")
+	if _, _, err := b.Submit(stop); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := b.OrderByID("limit-1"); !ok {
+		t.Fatal("resting LIMIT order should be findable via OrderByID")
+	}
+	if _, ok := b.OrderByID("stop-1"); !ok {
+		t.Fatal("untriggered STOP order should be findable via OrderByID")
+	}
+	if _, ok := b.OrderByID("nonexistent"); ok {
+		t.Fatal("a genuinely unknown order ID should not be findable")
 	}
 }
