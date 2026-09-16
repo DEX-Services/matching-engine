@@ -284,3 +284,93 @@ func TestEstimatedRequired_ReduceOnlyFutures_ReturnsZero(t *testing.T) {
 		t.Fatalf("EstimatedRequired asset = %s, want BI2XUSD", asset)
 	}
 }
+
+// newSpotOCOLegOrder builds a ReduceOnly SPOT SELL order shaped like a TP or
+// SL leg placed by internal/attached.BuildLegOrder for a SPOT BUY entry —
+// GroupID set (as every real leg carries), ReduceOnly true.
+func newSpotOCOLegOrder(qty, price string) *models.Order {
+	return &models.Order{
+		ID: "leg1", AccountID: "trader", Symbol: "BI2X-BI2XUSD",
+		Side: models.Sell, Type: models.Limit, Market: models.Spot,
+		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		ReduceOnly: true, GroupID: "group-1", GroupRole: "TP",
+	}
+}
+
+// TestReserve_SpotOCOLeg_LocksNothing is a regression test for SPOT TP/SL
+// support (2026-09-16): a SPOT OCO leg (ReduceOnly + GroupID set) must not
+// take its own reservation — attached.Execute's reserveGroup already took
+// ONE shared reservation for the whole pair before either leg was
+// submitted (see that function's doc comment). Reserving again per-leg
+// here would double-lock the same base-asset holding for a pair where
+// only one leg can ever actually fire.
+func TestReserve_SpotOCOLeg_LocksNothing(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10)) // simulates reserveGroup's up-front shared lock
+
+	order := newSpotOCOLegOrder("10", "6.00")
+	if err := checker.Reserve(order); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+		t.Fatalf("reserved after spot OCO leg reserve = %s, want unchanged 10 (no second lock)", got)
+	}
+}
+
+// TestReserve_SpotNonOCOOrder_StillRequiresFullReservation confirms the
+// exemption is scoped precisely to GroupID-tagged reduce-only spot orders —
+// an ordinary spot sell (no group, or ReduceOnly false) must still reserve
+// normally. Getting this scoping wrong in either direction is a real bug:
+// too broad would let ordinary spot sells skip reservation entirely
+// (unbacked orders); too narrow would reintroduce the OCO double-lock.
+func TestReserve_SpotNonOCOOrder_StillRequiresFullReservation(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+
+	order := newSpotOCOLegOrder("10", "6.00")
+	order.GroupID = "" // not an attached-order leg
+	if err := checker.Reserve(order); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+		t.Fatalf("reserved after ordinary spot sell reserve = %s, want 10 (normal reservation, not exempted)", got)
+	}
+}
+
+// TestRelease_SpotOCOLeg_ReleasesNothing is the Release-side counterpart to
+// TestReserve_SpotOCOLeg_LocksNothing: when one OCO leg fills and its
+// sibling is cancelled, cancelling the sibling must NOT release any amount
+// (it never separately reserved one) — doing so would release phantom
+// availability for this account+asset that the shared reservation's actual
+// consumer (whichever leg filled) already accounted for.
+func TestRelease_SpotOCOLeg_ReleasesNothing(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10)) // the shared reservation, still held (sibling filled and consumed nothing more of it here since this test only exercises the cancelled leg's Release call)
+
+	order := newSpotOCOLegOrder("10", "6.00")
+	checker.Release(order)
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+		t.Fatalf("reserved after cancelling un-filled OCO sibling = %s, want unchanged 10 (nothing to release for this leg)", got)
+	}
+}
+
+// TestRelease_SpotNonOCOOrder_StillReleasesNormally confirms Release's new
+// exemption doesn't affect an ordinary (non-attached-order) spot cancel.
+func TestRelease_SpotNonOCOOrder_StillReleasesNormally(t *testing.T) {
+	ledger := NewLedger()
+	checker := NewChecker(ledger)
+	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10))
+
+	order := newSpotOCOLegOrder("10", "6.00")
+	order.GroupID = ""
+	checker.Release(order)
+	if got := ledger.Reserved("trader", "BI2X"); !got.IsZero() {
+		t.Fatalf("reserved after cancelling ordinary spot order = %s, want 0 (normal release)", got)
+	}
+}

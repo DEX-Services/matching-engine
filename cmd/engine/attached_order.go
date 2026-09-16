@@ -1,15 +1,45 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dex/matching-engine/internal/attached"
+	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/models"
+	"github.com/dex/matching-engine/internal/risk"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
+
+// spotPositionSizer implements attached.PositionSizer for SPOT groups
+// (added 2026-09-16 for SPOT TP/SL support). Unlike futures
+// (*settlement.FuturesSettlement, a real margined position object), spot
+// has no "position" — the closest equivalent to "current exposure" is
+// simply how much of the base asset the account still holds, which shrinks
+// via an ordinary manual sell exactly as validly as a futures position
+// shrinks via a partial close. Reports Balance (available+reserved), not
+// just Available, so an already-locked TP/SL reservation on that same
+// holding doesn't make its own protection look like it's shrinking.
+type spotPositionSizer struct {
+	ledger *risk.Ledger
+}
+
+// CurrentSize returns the account's current total (available + reserved)
+// balance of symbol's base asset. symbol is the engine's internal
+// "BASE-QUOTE" form (e.g. "BI2X-BI2XUSD"); the base asset is everything
+// before the first "-", same split used throughout this package for spot
+// symbols (see risk.assetFor's default case).
+func (s *spotPositionSizer) CurrentSize(accountID, symbol string) decimal.Decimal {
+	base, _, ok := strings.Cut(symbol, "-")
+	if !ok || base == "" {
+		return decimal.Zero
+	}
+	return s.ledger.Balance(accountID, base)
+}
 
 // AttachedOrderResponse is the payload for POST /attached-order.
 type AttachedOrderResponse struct {
@@ -93,8 +123,26 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 			IsMarketMaker: models.IsMarketMakerAccount(q.Get("account")),
 		}
 
-		if entry.Market != models.Futures {
-			http.Error(w, "invalid order: attached TP/SL is only supported for futures", http.StatusBadRequest)
+		// SPOT TP/SL added 2026-09-16 (previously FUTURES-only — see git
+		// history/session notes for why: it was never that spot couldn't
+		// support this, just that OCO reservation needed its own design,
+		// solved by the shared reserveGroup step below, and there was no
+		// "exposure changed" signal for a spot holding, solved by
+		// spotPositionSizer in main.go).
+		if entry.Market != models.Futures && entry.Market != models.Spot {
+			http.Error(w, "invalid order: attached TP/SL is only supported for futures and spot", http.StatusBadRequest)
+			return
+		}
+		// SPOT is scoped to BUY entries only (protect a purchase by planning
+		// to sell it later — the normal, real-world meaning of "TP/SL" on
+		// every spot exchange). A SELL entry's legs would be BUYs needing
+		// QUOTE-asset reservations priced at each leg's own limit/stop price
+		// — the TP and SL legs could legitimately need different amounts,
+		// which breaks the single-shared-lock design reserveGroup relies on
+		// (see its doc comment). Not supported for now rather than guessed
+		// at with a placeholder price that could under- or over-reserve.
+		if entry.Market == models.Spot && side != models.Buy {
+			http.Error(w, "invalid order: attached TP/SL for spot is only supported on BUY entries", http.StatusBadRequest)
 			return
 		}
 
@@ -108,6 +156,7 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 		group := attached.Group{
 			ID:            uuid.NewString(),
 			ParentOrderID: entry.ID,
+			Market:        entry.Market,
 		}
 		if tp.present {
 			group.TakeProfit = &attached.Leg{ID: uuid.NewString(), LimitPrice: tp.price}
@@ -135,8 +184,65 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 			_, _, _, err := submitOrderPipeline(r.Context(), d, o, "")
 			return err
 		}
+		// SPOT only: take the single shared reservation backing both legs —
+		// see attached.ReserveGroup's doc comment for why a spot TP/SL pair
+		// cannot let each leg reserve independently the way futures does.
+		// Scoped to BUY entries only (checked above), so the closing side is
+		// always SELL and risk.RequiredFor's spot-SELL case (notionalFor's
+		// default branch) reserves exactly ProtectedQty of the base asset,
+		// independent of price — no placeholder price needed. Reserves
+		// through the exact same ledger.Reserve + backend.Lock sequence
+		// submitOrderPipeline itself uses, so this shared lock is durably
+		// mirrored in Postgres exactly like every other reservation on this
+		// platform, not a special, less-safe path.
+		reserveGroup := func(g attached.Group) error {
+			synthetic := &models.Order{
+				AccountID: g.AccountID, Symbol: g.Symbol, Market: g.Market,
+				Side: models.Sell, Type: models.Limit, Quantity: g.ProtectedQty,
+			}
+			resAsset, resAmount := risk.RequiredFor(synthetic)
+			if !resAmount.IsPositive() {
+				return nil
+			}
+			if err := d.ledger.Reserve(g.AccountID, resAsset, resAmount); err != nil {
+				return err
+			}
+			if d.backend.Enabled() {
+				if err := d.backend.Lock(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+					d.ledger.Release(g.AccountID, resAsset, resAmount)
+					return err
+				}
+			}
+			return nil
+		}
+		// releaseGroup undoes reserveGroup's lock — called by attached.Execute
+		// ONLY when every leg failed to place after a successful reservation
+		// (see Execute's doc comment on the incident this fixes: without this,
+		// funds locked by reserveGroup had no leg left anywhere to eventually
+		// release them, leaving them stuck with no user-facing recovery).
+		// Recomputes the exact same asset/amount reserveGroup used, via the
+		// same risk.RequiredFor call on the same synthetic order shape, so
+		// this can never accidentally release a different amount than what
+		// was actually locked.
+		releaseGroup := func(g attached.Group) error {
+			synthetic := &models.Order{
+				AccountID: g.AccountID, Symbol: g.Symbol, Market: g.Market,
+				Side: models.Sell, Type: models.Limit, Quantity: g.ProtectedQty,
+			}
+			resAsset, resAmount := risk.RequiredFor(synthetic)
+			if !resAmount.IsPositive() {
+				return nil
+			}
+			d.ledger.Release(g.AccountID, resAsset, resAmount)
+			if d.backend.Enabled() {
+				if err := d.backend.Unlock(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 
-		result, activatedGroup, err := attached.Execute(attachedReg, attached.Command{Group: group, Entry: entry}, submit, submitLeg)
+		result, activatedGroup, err := attached.Execute(attachedReg, attached.Command{Group: group, Entry: entry}, submit, submitLeg, reserveGroup, releaseGroup)
 		if err != nil {
 			if submitErr != nil {
 				http.Error(w, submitErr.Error(), status)

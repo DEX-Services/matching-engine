@@ -367,6 +367,38 @@ func underlyingFromOrderSymbol(order *models.Order) string {
 	return order.Symbol
 }
 
+// exemptFromFreshReservation reports whether order's margin/notional
+// requirement is already covered by something other than a fresh
+// reservation of its own — used identically by Check, Reserve,
+// ReserveMarket, RequiredFor, and EstimatedRequired so none of them can
+// disagree about which orders need a fresh lock.
+//
+// Two cases, added on different dates for different reasons:
+//   - ReduceOnly FUTURES (2026-09-15): the position's already-posted margin
+//     backs a reduce-only close; submit.go's checkReduceOnly already
+//     guarantees the order can only shrink an existing position before this
+//     is ever consulted. See Check's doc comment for the full incident.
+//   - ReduceOnly SPOT with a GroupID (2026-09-16, SPOT TP/SL support): a
+//     spot TP/SL pair has no margin to trust the way futures does, so this
+//     is NOT "no reservation is needed" — it means "the reservation was
+//     already taken once, by attached.Execute, shared between both OCO
+//     legs, before either leg was ever submitted." Reserving again per-leg
+//     here would double-lock the same underlying holding for a pair where
+//     only one leg can ever actually execute (see attached.Execute's doc
+//     comment for the full reasoning and why this is safe: the caller —
+//     attached.Execute — is the only code path that sets GroupID on a SPOT
+//     order, and it is the one place responsible for taking that shared
+//     reservation up front).
+func exemptFromFreshReservation(order *models.Order) bool {
+	if !order.ReduceOnly {
+		return false
+	}
+	if order.Market == models.Futures {
+		return true
+	}
+	return order.Market == models.Spot && order.GroupID != ""
+}
+
 // Check validates an order before submission to the matching engine.
 // Returns nil if all checks pass.
 func (c *Checker) Check(order *models.Order) error {
@@ -406,7 +438,7 @@ func (c *Checker) Check(order *models.Order) error {
 	// calling Check) — Checker itself has no access to the position, only to
 	// balances, so it trusts the ReduceOnly flag the same way it already
 	// trusts InternalLiquidation.
-	if order.ReduceOnly && order.Market == models.Futures {
+	if exemptFromFreshReservation(order) {
 		return nil
 	}
 
@@ -446,7 +478,7 @@ func (c *Checker) Reserve(order *models.Order) error {
 	// for the full incident this fixes) — reserving the same wrong notional
 	// here would silently reintroduce the bug even after Check stopped
 	// rejecting the order, since Reserve is what actually locks funds.
-	if order.ReduceOnly && order.Market == models.Futures {
+	if exemptFromFreshReservation(order) {
 		return nil
 	}
 	asset, notional := required(order)
@@ -462,7 +494,7 @@ func (c *Checker) ReserveMarket(order *models.Order, estPrice decimal.Decimal) (
 	// Mirrors Reserve/Check's ReduceOnly-futures exemption — a market-order
 	// close (e.g. "Close Position" submitted as MARKET) is exactly as much a
 	// reduce-only close as a limit one, and needs no fresh reservation.
-	if order.ReduceOnly && order.Market == models.Futures {
+	if exemptFromFreshReservation(order) {
 		return assetFor(order), decimal.Zero, nil
 	}
 	asset, amount = requiredAt(order, estPrice)
@@ -495,6 +527,23 @@ func (c *Checker) Release(order *models.Order) {
 		// same estimated amount it reserved, not through this generic path.
 		return
 	}
+	// Added 2026-09-16 alongside SPOT TP/SL support: a SPOT OCO leg (SL or
+	// TP, ReduceOnly with a GroupID) never took its OWN reservation in the
+	// first place — attached.Execute's reserveGroup takes ONE shared
+	// reservation for the pair before either leg is submitted (see that
+	// function's doc comment). If one leg fires, its own fill correctly
+	// debits/releases that shared amount via normal settlement; when the
+	// OTHER, un-filled sibling then gets OCO-cancelled, THIS function must
+	// NOT also call ledger.Release for it — there is nothing separately
+	// reserved for that specific leg to release. Doing so anyway would
+	// release phantom availability for this account+asset that doesn't
+	// correspond to any real held funds, since the shared reservation was
+	// already fully consumed by whichever leg actually filled. Must mirror
+	// exemptFromFreshReservation's SPOT case exactly, or Reserve/Release
+	// would disagree about which SPOT orders manage their own reservation.
+	if exemptFromFreshReservation(order) {
+		return
+	}
 	asset, amount := releaseAmount(order)
 	if amount.IsPositive() {
 		c.ledger.Release(order.AccountID, asset, amount)
@@ -515,7 +564,7 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 	// bridge) what Reserve locked, so it must agree with Reserve or that
 	// caller would durably lock funds for a reservation the engine's own
 	// in-memory ledger never actually took.
-	if order.ReduceOnly && order.Market == models.Futures {
+	if exemptFromFreshReservation(order) {
 		return assetFor(order), decimal.Zero
 	}
 	return required(order)
@@ -532,7 +581,7 @@ func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset str
 	// orders here regardless of ReduceOnly), and needs the same treatment as
 	// a reduce-only limit close: no fresh reservation for an order that can
 	// only shrink an existing, already-margined position.
-	if order.ReduceOnly && order.Market == models.Futures {
+	if exemptFromFreshReservation(order) {
 		return assetFor(order), decimal.Zero
 	}
 	return requiredAt(order, estPrice)

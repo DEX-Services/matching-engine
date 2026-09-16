@@ -34,7 +34,7 @@ func TestListenerOCOCancelsSiblingOnFill(t *testing.T) {
 	cancel := &fakeCanceller{}
 	submit := &fakeSubmitter{}
 	pos := &fakePositionSizer{}
-	l := NewListener(reg, cancel, submit, pos)
+	l := NewListener(reg, cancel, submit, pos, pos)
 
 	// TP leg fills.
 	l.handle(&models.Event{
@@ -59,7 +59,7 @@ func TestListenerResizesOnExternalFill(t *testing.T) {
 	cancel := &fakeCanceller{}
 	submit := &fakeSubmitter{}
 	pos := &fakePositionSizer{size: decimal.NewFromInt(2)} // position partially closed down to 2
-	l := NewListener(reg, cancel, submit, pos)
+	l := NewListener(reg, cancel, submit, pos, pos)
 
 	// A partial close fill on the account/symbol, unrelated to the group's own legs.
 	l.handle(&models.Event{
@@ -93,7 +93,7 @@ func TestListenerRemovesGroupOnZeroExposure(t *testing.T) {
 	cancel := &fakeCanceller{}
 	submit := &fakeSubmitter{}
 	pos := &fakePositionSizer{size: decimal.Zero} // position fully closed / liquidated
-	l := NewListener(reg, cancel, submit, pos)
+	l := NewListener(reg, cancel, submit, pos, pos)
 
 	l.handle(&models.Event{Type: models.EventLiquidation, Liquidation: &models.Liquidation{AccountID: "acct", Symbol: "BTC-USDC"}})
 

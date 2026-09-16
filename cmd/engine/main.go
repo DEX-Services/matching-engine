@@ -376,7 +376,11 @@ func main() {
 	// history writer above - so the matching core stays untouched.
 	attachedReg := attached.NewRegistry()
 	attachedCh := bus.Subscribe(10_000)
-	attachedListener := attached.NewListener(attachedReg, reg, reg, futuresSettlement)
+	// spotPositionSizer (added 2026-09-16 for SPOT TP/SL support) reports the
+	// account's remaining base-asset wallet balance as its "exposure" — see
+	// that type's doc comment for why spot needs its own sizer distinct from
+	// futuresSettlement's margined-position one.
+	attachedListener := attached.NewListener(attachedReg, reg, reg, futuresSettlement, &spotPositionSizer{ledger: ledger})
 	go attachedListener.Run(attachedCh)
 
 	// Futures liquidation, funding, and options expiry background loops.
