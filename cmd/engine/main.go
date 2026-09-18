@@ -52,6 +52,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	ledgerSyncDedup := newLedgerSyncDedup()
+
 	slog.Info("matching engine starting",
 		"postgres_host", os.Getenv("POSTGRES_HOST"),
 		"redis_host", os.Getenv("REDIS_HOST"),
@@ -1005,6 +1007,7 @@ func main() {
 			Asset     string `json:"asset"`
 			Amount    string `json:"amount"`
 			Direction string `json:"direction"`
+			RequestID string `json:"requestId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AccountID == "" {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -1015,15 +1018,27 @@ func main() {
 			http.Error(w, "amount must be a positive decimal", http.StatusBadRequest)
 			return
 		}
+		if !ledgerSyncDedup.claim(req.RequestID) {
+			// Same requestId already applied (M4): a retried call, not a
+			// new one — report success without re-applying so the caller's
+			// retry sees the same outcome as the original attempt.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		switch req.Direction {
 		case "credit":
 			ledger.Credit(req.AccountID, req.Asset, amount)
 		case "debit":
 			if err := ledger.Debit(req.AccountID, req.Asset, amount); err != nil {
+				// Didn't actually apply: release the id so a legitimate
+				// retry (after the underlying issue is fixed) isn't
+				// silently swallowed as "already done".
+				ledgerSyncDedup.release(req.RequestID)
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
 		default:
+			ledgerSyncDedup.release(req.RequestID)
 			http.Error(w, "direction must be credit or debit", http.StatusBadRequest)
 			return
 		}
