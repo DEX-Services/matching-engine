@@ -1186,7 +1186,7 @@ func main() {
 	// fixed write deadline.
 	srv := &http.Server{
 		Addr:              ":8080",
-		Handler:           withRateLimit(withCORS(mux)),
+		Handler:           withRateLimit(withCORS(withMaxBody(mux))),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		IdleTimeout:       120 * time.Second,

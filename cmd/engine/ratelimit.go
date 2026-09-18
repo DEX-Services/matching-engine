@@ -67,6 +67,24 @@ func (s *engineLimiterStore) reapLoop() {
 	}
 }
 
+// engineMaxBodyBytes caps every request body (M2): no handler in this
+// service set any body-size limit before this, so an oversized request
+// (e.g. to /order or /attached-order) was fully buffered/decoded before any
+// validation ran. 1 MB is generous for every legitimate JSON payload this
+// engine accepts.
+const engineMaxBodyBytes = 1 << 20
+
+// withMaxBody wraps next so every request body is capped at
+// engineMaxBodyBytes; /ws is exempt since it isn't a body-carrying request.
+func withMaxBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			r.Body = http.MaxBytesReader(w, r.Body, engineMaxBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // withRateLimit wraps next with a per-client-IP token bucket: 40 req/sec
 // sustained, burst of 80 — generous enough for a trade page polling several
 // markets' /ticker and /depth every second without ever hitting it, but
