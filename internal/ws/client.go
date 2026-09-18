@@ -27,6 +27,11 @@ type client struct {
 	conn     *websocket.Conn
 	sendCh   chan []byte
 	overflow atomic.Bool
+	// accountID is the verified session's UserID (see wsauth), or "" for an
+	// unauthenticated connection. Used only to decide whether this specific
+	// client may see an event's real AccountID instead of a redacted one —
+	// see hub.go's broadcast/redactAccountID.
+	accountID string
 
 	// mu guards the subscription set below. The hub's broadcast loops iterate
 	// clients under the hub lock; per-client subscription changes arrive from
@@ -42,8 +47,8 @@ type client struct {
 	wantStreams map[string]struct{}
 }
 
-func newClient(conn *websocket.Conn) *client {
-	return &client{conn: conn, sendCh: make(chan []byte, 512), wantStreams: make(map[string]struct{})}
+func newClient(conn *websocket.Conn, accountID string) *client {
+	return &client{conn: conn, accountID: accountID, sendCh: make(chan []byte, 512), wantStreams: make(map[string]struct{})}
 }
 
 // subscribeSymbols registers interest in additional "symbol|market" streams.

@@ -1,6 +1,6 @@
 module github.com/dex/matching-engine
 
-go 1.22
+go 1.26.0
 
 require (
 	github.com/google/uuid v1.6.0
@@ -11,6 +11,7 @@ require (
 	github.com/segmentio/kafka-go v0.4.47
 	github.com/shopspring/decimal v1.4.0
 	github.com/stretchr/testify v1.9.0
+	golang.org/x/time v0.16.0
 )
 
 require (
@@ -30,4 +31,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-require github.com/rogpeppe/go-internal v1.12.0 // indirect
+require (
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/rogpeppe/go-internal v1.12.0 // indirect
+)

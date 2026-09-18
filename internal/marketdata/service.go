@@ -32,14 +32,20 @@ type Ticker struct {
 	Spread    decimal.Decimal
 	BidDepth  decimal.Decimal // total qty on bid side (top 5 levels)
 	AskDepth  decimal.Decimal // total qty on ask side (top 5 levels)
+	// LastTradeAt is the timestamp of the most recent trade recorded for
+	// this symbol/market, or the zero Time if none has ever traded. Used by
+	// liquidation/funding to refuse to act on a mark price derived from a
+	// market that has gone quiet — see MarkPriceFresh.
+	LastTradeAt time.Time
 }
 
 // Service aggregates market data across all registered symbols.
 type Service struct {
-	mu         sync.RWMutex
-	books      map[string]BookReader      // key: symbol+":"+market
-	lastPrices map[string]decimal.Decimal // key: symbol+":"+market
-	trades     map[string][]recordedTrade // key: symbol+":"+market, oldest first
+	mu          sync.RWMutex
+	books       map[string]BookReader      // key: symbol+":"+market
+	lastPrices  map[string]decimal.Decimal // key: symbol+":"+market
+	lastTradeAt map[string]time.Time       // key: symbol+":"+market
+	trades      map[string][]recordedTrade // key: symbol+":"+market, oldest first
 }
 
 type recordedTrade struct {
@@ -86,7 +92,12 @@ func (s *Service) Symbols() []SymbolKey {
 
 // NewService creates an empty Service.
 func NewService() *Service {
-	return &Service{books: make(map[string]BookReader), lastPrices: make(map[string]decimal.Decimal), trades: make(map[string][]recordedTrade)}
+	return &Service{
+		books:       make(map[string]BookReader),
+		lastPrices:  make(map[string]decimal.Decimal),
+		lastTradeAt: make(map[string]time.Time),
+		trades:      make(map[string][]recordedTrade),
+	}
 }
 
 // Register adds a book reader for the given symbol/market.
@@ -109,6 +120,7 @@ func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qt
 	key := symbol + ":" + string(market)
 	s.mu.Lock()
 	s.lastPrices[key] = price
+	s.lastTradeAt[key] = at
 	cutoff := at.Add(-24 * time.Hour)
 	trades := append(s.trades[key], recordedTrade{price: price, qty: qty, at: at})
 	firstCurrent := 0
@@ -203,9 +215,11 @@ func (s *Service) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
 
 // Ticker returns a market data snapshot for symbol/market.
 func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, error) {
+	key := symbol + ":" + string(market)
 	s.mu.RLock()
-	reader, ok := s.books[symbol+":"+string(market)]
-	lastPrice := s.lastPrices[symbol+":"+string(market)]
+	reader, ok := s.books[key]
+	lastPrice := s.lastPrices[key]
+	lastTradeAt := s.lastTradeAt[key]
 	s.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("no market data for %s/%s", symbol, market)
@@ -232,16 +246,33 @@ func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, erro
 	mark := computeMarkPrice(mid, lastPrice)
 
 	return &Ticker{
-		Symbol:    symbol,
-		Market:    market,
-		BestBid:   bestBid,
-		BestAsk:   bestAsk,
-		MidPrice:  mid,
-		MarkPrice: mark,
-		Spread:    spread,
-		BidDepth:  bidDepth,
-		AskDepth:  askDepth,
+		Symbol:      symbol,
+		Market:      market,
+		BestBid:     bestBid,
+		BestAsk:     bestAsk,
+		MidPrice:    mid,
+		MarkPrice:   mark,
+		Spread:      spread,
+		BidDepth:    bidDepth,
+		AskDepth:    askDepth,
+		LastTradeAt: lastTradeAt,
 	}, nil
+}
+
+// MarkPriceFresh reports whether t's mark price is safe to act on for a
+// liquidation or funding decision: it requires that this market has
+// actually traded within maxAge. A market with resting orders but no recent
+// trades (thin/quiet/possibly stuck) can have a MidPrice that no real trade
+// has confirmed in a long time — acting on it anyway is exactly the failure
+// mode this exists to prevent (previously nothing checked this at all; the
+// engine had zero staleness guard anywhere in liquidation/funding, unlike
+// bots and prediction-service, which already refuse to act on a stale
+// external index price the same way).
+func (t *Ticker) MarkPriceFresh(maxAge time.Duration) bool {
+	if t.LastTradeAt.IsZero() {
+		return false
+	}
+	return time.Since(t.LastTradeAt) <= maxAge
 }
 
 // computeMarkPrice blends the mid-price with the last trade price to reduce

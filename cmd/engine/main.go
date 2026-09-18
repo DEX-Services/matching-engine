@@ -35,6 +35,7 @@ import (
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/dex/matching-engine/internal/volsurface"
 	"github.com/dex/matching-engine/internal/ws"
+	"github.com/dex/matching-engine/internal/wsauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
@@ -233,7 +234,8 @@ func main() {
 	risk.SetMarkSource(mdSvc)
 
 	// Phase 4: WebSocket
-	hub := ws.NewHub(wsCh)
+	wsVerifier := wsauth.NewVerifier(os.Getenv("JWT_SECRET"))
+	hub := ws.NewHub(wsCh, wsVerifier)
 	go hub.Run()
 
 	// Phase 4: Kafka Publisher
@@ -1177,7 +1179,18 @@ func main() {
 	// 		})
 	// 	})
 
-	srv := &http.Server{Addr: ":8080", Handler: withCORS(mux)}
+	// ReadHeaderTimeout/ReadTimeout/IdleTimeout were previously unset, leaving
+	// this server open to slow-header (Slowloris-style) connections tying up
+	// a goroutine indefinitely. WriteTimeout is intentionally NOT set: /ws
+	// is a long-lived streaming connection that must not be cut off by a
+	// fixed write deadline.
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           withRateLimit(withCORS(mux)),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	listener, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		slog.Error("failed to bind HTTP listener", "addr", srv.Addr, "error", err)

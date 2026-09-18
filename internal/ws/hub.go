@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/models"
+	"github.com/dex/matching-engine/internal/wsauth"
 	"github.com/gorilla/websocket"
 )
 
@@ -71,14 +72,19 @@ type Hub struct {
 	clients map[*client]struct{}
 	eventCh <-chan *models.Event
 	log     *slog.Logger
+	auth    *wsauth.Verifier
 }
 
-// NewHub creates a Hub that reads events from eventCh.
-func NewHub(eventCh <-chan *models.Event) *Hub {
+// NewHub creates a Hub that reads events from eventCh. auth may be nil (or
+// its zero value/disabled), in which case every connection is treated as
+// unauthenticated — every AccountID is redacted for every client, which is
+// the safe default rather than a hard failure.
+func NewHub(eventCh <-chan *models.Event, auth *wsauth.Verifier) *Hub {
 	return &Hub{
 		clients: make(map[*client]struct{}),
 		eventCh: eventCh,
 		log:     slog.Default(),
+		auth:    auth,
 	}
 }
 
@@ -111,13 +117,26 @@ func (h *Hub) ClientCount() int {
 }
 
 // ServeWS upgrades an HTTP connection to WebSocket and registers the client.
+// An optional ?token=<session JWT> query param identifies which account this
+// connection belongs to (verified against the same secret Dex-Backend issued
+// it with) — see wsauth and broadcast's redaction. A missing or invalid token
+// is NOT an error: the connection still succeeds, just with every account's
+// AccountID redacted from what it receives, same as before this existed.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("ws upgrade failed", "error", err)
 		return
 	}
-	c := newClient(conn)
+	accountID := ""
+	if h.auth != nil && h.auth.Enabled() {
+		if token := r.URL.Query().Get("token"); token != "" {
+			if claims, err := h.auth.Verify(token); err == nil {
+				accountID = claims.UserID
+			}
+		}
+	}
+	c := newClient(conn, accountID)
 	h.register(c)
 	go c.writePump()
 	go h.readPump(c)
@@ -127,10 +146,27 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 // non-blocking. A client that has declared stream subscriptions (see
 // readPump) only receives events for its subscribed "symbol|market" streams;
 // clients with no subscriptions get the legacy full broadcast.
+//
+// AccountID redaction: /ws has no per-client access control, so an event
+// naming an account (order/liquidation/funding/realized-PnL/margin-call) is
+// only sent with that field intact to a connection that authenticated AS
+// that account (see wsauth) — every other connection gets the same event
+// with AccountID blanked out. This used to leak every account's trading
+// activity to any visitor with the page open, no login required. The
+// redacted payload is the common case (marshaled once, sent to everyone);
+// the full payload is only additionally marshaled and sent if the owning
+// account happens to be connected right now.
 func (h *Hub) broadcast(evt *models.Event) {
-	payload, err := json.Marshal(evt)
+	redacted, ownerID := redactAccountID(evt)
+	redactedPayload, err := json.Marshal(redacted)
 	if err != nil {
 		return
+	}
+	var ownerPayload []byte
+	if ownerID != "" {
+		if p, err := json.Marshal(evt); err == nil {
+			ownerPayload = p
+		}
 	}
 	view := &eventView{streamKey: evt.Symbol + "|" + evt.Market}
 	h.mu.RLock()
@@ -139,7 +175,54 @@ func (h *Hub) broadcast(evt *models.Event) {
 		if !c.wantsEvent(view) {
 			continue
 		}
-		c.send(payload)
+		if ownerPayload != nil && c.accountID == ownerID {
+			c.send(ownerPayload)
+		} else {
+			c.send(redactedPayload)
+		}
+	}
+}
+
+// redactAccountID returns a shallow copy of evt with any AccountID-bearing
+// nested struct's AccountID blanked, plus the original (unredacted) account
+// ID so the caller can still send the full event to that one account's own
+// connection. Returns ("", evt unchanged) for event types that carry no
+// AccountID at all (e.g. TRADE, which only references order IDs).
+func redactAccountID(evt *models.Event) (*models.Event, string) {
+	out := *evt // shallow copy: safe, nested pointers still point at the originals until we redirect one below
+	switch {
+	case evt.Order != nil:
+		id := evt.Order.AccountID
+		o := *evt.Order
+		o.AccountID = ""
+		out.Order = &o
+		return &out, id
+	case evt.Liquidation != nil:
+		id := evt.Liquidation.AccountID
+		l := *evt.Liquidation
+		l.AccountID = ""
+		out.Liquidation = &l
+		return &out, id
+	case evt.Funding != nil:
+		id := evt.Funding.AccountID
+		f := *evt.Funding
+		f.AccountID = ""
+		out.Funding = &f
+		return &out, id
+	case evt.RealizedPnl != nil:
+		id := evt.RealizedPnl.AccountID
+		p := *evt.RealizedPnl
+		p.AccountID = ""
+		out.RealizedPnl = &p
+		return &out, id
+	case evt.MarginCallInfo != nil:
+		id := evt.MarginCallInfo.AccountID
+		m := *evt.MarginCallInfo
+		m.AccountID = ""
+		out.MarginCallInfo = &m
+		return &out, id
+	default:
+		return evt, ""
 	}
 }
 

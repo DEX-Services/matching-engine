@@ -16,6 +16,15 @@ import (
 // fundingRateCap bounds the funding rate per interval to avoid runaway payments.
 var fundingRateCap = decimal.NewFromFloat(0.0075) // 0.75%
 
+// maxMarkStaleness bounds how long ago a market's last real trade may have
+// been before its mark price is refused for a funding settlement — this
+// engine previously had no staleness guard anywhere in liquidation/funding
+// (unlike bots/prediction-service, which already refuse to act on an
+// external index price older than a few seconds). 5 minutes is generous
+// relative to funding's own 1-hour-or-longer cadence, so it only trips for a
+// genuinely quiet/frozen market, never a normal trading lull.
+const maxMarkStaleness = 5 * time.Minute
+
 // CurrentFundingRate computes the funding rate that WOULD be applied at the
 // next settlement given the current mark/index spread, without applying
 // anything. Exported so callers outside this package (e.g. the /ticker
@@ -125,12 +134,22 @@ func (f *FundingScheduler) settleFunding(cfg *config.SymbolConfig) {
 	if err != nil || ticker.MarkPrice.IsZero() {
 		return
 	}
+	if !ticker.MarkPriceFresh(maxMarkStaleness) {
+		f.log.Warn("funding skipped: futures market has not traded recently, mark price is stale",
+			"symbol", cfg.Symbol, "lastTradeAt", ticker.LastTradeAt)
+		return
+	}
 	indexTicker, err := f.marketdata.Ticker(cfg.UnderlyingSymbol, models.Spot)
 	// Funding needs an independent index. Do not silently substitute the
 	// futures mark when the underlying spot/index market is unavailable: that
 	// makes the rate artificially zero and misrepresents a real settlement.
 	if err != nil || indexTicker.MarkPrice.IsZero() {
 		f.log.Warn("funding skipped: independent index unavailable", "symbol", cfg.Symbol, "underlying", cfg.UnderlyingSymbol)
+		return
+	}
+	if !indexTicker.MarkPriceFresh(maxMarkStaleness) {
+		f.log.Warn("funding skipped: underlying index market has not traded recently, mark price is stale",
+			"symbol", cfg.Symbol, "underlying", cfg.UnderlyingSymbol, "lastTradeAt", indexTicker.LastTradeAt)
 		return
 	}
 	indexPrice := indexTicker.MarkPrice
