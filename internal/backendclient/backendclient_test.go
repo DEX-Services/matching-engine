@@ -162,7 +162,7 @@ func TestClient_Backfill_DisabledIsNoop(t *testing.T) {
 func TestAsync_RunsFnWithoutBlockingCaller(t *testing.T) {
 	done := make(chan struct{})
 	start := time.Now()
-	Async("test-op", func(ctx context.Context) error {
+	Async(PendingSync{Op: "test-op", AccountID: "acct1", Asset: "USDC", Amount: "1", IdempotencyKey: "test-key"}, func(ctx context.Context) error {
 		defer close(done)
 		return fmt.Errorf("simulated failure")
 	})

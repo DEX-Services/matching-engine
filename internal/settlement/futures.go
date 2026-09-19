@@ -183,8 +183,9 @@ func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset str
 		// tradeID+accountID+"fee" is unique per (trade, side), so a retry of
 		// this exact fee settlement dedupes correctly even across restarts.
 		feeKey := tradeID + ":" + accountID + ":fee"
-		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.SettleFeeIdempotent(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee), category, feeKey)
+		feeAmount := backendclient.ToRawUnits(fee)
+		backendclient.Async(backendclient.PendingSync{Op: "settleFee", AccountID: accountID, Asset: quoteAsset, Amount: feeAmount, Category: category, IdempotencyKey: feeKey}, func(ctx context.Context) error {
+			return f.backend.SettleFeeIdempotent(ctx, accountID, quoteAsset, feeAmount, category, feeKey)
 		})
 	}
 
@@ -196,8 +197,10 @@ func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset str
 		if err := f.ledger.Debit(accountID, quoteAsset, margin); err != nil {
 			return err
 		}
-		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
+		marginKey := tradeID + ":" + accountID + ":open-margin"
+		marginAmount := backendclient.ToRawUnits(margin)
+		backendclient.Async(backendclient.PendingSync{Op: "settle", AccountID: accountID, Asset: quoteAsset, Amount: marginAmount, IdempotencyKey: marginKey}, func(ctx context.Context) error {
+			return f.backend.SettleIdempotent(ctx, accountID, quoteAsset, marginAmount, marginKey)
 		})
 		f.updatePosition(accountID, symbol, side, qty, price, margin, leverage, marginMode)
 		return nil
@@ -214,8 +217,14 @@ func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset str
 		if err := f.ledger.Debit(accountID, quoteAsset, margin); err != nil {
 			return err
 		}
-		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.Settle(ctx, accountID, quoteAsset, backendclient.ToRawUnits(margin))
+		// Distinct key from the open-margin branch above: this is the
+		// "overfill reopens in the new direction" margin debit, a separate
+		// logical event from a same-direction open even when both can occur
+		// for the same tradeID+accountID.
+		marginKey := tradeID + ":" + accountID + ":reopen-margin"
+		marginAmount := backendclient.ToRawUnits(margin)
+		backendclient.Async(backendclient.PendingSync{Op: "settle", AccountID: accountID, Asset: quoteAsset, Amount: marginAmount, IdempotencyKey: marginKey}, func(ctx context.Context) error {
+			return f.backend.SettleIdempotent(ctx, accountID, quoteAsset, marginAmount, marginKey)
 		})
 		f.updatePosition(accountID, symbol, side, openQty, price, margin, leverage, marginMode)
 	}
@@ -304,8 +313,9 @@ func (f *FuturesSettlement) realizeAndCredit(tradeID, accountID, quoteAsset stri
 	// this exact credit dedupes correctly even if the original attempt
 	// already landed on Dex-Backend before a lost/timed-out response.
 	creditKey := tradeID + ":" + accountID + ":credit"
-	backendclient.Async("credit", func(ctx context.Context) error {
-		return f.backend.CreditIdempotent(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement), creditKey)
+	creditAmount := backendclient.ToRawUnits(settlement)
+	backendclient.Async(backendclient.PendingSync{Op: "credit", AccountID: accountID, Asset: quoteAsset, Amount: creditAmount, IdempotencyKey: creditKey}, func(ctx context.Context) error {
+		return f.backend.CreditIdempotent(ctx, accountID, quoteAsset, creditAmount, creditKey)
 	})
 }
 

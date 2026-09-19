@@ -285,6 +285,16 @@ func main() {
 		}
 		go persistence.NewOutboxSweeper(pool, 10*time.Second).Run(ctx)
 
+		// M3: give Async a durable fallback for a balance-sync call that
+		// exhausts its retries (Dex-Backend down or unreachable for longer
+		// than a few seconds), and start the sweeper that replays those
+		// calls once Dex-Backend is reachable again — closing the
+		// engine-Postgres drift a sustained outage used to leave behind with
+		// no automatic recovery.
+		pendingSyncWriter := persistence.NewPendingSyncWriter(pool)
+		backendclient.OnAsyncExhausted = pendingSyncWriter.Write
+		go persistence.NewPendingSyncSweeper(pool, backend, 10*time.Second).Run(ctx)
+
 		if err := config.EnsureSchema(ctx, pool); err != nil {
 			slog.Error("ensure symbol_configs schema", "error", err)
 		} else if err := config.EnsureOptionInstruments(ctx, pool); err != nil {

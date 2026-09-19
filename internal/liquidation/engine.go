@@ -629,11 +629,31 @@ func (e *Engine) crossSafe(positions []*settlement.Position, accountID, quoteAss
 	return equity.GreaterThanOrEqual(totalMM)
 }
 
+// maxLiquidationMarkStaleness bounds how long ago a market's last real trade
+// may have been before its mark price is refused for a liquidation decision.
+// H6: this engine previously had no staleness guard anywhere in liquidation
+// at all (settlement/funding.go already added one for funding — see its
+// maxMarkStaleness and Ticker.MarkPriceFresh); a thin/quiet market's mark
+// price can be confirmed by no real trade for a long time, and liquidating
+// against a number nothing has actually traded at recently is exactly the
+// wrong direction to fail in — a false liquidation forcibly closes a real
+// position and cannot be undone. Kept short relative to funding's 5-minute
+// window since a liquidation decision needs to react quickly to genuinely
+// fresh moves, not just avoid a frozen feed.
+const maxLiquidationMarkStaleness = 30 * time.Second
+
 // markPrice returns the blended mark price for a futures symbol, or zero if
-// unavailable.
+// unavailable OR stale (no real trade within maxLiquidationMarkStaleness) —
+// callers already treat zero as "cannot evaluate, skip this position/account
+// this pass," which is the correct, conservative behavior for both cases.
 func (e *Engine) markPrice(symbol string) decimal.Decimal {
 	ticker, err := e.marketdata.Ticker(symbol, models.Futures)
-	if err != nil {
+	if err != nil || ticker.MarkPrice.IsZero() {
+		return decimal.Zero
+	}
+	if !ticker.MarkPriceFresh(maxLiquidationMarkStaleness) {
+		e.log.Warn("liquidation check skipped: mark price is stale (no recent trade)",
+			"symbol", symbol, "lastTradeAt", ticker.LastTradeAt)
 		return decimal.Zero
 	}
 	return ticker.MarkPrice

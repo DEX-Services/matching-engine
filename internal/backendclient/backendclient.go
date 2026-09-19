@@ -177,6 +177,12 @@ func (c *Client) Settle(ctx context.Context, userID, asset, amount string) error
 	return c.call(ctx, "/internal/balance/settle", userID, asset, amount, "")
 }
 
+// SettleIdempotent is Settle with an Idempotency-Key header attached; see
+// LockIdempotent's doc comment for the dedup guarantee.
+func (c *Client) SettleIdempotent(ctx context.Context, userID, asset, amount, idempotencyKey string) error {
+	return c.call(ctx, "/internal/balance/settle", userID, asset, amount, idempotencyKey)
+}
+
 // Credit calls POST /internal/balance/credit, realizing released margin plus
 // PnL into a user's real Postgres balance when a futures position closes.
 // amount may be negative (net loss); Dex-Backend applies it as a debit.
@@ -343,34 +349,61 @@ func (c *Client) call(ctx context.Context, path, userID, asset, amount, idempote
 	return nil
 }
 
+// PendingSync describes one balance-sync call that exhausted Async's
+// retries, in enough detail to replay it later: op is the backendclient
+// method name ("lock", "unlock", "settle", "credit", "settleFee"),
+// accountID/asset/amount are the call's own parameters, category is only
+// used by settleFee, and idempotencyKey is the SAME key the original call
+// already used — replaying with it is always safe (see Dex-Backend's
+// internal_idempotency_keys dedup) even if the original attempt actually
+// landed before the failure that produced this record.
+type PendingSync struct {
+	Op             string
+	AccountID      string
+	Asset          string
+	Amount         string
+	Category       string
+	IdempotencyKey string
+}
+
+// OnAsyncExhausted, when set (by cmd/engine/main.go at startup, wiring in a
+// Postgres-backed writer — see internal/persistence.PendingSyncWriter), is
+// called once for every Async call that fails on all asyncRetryAttempts
+// attempts, so it can be durably recorded and replayed later instead of only
+// logged and forgotten (M3). Left nil (e.g. in tests, or a deployment
+// without Postgres persistence wired) simply skips the durable-record step;
+// behavior otherwise stays exactly as it was before M3's fix.
+var OnAsyncExhausted func(ctx context.Context, sync PendingSync)
+
 // asyncRetryAttempts and asyncRetryDelay bound how hard Async fights a
-// transient failure (a network blip, the backend restarting) before giving
-// up and only logging. Kept short: this runs off the matching goroutine, but
-// an unbounded or slow retry loop still risks piling up if the backend stays
-// down for a while.
+// transient failure (a network blip, the backend restarting) before handing
+// off to OnAsyncExhausted (or, if that's unset, just logging). Kept short:
+// this runs off the matching goroutine, but an unbounded or slow retry loop
+// still risks piling up if the backend stays down for a while.
 const (
 	asyncRetryAttempts = 3
 	asyncRetryDelay    = 2 * time.Second
 )
 
 // Async runs fn in a goroutine with a fresh timeout context per attempt,
-// retrying a handful of times before giving up and only logging. Use for
-// Unlock/Settle calls that must never block the matching goroutine and whose
-// failure shouldn't undo work already committed to the in-memory ledger.
+// retrying a handful of times before handing off to OnAsyncExhausted. Use for
+// Lock/Unlock/Settle/Credit/SettleFee calls that must never block the
+// matching goroutine and whose failure shouldn't undo work already committed
+// to the in-memory ledger. sync describes the call being retried, so a
+// permanent failure can be durably recorded and replayed (see PendingSync);
+// pass it with the exact same idempotencyKey fn itself uses.
 //
 // Retrying matters specifically for Unlock: the in-memory ledger release
 // this always follows already ran synchronously and succeeded, so from the
 // engine's own point of view the reservation is gone. If the durable
-// Postgres unlock then fails just once (a transient network error, the
-// backend mid-restart) with no retry, the account's real `locked` balance is
-// stranded above what's actually reserved, permanently — every future
-// available-balance check subtracts a hold that no longer exists anywhere
-// but Postgres, degrading or zeroing that account's tradeable balance with
-// no way to self-heal (the release already "happened" from the engine's
-// perspective, so nothing re-attempts it). A few retries absorb exactly the
-// kind of one-off blip that caused that in practice, without turning this
-// into a full durable outbox.
-func Async(op string, fn func(ctx context.Context) error) {
+// Postgres unlock then fails with no retry AND no durable record, the
+// account's real `locked` balance is stranded above what's actually
+// reserved, permanently — every future available-balance check subtracts a
+// hold that no longer exists anywhere but Postgres, degrading or zeroing
+// that account's tradeable balance with no way to self-heal. A few retries
+// absorb a one-off blip; OnAsyncExhausted's durable record is what recovers
+// from a sustained outage that outlasts the retries.
+func Async(sync PendingSync, fn func(ctx context.Context) error) {
 	go func() {
 		var err error
 		for attempt := 0; attempt < asyncRetryAttempts; attempt++ {
@@ -383,8 +416,11 @@ func Async(op string, fn func(ctx context.Context) error) {
 			if err == nil {
 				return
 			}
-			slog.Warn("backendclient async call failed, retrying", "op", op, "attempt", attempt+1, "error", err)
+			slog.Warn("backendclient async call failed, retrying", "op", sync.Op, "account", sync.AccountID, "attempt", attempt+1, "error", err)
 		}
-		slog.Error("backendclient async call failed after retries", "op", op, "attempts", asyncRetryAttempts, "error", err)
+		slog.Error("backendclient async call failed after retries", "op", sync.Op, "account", sync.AccountID, "attempts", asyncRetryAttempts, "error", err)
+		if OnAsyncExhausted != nil {
+			OnAsyncExhausted(context.Background(), sync)
+		}
 	}()
 }

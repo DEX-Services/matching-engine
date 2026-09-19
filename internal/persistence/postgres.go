@@ -161,4 +161,26 @@ CREATE TABLE IF NOT EXISTS event_outbox (
     payload    JSONB       NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- M3: durable record of a Dex-Backend balance-sync call (Lock/Unlock/Settle/
+-- Credit/SettleFee) that failed even after backendclient.Async's retries.
+-- Previously such a failure was only logged — on a sustained Dex-Backend
+-- outage this let the engine's in-memory ledger (source of truth for
+-- trading) and Dex-Backend's Postgres balances drift apart with no automatic
+-- recovery. idempotency_key lets a replay be sent safely even if the
+-- original attempt actually landed on Dex-Backend before the failure that
+-- triggered this row (see Dex-Backend's internal_idempotency_keys table).
+CREATE TABLE IF NOT EXISTS pending_backend_sync (
+    id              BIGSERIAL   PRIMARY KEY,
+    op              TEXT        NOT NULL,
+    account_id      TEXT        NOT NULL,
+    asset           TEXT        NOT NULL,
+    amount          TEXT        NOT NULL,
+    category        TEXT,
+    idempotency_key TEXT        NOT NULL,
+    attempts        INT         NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_pending_backend_sync_created ON pending_backend_sync (created_at);
 `

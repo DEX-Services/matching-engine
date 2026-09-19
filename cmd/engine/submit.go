@@ -276,8 +276,9 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 				// loop, and reused across every retry attempt of this one
 				// logical unlock (see UnlockIdempotent's doc comment).
 				key := o.ID + ":release"
-				backendclient.Async("unlock", func(ctx context.Context) error {
-					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(overReserved), key)
+				amount := backendclient.ToRawUnits(overReserved)
+				backendclient.Async(backendclient.PendingSync{Op: "unlock", AccountID: o.AccountID, Asset: resAsset, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, amount, key)
 				})
 			}
 		}
@@ -291,8 +292,9 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 			d.ledger.Release(o.AccountID, resAsset, resAmount)
 			if d.backend.Enabled() {
 				key := o.ID + ":reject-unlock"
-				backendclient.Async("unlock", func(ctx context.Context) error {
-					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount), key)
+				amount := backendclient.ToRawUnits(resAmount)
+				backendclient.Async(backendclient.PendingSync{Op: "unlock", AccountID: o.AccountID, Asset: resAsset, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, amount, key)
 				})
 			}
 		}

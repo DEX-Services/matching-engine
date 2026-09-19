@@ -13,6 +13,7 @@ import (
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
 
@@ -102,14 +103,17 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 	if err := o.ledger.Debit(buyerID, quote, premium); err != nil {
 		return fmt.Errorf("options settle debit buyer premium: %w", err)
 	}
-	backendclient.Async("settle", func(ctx context.Context) error {
-		return o.backend.Settle(ctx, buyerID, quote, backendclient.ToRawUnits(premium))
+	debitKey := trade.ID + ":" + buyerID + ":premium-debit"
+	premiumAmount := backendclient.ToRawUnits(premium)
+	backendclient.Async(backendclient.PendingSync{Op: "settle", AccountID: buyerID, Asset: quote, Amount: premiumAmount, IdempotencyKey: debitKey}, func(ctx context.Context) error {
+		return o.backend.SettleIdempotent(ctx, buyerID, quote, premiumAmount, debitKey)
 	})
 
 	// Seller receives premium.
 	o.ledger.Credit(sellerID, quote, premium)
-	backendclient.Async("credit", func(ctx context.Context) error {
-		return o.backend.Credit(ctx, sellerID, quote, backendclient.ToRawUnits(premium))
+	creditKey := trade.ID + ":" + sellerID + ":premium-credit"
+	backendclient.Async(backendclient.PendingSync{Op: "credit", AccountID: sellerID, Asset: quote, Amount: premiumAmount, IdempotencyKey: creditKey}, func(ctx context.Context) error {
+		return o.backend.CreditIdempotent(ctx, sellerID, quote, premiumAmount, creditKey)
 	})
 
 	o.recordPosition(buyerID, trade.Symbol, trade.Quantity, premium, trade.BuyOrder, quote)
@@ -201,17 +205,26 @@ func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike 
 	if reservedCollateral.IsPositive() {
 		o.ledger.Release(accountID, quote, reservedCollateral)
 	}
+	// No trade backs a force-close (it happens independent of the option's
+	// own book liquidity), so there's no natural trade ID to key off of —
+	// generate one fresh here, same as futures liquidation's synthetic
+	// order ID for its analogous ClosePosition force-close.
+	closeEventID := uuid.NewString()
 	if pnl.IsNegative() {
 		if err := o.ledger.Debit(accountID, quote, pnl.Neg()); err != nil {
 			return decimal.Zero, fmt.Errorf("force-close debit: %w", err)
 		}
-		backendclient.Async("settle", func(ctx context.Context) error {
-			return o.backend.Settle(ctx, accountID, quote, backendclient.ToRawUnits(pnl.Neg()))
+		key := closeEventID + ":" + accountID + ":settle"
+		amount := backendclient.ToRawUnits(pnl.Neg())
+		backendclient.Async(backendclient.PendingSync{Op: "settle", AccountID: accountID, Asset: quote, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+			return o.backend.SettleIdempotent(ctx, accountID, quote, amount, key)
 		})
 	} else if pnl.IsPositive() {
 		o.ledger.Credit(accountID, quote, pnl)
-		backendclient.Async("credit", func(ctx context.Context) error {
-			return o.backend.Credit(ctx, accountID, quote, backendclient.ToRawUnits(pnl))
+		key := closeEventID + ":" + accountID + ":credit"
+		amount := backendclient.ToRawUnits(pnl)
+		backendclient.Async(backendclient.PendingSync{Op: "credit", AccountID: accountID, Asset: quote, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+			return o.backend.CreditIdempotent(ctx, accountID, quote, amount, key)
 		})
 	}
 
@@ -302,13 +315,22 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 		intrinsic = decimal.Max(decimal.Zero, pos.StrikePrice.Sub(markPrice))
 	}
 
+	// A stable per-position-per-expiry key: settleExpiry runs at most once
+	// per position under normal operation (removePosition below prevents a
+	// second sweep from finding it again), but a crash mid-way followed by a
+	// manual/automatic retry must still produce the SAME key for that retry
+	// to dedupe safely against Dex-Backend.
+	expiryEventID := positionKey(pos.AccountID, pos.Symbol, pos.StrikePrice, pos.Expiry, pos.OptionType)
+
 	if intrinsic.IsPositive() {
 		payout := intrinsic.Mul(pos.Size.Abs())
 		if pos.Size.IsPositive() {
 			// Long ITM: credit the payout.
 			p.ledger.Credit(pos.AccountID, quote, payout)
-			backendclient.Async("credit", func(ctx context.Context) error {
-				return p.backend.Credit(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
+			key := expiryEventID + ":credit"
+			amount := backendclient.ToRawUnits(payout)
+			backendclient.Async(backendclient.PendingSync{Op: "credit", AccountID: pos.AccountID, Asset: quote, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+				return p.backend.CreditIdempotent(ctx, pos.AccountID, quote, amount, key)
 			})
 		} else {
 			// Short ITM: debit the payout from the writer. If the debit
@@ -321,8 +343,10 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 				p.publishExpiryEvent(pos, markPrice)
 				return
 			}
-			backendclient.Async("settle", func(ctx context.Context) error {
-				return p.backend.Settle(ctx, pos.AccountID, quote, backendclient.ToRawUnits(payout))
+			key := expiryEventID + ":settle"
+			amount := backendclient.ToRawUnits(payout)
+			backendclient.Async(backendclient.PendingSync{Op: "settle", AccountID: pos.AccountID, Asset: quote, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+				return p.backend.SettleIdempotent(ctx, pos.AccountID, quote, amount, key)
 			})
 		}
 	}
@@ -338,8 +362,10 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 		residual := collateral.Sub(payout)
 		if residual.IsPositive() {
 			p.ledger.Release(pos.AccountID, quote, residual)
-			backendclient.Async("unlock", func(ctx context.Context) error {
-				return p.backend.Unlock(ctx, pos.AccountID, quote, backendclient.ToRawUnits(residual))
+			key := expiryEventID + ":unlock"
+			amount := backendclient.ToRawUnits(residual)
+			backendclient.Async(backendclient.PendingSync{Op: "unlock", AccountID: pos.AccountID, Asset: quote, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
+				return p.backend.UnlockIdempotent(ctx, pos.AccountID, quote, amount, key)
 			})
 		}
 	}
