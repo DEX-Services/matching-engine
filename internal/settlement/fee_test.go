@@ -138,7 +138,7 @@ func TestClosePosition_ChargesLiquidationFee(t *testing.T) {
 	notional := markPrice.Mul(qty)
 	liquidationFee := notional.Mul(decimal.NewFromFloat(0.02)) // 2%, the platform default
 
-	f.ClosePosition("acct1", symbol, quote, markPrice, liquidationFee)
+	f.ClosePosition("close1", "acct1", symbol, quote, markPrice, liquidationFee)
 
 	margin := decimal.NewFromInt(50000).Div(decimal.NewFromInt(10))   // leverage 10
 	wantBalance := balanceBeforeClose.Add(margin).Sub(liquidationFee) // margin released, minus the fee
@@ -159,7 +159,7 @@ func TestClosePosition_ZeroLiquidationFeeChangesNothing(t *testing.T) {
 	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
 	balanceBeforeClose := ledger.Available("acct1", quote)
 
-	f.ClosePosition("acct1", symbol, quote, decimal.NewFromInt(50000), decimal.Zero)
+	f.ClosePosition("close1", "acct1", symbol, quote, decimal.NewFromInt(50000), decimal.Zero)
 
 	margin := decimal.NewFromInt(50000).Div(decimal.NewFromInt(10))
 	wantBalance := balanceBeforeClose.Add(margin)

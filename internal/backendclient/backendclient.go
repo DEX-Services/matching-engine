@@ -114,13 +114,33 @@ type spotSettleReq struct {
 // Lock calls POST /internal/balance/lock. Returns an error if the backend
 // rejects the lock (e.g. insufficient real funds) or is unreachable.
 func (c *Client) Lock(ctx context.Context, userID, asset, amount string) error {
-	return c.call(ctx, "/internal/balance/lock", userID, asset, amount)
+	return c.call(ctx, "/internal/balance/lock", userID, asset, amount, "")
+}
+
+// LockIdempotent is Lock with an Idempotency-Key header attached. Dex-Backend
+// dedupes on (endpoint, key) inside the same transaction as the balance
+// mutation, so a retried call with the same key and the same
+// userID/asset/amount is a safe no-op even if the original attempt already
+// landed — see Dex-Backend's LedgerRepo.LockBalanceIdempotent. Pass a stable
+// business ID (e.g. the order ID) rather than a fresh UUID so retries across
+// process restarts still dedupe correctly.
+func (c *Client) LockIdempotent(ctx context.Context, userID, asset, amount, idempotencyKey string) error {
+	return c.call(ctx, "/internal/balance/lock", userID, asset, amount, idempotencyKey)
 }
 
 // Unlock calls POST /internal/balance/unlock. Best-effort: callers should log
 // failures but generally should not fail the in-memory release over it.
 func (c *Client) Unlock(ctx context.Context, userID, asset, amount string) error {
-	return c.call(ctx, "/internal/balance/unlock", userID, asset, amount)
+	return c.call(ctx, "/internal/balance/unlock", userID, asset, amount, "")
+}
+
+// UnlockIdempotent is Unlock with an Idempotency-Key header attached; see
+// LockIdempotent's doc comment for the dedup guarantee and key-choice advice.
+// Particularly relevant here since Unlock is usually called via Async, which
+// retries on failure — the same key must be reused across every retry
+// attempt of one logical unlock (generate it once outside the retry loop).
+func (c *Client) UnlockIdempotent(ctx context.Context, userID, asset, amount, idempotencyKey string) error {
+	return c.call(ctx, "/internal/balance/unlock", userID, asset, amount, idempotencyKey)
 }
 
 // ReplaceLocks atomically sets durable reservations for a dedicated
@@ -154,14 +174,23 @@ func (c *Client) ReplaceLocks(ctx context.Context, userID string, locks map[stri
 // Settle calls POST /internal/balance/settle, converting a Postgres lock into
 // a real debit when a fill settles.
 func (c *Client) Settle(ctx context.Context, userID, asset, amount string) error {
-	return c.call(ctx, "/internal/balance/settle", userID, asset, amount)
+	return c.call(ctx, "/internal/balance/settle", userID, asset, amount, "")
 }
 
 // Credit calls POST /internal/balance/credit, realizing released margin plus
 // PnL into a user's real Postgres balance when a futures position closes.
 // amount may be negative (net loss); Dex-Backend applies it as a debit.
 func (c *Client) Credit(ctx context.Context, userID, asset, amount string) error {
-	return c.call(ctx, "/internal/balance/credit", userID, asset, amount)
+	return c.call(ctx, "/internal/balance/credit", userID, asset, amount, "")
+}
+
+// CreditIdempotent is Credit with an Idempotency-Key header attached; see
+// LockIdempotent's doc comment for the dedup guarantee. Credit is normally
+// called via Async, so generate the key once per logical credit (e.g.
+// tradeID+":"+accountID+":credit") outside the retry loop, not fresh per
+// attempt.
+func (c *Client) CreditIdempotent(ctx context.Context, userID, asset, amount, idempotencyKey string) error {
+	return c.call(ctx, "/internal/balance/credit", userID, asset, amount, idempotencyKey)
 }
 
 type feeSettleReq struct {
@@ -181,6 +210,18 @@ type feeSettleReq struct {
 // category is "futures" or "liquidation" — see the Fee Revenue admin
 // breakdown in REFERRAL-AFFILIATE-PLAN.md.
 func (c *Client) SettleFee(ctx context.Context, userID, asset, amount, category string) error {
+	return c.settleFee(ctx, userID, asset, amount, category, "")
+}
+
+// SettleFeeIdempotent is SettleFee with an Idempotency-Key header attached;
+// see LockIdempotent's doc comment for the dedup guarantee. SettleFee is
+// normally called via Async, so generate the key once per logical fee
+// settlement (e.g. tradeID+":"+accountID+":fee") outside the retry loop.
+func (c *Client) SettleFeeIdempotent(ctx context.Context, userID, asset, amount, category, idempotencyKey string) error {
+	return c.settleFee(ctx, userID, asset, amount, category, idempotencyKey)
+}
+
+func (c *Client) settleFee(ctx context.Context, userID, asset, amount, category, idempotencyKey string) error {
 	if !c.Enabled() {
 		return nil
 	}
@@ -194,6 +235,9 @@ func (c *Client) SettleFee(ctx context.Context, userID, asset, amount, category 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Engine-Secret", c.secret)
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("backendclient /internal/balance/fee: %w", err)
@@ -269,7 +313,7 @@ func (c *Client) Backfill(ctx context.Context) (synced, failed, total int, err e
 	return result.Synced, result.Failed, result.Total, nil
 }
 
-func (c *Client) call(ctx context.Context, path, userID, asset, amount string) error {
+func (c *Client) call(ctx context.Context, path, userID, asset, amount, idempotencyKey string) error {
 	if !c.Enabled() {
 		return nil
 	}
@@ -283,6 +327,9 @@ func (c *Client) call(ctx context.Context, path, userID, asset, amount string) e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Engine-Secret", c.secret)
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

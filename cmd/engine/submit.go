@@ -252,7 +252,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		// in-memory ledger and Postgres must not diverge, so roll back the
 		// local reservation and reject the order.
 		if d.backend.Enabled() {
-			if err := d.backend.Lock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+			if err := d.backend.LockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount), o.ID); err != nil {
 				d.ledger.Release(o.AccountID, resAsset, resAmount)
 				return rejectPipeline(d, o, "balance lock failed: "+err.Error(), http.StatusBadRequest, fmt.Errorf("risk: balance lock failed: %w", err))
 			}
@@ -272,8 +272,12 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		if overReserved.IsPositive() {
 			d.ledger.Release(o.AccountID, resAsset, overReserved)
 			if d.backend.Enabled() {
+				// Idempotency key generated once here, outside Async's retry
+				// loop, and reused across every retry attempt of this one
+				// logical unlock (see UnlockIdempotent's doc comment).
+				key := o.ID + ":release"
 				backendclient.Async("unlock", func(ctx context.Context) error {
-					return d.backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(overReserved))
+					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(overReserved), key)
 				})
 			}
 		}
@@ -286,8 +290,9 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		if resAmount.IsPositive() {
 			d.ledger.Release(o.AccountID, resAsset, resAmount)
 			if d.backend.Enabled() {
+				key := o.ID + ":reject-unlock"
 				backendclient.Async("unlock", func(ctx context.Context) error {
-					return d.backend.Unlock(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount))
+					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(resAmount), key)
 				})
 			}
 		}

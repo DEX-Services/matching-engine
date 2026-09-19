@@ -137,10 +137,10 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 		buyerFee, sellerFee = makerFee, takerFee
 	}
 
-	if err := f.applyFill(buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode, trade.BuyOrder.InternalLiquidation, buyerFee); err != nil {
+	if err := f.applyFill(trade.ID, buyerID, trade.Symbol, quote, models.Buy, trade.Quantity, trade.Price, buyerLeverage, buyerMarginMode, trade.BuyOrder.InternalLiquidation, buyerFee); err != nil {
 		return fmt.Errorf("futures: apply buyer fill: %w", err)
 	}
-	if err := f.applyFill(sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode, trade.SellOrder.InternalLiquidation, sellerFee); err != nil {
+	if err := f.applyFill(trade.ID, sellerID, trade.Symbol, quote, models.Sell, trade.Quantity, trade.Price, sellerLeverage, sellerMarginMode, trade.SellOrder.InternalLiquidation, sellerFee); err != nil {
 		return fmt.Errorf("futures: apply seller fill: %w", err)
 	}
 
@@ -163,7 +163,7 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 // fee is this side's maker/taker fee (already discount-adjusted), charged
 // against the account's quote-asset balance in addition to the margin debit
 // — it is not held as position margin and is never returned to the account.
-func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side models.OrderSide,
+func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset string, side models.OrderSide,
 	qty, price decimal.Decimal, leverage int, marginMode string, isLiquidation bool, fee decimal.Decimal) error {
 	if fee.IsPositive() {
 		if err := f.ledger.Debit(accountID, quoteAsset, fee); err != nil {
@@ -179,8 +179,12 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 		if isLiquidation {
 			category = "liquidation"
 		}
+		// Idempotency key generated once here, outside Async's retry loop —
+		// tradeID+accountID+"fee" is unique per (trade, side), so a retry of
+		// this exact fee settlement dedupes correctly even across restarts.
+		feeKey := tradeID + ":" + accountID + ":fee"
 		backendclient.Async("settle", func(ctx context.Context) error {
-			return f.backend.SettleFee(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee), category)
+			return f.backend.SettleFeeIdempotent(ctx, accountID, quoteAsset, backendclient.ToRawUnits(fee), category, feeKey)
 		})
 	}
 
@@ -202,7 +206,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 	closeQty := decimal.Min(qty, existing.Size)
 	openQty := qty.Sub(closeQty)
 
-	f.closePortion(accountID, symbol, quoteAsset, price, closeQty, isLiquidation)
+	f.closePortion(tradeID, accountID, symbol, quoteAsset, price, closeQty, isLiquidation)
 
 	if openQty.IsPositive() {
 		notional := price.Mul(openQty)
@@ -222,7 +226,7 @@ func (f *FuturesSettlement) applyFill(accountID, symbol, quoteAsset string, side
 // closeQty of accountID's existing position at symbol, crediting the result
 // to the ledger and (asynchronously) to Postgres. Deletes the position if it
 // is fully closed.
-func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal, isLiquidation bool) {
+func (f *FuturesSettlement) closePortion(tradeID, accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal, isLiquidation bool) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -245,7 +249,7 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 	}
 	f.mu.Unlock()
 
-	f.realizeAndCredit(accountID, quoteAsset, releaseMargin, pnl, !crossMargin)
+	f.realizeAndCredit(tradeID, accountID, quoteAsset, releaseMargin, pnl, !crossMargin)
 
 	if f.bus != nil {
 		f.bus.Publish(&models.Event{
@@ -274,7 +278,7 @@ func (f *FuturesSettlement) closePortion(accountID, symbol, quoteAsset string, p
 // loss beyond the released margin is applied as a real debit. A failed debit
 // is logged as a critical error so the ledger divergence is visible for
 // reconciliation instead of being silently ignored.
-func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margin, pnl decimal.Decimal, isolated bool) {
+func (f *FuturesSettlement) realizeAndCredit(tradeID, accountID, quoteAsset string, margin, pnl decimal.Decimal, isolated bool) {
 	settlement := margin.Add(pnl)
 	if isolated && settlement.IsNegative() {
 		// Isolated margin: loss is capped at the position's margin.
@@ -295,8 +299,13 @@ func (f *FuturesSettlement) realizeAndCredit(accountID, quoteAsset string, margi
 	if settlement.IsZero() {
 		return
 	}
+	// Idempotency key generated once here, outside Async's retry loop —
+	// tradeID+accountID+"credit" is unique per (trade, side), so a retry of
+	// this exact credit dedupes correctly even if the original attempt
+	// already landed on Dex-Backend before a lost/timed-out response.
+	creditKey := tradeID + ":" + accountID + ":credit"
 	backendclient.Async("credit", func(ctx context.Context) error {
-		return f.backend.Credit(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement))
+		return f.backend.CreditIdempotent(ctx, accountID, quoteAsset, backendclient.ToRawUnits(settlement), creditKey)
 	})
 }
 
@@ -395,7 +404,7 @@ func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decim
 // the discount-adjusted FeeLookup, same as maker/taker fees elsewhere in this
 // file, so this method itself stays fee-shape-agnostic and just deducts
 // whatever amount it's given.
-func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, markPrice, liquidationFee decimal.Decimal) {
+func (f *FuturesSettlement) ClosePosition(closeEventID, accountID, symbol, quoteAsset string, markPrice, liquidationFee decimal.Decimal) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -412,7 +421,7 @@ func (f *FuturesSettlement) ClosePosition(accountID, symbol, quoteAsset string, 
 	if liquidationFee.IsPositive() {
 		pnl = pnl.Sub(liquidationFee)
 	}
-	f.realizeAndCredit(accountID, quoteAsset, margin, pnl, !crossMargin)
+	f.realizeAndCredit(closeEventID, accountID, quoteAsset, margin, pnl, !crossMargin)
 }
 
 // GetPosition returns a copy of the current position for an account/symbol,

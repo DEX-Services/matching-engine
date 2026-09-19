@@ -697,7 +697,7 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 			notional := markPrice.Mul(remaining.Size.Abs())
 			fee = notional.Mul(e.liquidationFee(pos.AccountID))
 		}
-		e.settlement.ClosePosition(pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice, fee)
+		e.settlement.ClosePosition(order.ID, pos.AccountID, pos.Symbol, cfg.QuoteCurrency, markPrice, fee)
 	}
 
 	// Compute the actual closed size for the event (may be less than the

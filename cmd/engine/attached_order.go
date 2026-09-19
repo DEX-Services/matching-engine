@@ -208,7 +208,7 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 				return err
 			}
 			if d.backend.Enabled() {
-				if err := d.backend.Lock(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+				if err := d.backend.LockIdempotent(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount), g.ID); err != nil {
 					d.ledger.Release(g.AccountID, resAsset, resAmount)
 					return err
 				}
@@ -235,7 +235,7 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 			}
 			d.ledger.Release(g.AccountID, resAsset, resAmount)
 			if d.backend.Enabled() {
-				if err := d.backend.Unlock(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount)); err != nil {
+				if err := d.backend.UnlockIdempotent(context.Background(), g.AccountID, resAsset, backendclient.ToRawUnits(resAmount), g.ID+":release"); err != nil {
 					return err
 				}
 			}

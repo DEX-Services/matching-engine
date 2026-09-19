@@ -676,7 +676,7 @@ func main() {
 							// caller can place replacement quotes. Async unlocks raced
 							// the next MM ladder and caused false insufficient-balance
 							// rejections.
-							if err := backend.Unlock(r.Context(), order.AccountID, asset, backendclient.ToRawUnits(amount)); err != nil {
+							if err := backend.UnlockIdempotent(r.Context(), order.AccountID, asset, backendclient.ToRawUnits(amount), order.ID+":cancel-unlock"); err != nil {
 								slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
 							}
 						}
@@ -686,7 +686,7 @@ func main() {
 		} else if unlockAsset, unlockAmount := risk.ReleaseAmountFor(order); unlockAmount.IsPositive() {
 			// Wait for the durable release before acknowledging cancellation;
 			// market makers immediately replace cancelled orders.
-			if err := backend.Unlock(r.Context(), order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount)); err != nil {
+			if err := backend.UnlockIdempotent(r.Context(), order.AccountID, unlockAsset, backendclient.ToRawUnits(unlockAmount), order.ID+":cancel-unlock"); err != nil {
 				slog.Error("backend unlock after cancel failed", "order", order.ID, "error", err)
 			}
 		}
