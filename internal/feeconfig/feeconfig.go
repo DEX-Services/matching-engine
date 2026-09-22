@@ -143,10 +143,37 @@ func (r *Registry) reload(ctx context.Context) error {
 	}
 
 	r.mu.Lock()
+	changed := !ratesEqual(r.rates, fresh)
 	r.rates = fresh
 	r.mu.Unlock()
-	r.log.Info("fee config reloaded", "count", len(fresh))
+	// Skip the log line (not the query — StartHotReload's ticker still
+	// fires on schedule, and a real edit must still be picked up promptly)
+	// when nothing actually changed. Fee rates change rarely (an admin
+	// action), so at a 10s poll interval this was logging "fee config
+	// reloaded" ~8,640 times/day for a config that hadn't moved in weeks —
+	// pure log noise with no signal. The query itself still runs every
+	// tick; only the swap+log is skipped when the fresh snapshot is
+	// identical to what's already loaded.
+	if changed {
+		r.log.Info("fee config reloaded", "count", len(fresh))
+	}
 	return nil
+}
+
+// ratesEqual reports whether two rate snapshots hold the same set of keys
+// mapped to the same values. fixedpoint.Fixed is a plain int64, so this is
+// a cheap direct comparison — no need for an actual hash given the map is
+// always small (ValidKeys' length, currently 9).
+func ratesEqual(a, b map[string]fixedpoint.Fixed) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureSchema creates the fee_config table if it does not exist.

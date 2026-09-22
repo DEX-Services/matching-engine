@@ -107,10 +107,37 @@ func (r *Registry) reload(ctx context.Context) error {
 	}
 
 	r.mu.Lock()
+	changed := !discountsEqual(r.byID, fresh)
 	r.byID = fresh
 	r.mu.Unlock()
-	r.log.Info("discount registry reloaded", "activeUsers", len(fresh))
+	// Skip the log line (not the query — StartHotReload's ticker still
+	// fires on schedule, and a real subscription change must still be
+	// picked up promptly) when nothing actually changed. Active-discount
+	// membership changes rarely relative to a 10s poll interval, so this
+	// was logging "discount registry reloaded" on every single tick even
+	// with a completely static set of subscribers — pure log noise with no
+	// signal, same issue as feeconfig.Registry's identical reload pattern.
+	if changed {
+		r.log.Info("discount registry reloaded", "activeUsers", len(fresh))
+	}
 	return nil
+}
+
+// discountsEqual reports whether two userID->discount snapshots hold the
+// same set of keys mapped to the same values. A direct comparison rather
+// than an actual hash — cheap enough even at a few thousand active
+// subscribers, and avoids the (however small) risk of a hash collision
+// masking a real change.
+func discountsEqual(a, b map[string]fixedpoint.Fixed) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureSchema creates fee_tiers and user_fee_subscriptions if they do not
