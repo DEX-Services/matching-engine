@@ -11,6 +11,7 @@ import (
 
 	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
@@ -75,7 +76,7 @@ type Engine struct {
 	// liquidationFee resolves the (discount-adjusted) liquidation penalty
 	// rate for an account — see feeconfig.KeyLiquidation. May be nil (no
 	// liquidation fee charged), e.g. in tests that predate this feature.
-	liquidationFee func(accountID string) decimal.Decimal
+	liquidationFee func(accountID string) fixedpoint.Fixed
 }
 
 // New creates a liquidation Engine.
@@ -96,7 +97,7 @@ func New(registry *matching.Registry, fs *settlement.FuturesSettlement, md *mark
 // SetLiquidationFee wires the (discount-adjusted) liquidation penalty rate
 // lookup. Optional — call once at startup; if never called, liquidations
 // charge no fee (matching this package's pre-existing behavior).
-func (e *Engine) SetLiquidationFee(fn func(accountID string) decimal.Decimal) {
+func (e *Engine) SetLiquidationFee(fn func(accountID string) fixedpoint.Fixed) {
 	e.liquidationFee = fn
 }
 
@@ -203,7 +204,7 @@ func (e *Engine) sweep() {
 const optionsMarginCallWarningLossPct = 75
 
 // warningLossFraction is optionsMarginCallWarningLossPct as a ratio (75 -> 0.75).
-var warningLossFraction = decimal.NewFromInt(optionsMarginCallWarningLossPct).Div(decimal.NewFromInt(100))
+var warningLossFraction = fixedpoint.FromInt64(optionsMarginCallWarningLossPct).Div(fixedpoint.FromInt64(100))
 
 // optionsMaintenanceMarginPct: a writer is liquidated once equity falls below
 // this percentage of the collateral currently required for the position. 50
@@ -246,13 +247,13 @@ var warningLossFraction = decimal.NewFromInt(optionsMarginCallWarningLossPct).Di
 const optionsMaintenanceMarginPct = 50
 
 // maintenanceFraction is optionsMaintenanceMarginPct as a ratio (50 -> 0.5).
-var maintenanceFraction = decimal.NewFromInt(optionsMaintenanceMarginPct).Div(decimal.NewFromInt(100))
+var maintenanceFraction = fixedpoint.FromInt64(optionsMaintenanceMarginPct).Div(fixedpoint.FromInt64(100))
 
 // maintenanceBar is the equity level below which a writer is force-closed:
 // a fraction of the collateral their position currently requires. Extracted
 // as a pure function so the relationship between the maintenance bar and the
 // warning threshold is directly testable.
-func maintenanceBar(reserved decimal.Decimal) decimal.Decimal {
+func maintenanceBar(reserved fixedpoint.Fixed) fixedpoint.Fixed {
 	return reserved.Mul(maintenanceFraction)
 }
 
@@ -295,7 +296,7 @@ func (e *Engine) checkOptionsMarginCalls() {
 		if !ok {
 			continue // cannot mark-to-market without a live theoretical/book price
 		}
-		premiumPerUnit := decimal.Zero
+		premiumPerUnit := fixedpoint.Zero
 		if qty.IsPositive() {
 			// Premium is stored negative for a writer (credit); use its
 			// magnitude per unit as the "premium already received" input
@@ -310,7 +311,7 @@ func (e *Engine) checkOptionsMarginCalls() {
 		if maintenanceRequired.IsZero() {
 			continue
 		}
-		utilizationPct := maintenanceRequired.Div(equity.Abs().Add(decimal.NewFromFloat(0.00000001))).Mul(decimal.NewFromInt(100))
+		utilizationPct := maintenanceRequired.Div(equity.Abs().Add(fixedpoint.MustFromString("0.00000001"))).Mul(fixedpoint.FromInt64(100))
 
 		// Three bands, checked strongest-condition-first.
 		//
@@ -334,7 +335,7 @@ func (e *Engine) checkOptionsMarginCalls() {
 			e.log.Info("options writer approaching maintenance margin; warning issued",
 				"account", pos.AccountID, "symbol", pos.Symbol, "equity", equity,
 				"maintenanceRequired", maintenanceRequired,
-				"lossBufferConsumedPct", lossBufferConsumed(reserved, equity).Mul(decimal.NewFromInt(100)).StringFixed(1),
+				"lossBufferConsumedPct", lossBufferConsumed(reserved, equity).Mul(fixedpoint.FromInt64(100)).ToDecimal().StringFixed(1),
 				"mark", mark)
 			e.publishMarginCall(pos, models.MarginCallWarning, maintenanceRequired, reserved, equity, utilizationPct)
 
@@ -370,25 +371,25 @@ func (e *Engine) checkOptionsMarginCalls() {
 // without an options settlement engine, a mark source, or a live position.
 // See optionsMarginCallWarningLossPct for why the threshold is expressed
 // against this bounded quantity rather than an equity/maintenance ratio.
-func lossBufferConsumed(reserved, equity decimal.Decimal) decimal.Decimal {
+func lossBufferConsumed(reserved, equity fixedpoint.Fixed) fixedpoint.Fixed {
 	// A zero/negative requirement has nothing left to consume; report fully
 	// consumed so such a position can never sit silently in the healthy band.
 	if !reserved.IsPositive() {
-		return decimal.NewFromInt(1)
+		return fixedpoint.FromInt64(1)
 	}
 	buffer := reserved.Sub(maintenanceBar(reserved))
 	if !buffer.IsPositive() {
 		// Degenerate config (maintenance == full requirement): no room to
 		// warn in, so treat anything not fully collateralized as consumed.
 		if equity.GreaterThanOrEqual(reserved) {
-			return decimal.Zero
+			return fixedpoint.Zero
 		}
-		return decimal.NewFromInt(1)
+		return fixedpoint.FromInt64(1)
 	}
 	consumed := reserved.Sub(equity).Div(buffer)
 	// A profitable writer (equity above reserved) has consumed nothing.
 	if consumed.IsNegative() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return consumed
 }
@@ -401,7 +402,7 @@ func lossBufferConsumed(reserved, equity decimal.Decimal) decimal.Decimal {
 func (e *Engine) publishMarginCall(
 	pos *settlement.OptionsPosition,
 	stage models.MarginCallStage,
-	maintenanceRequired, reserved, equity, utilizationPct decimal.Decimal,
+	maintenanceRequired, reserved, equity, utilizationPct fixedpoint.Fixed,
 ) {
 	if e.bus == nil {
 		return
@@ -423,29 +424,29 @@ func (e *Engine) publishMarginCall(
 // theoretical Black-Scholes price using the underlying's live mark — the
 // same fallback order /option-chain uses (see cmd/engine/main.go). Returns
 // false only when neither is available (no live underlying mark at all).
-func (e *Engine) optionMark(pos *settlement.OptionsPosition) (decimal.Decimal, bool) {
+func (e *Engine) optionMark(pos *settlement.OptionsPosition) (fixedpoint.Fixed, bool) {
 	if bookTicker, err := e.marketdata.Ticker(pos.Symbol, models.Options); err == nil && bookTicker.MarkPrice.IsPositive() {
 		return bookTicker.MarkPrice, true
 	}
 	underlying := underlyingFromOptionSymbol(pos.Symbol, pos.QuoteCurrency)
 	spotTicker, err := e.marketdata.Ticker(underlying, models.Spot)
 	if err != nil || !spotTicker.MarkPrice.IsPositive() {
-		return decimal.Zero, false
+		return fixedpoint.Zero, false
 	}
-	spot, _ := spotTicker.MarkPrice.Float64()
-	strike, _ := pos.StrikePrice.Float64()
+	spot, _ := spotTicker.MarkPrice.ToDecimal().Float64()
+	strike, _ := pos.StrikePrice.ToDecimal().Float64()
 	tYears := time.Until(pos.Expiry).Hours() / 24 / 365
 	if tYears <= 0 {
 		// Past expiry and not yet swept by ExpiryProcessor (runs on its own
 		// 1-minute interval) — value at intrinsic, the only meaningful price
 		// for an expired contract.
 		theo := pricing.Intrinsic(spot, strike, pos.OptionType == "CALL")
-		return decimal.NewFromFloat(theo), true
+		return fixedpoint.MustFromDecimal(decimal.NewFromFloat(theo)), true
 	}
 	const assumedVol = 0.6
 	const riskFreeRate = 0.03
 	theo := pricing.Price(spot, strike, tYears, assumedVol, riskFreeRate, pos.OptionType == "CALL")
-	return decimal.NewFromFloat(theo), true
+	return fixedpoint.MustFromDecimal(decimal.NewFromFloat(theo)), true
 }
 
 // underlyingFromOptionSymbol extracts the underlying spot symbol from an
@@ -471,16 +472,16 @@ func underlyingFromOptionSymbol(symbol, quoteCurrency string) string {
 // force-settles any unfilled remainder via OptionsSettlement.ForceClosePosition
 // at the mark price. reservedCollateral is released as part of that
 // force-close (see its doc comment).
-func (e *Engine) forceCloseOption(pos *settlement.OptionsPosition, reservedCollateral, mark decimal.Decimal) {
+func (e *Engine) forceCloseOption(pos *settlement.OptionsPosition, reservedCollateral, mark fixedpoint.Fixed) {
 	qty := pos.Size.Abs()
 	// Options use their own, much wider tolerance — see the constant's doc for
 	// why the futures 1% cap made the theoretical-mark fallback the normal path
 	// here rather than the last resort it was meant to be.
-	tol := decimal.NewFromFloat(optionsLiquidationSlippageTolerance)
+	tol := fixedpoint.MustFromString("0.10")
 	// Closing a short (buying back): cap the price no higher than mark*(1+tol).
-	capPrice := mark.Mul(decimal.NewFromInt(1).Add(tol))
+	capPrice := mark.Mul(fixedpoint.FromInt64(1).Add(tol))
 	if !capPrice.IsPositive() {
-		capPrice = decimal.NewFromFloat(0.0001)
+		capPrice = fixedpoint.MustFromString("0.0001")
 	}
 
 	order := &models.Order{
@@ -547,8 +548,8 @@ func (e *Engine) checkIsolated(pos *settlement.Position) {
 // cross positions on that quote asset.
 func (e *Engine) checkCross(positions []*settlement.Position, accountID, quoteAsset string) {
 	// Fetch mark prices and per-position maintenance margins.
-	marks := make(map[string]decimal.Decimal, len(positions))
-	var totalMargin, totalPnL, totalMM decimal.Decimal
+	marks := make(map[string]fixedpoint.Fixed, len(positions))
+	var totalMargin, totalPnL, totalMM fixedpoint.Fixed
 	for _, pos := range positions {
 		mark := e.markPrice(pos.Symbol)
 		if mark.IsZero() {
@@ -605,8 +606,8 @@ func (e *Engine) checkCross(positions []*settlement.Position, accountID, quoteAs
 // account's still-open cross positions and returns true if the account is
 // no longer in liquidation.
 func (e *Engine) crossSafe(positions []*settlement.Position, accountID, quoteAsset string,
-	marks map[string]decimal.Decimal) bool {
-	var totalMargin, totalPnL, totalMM decimal.Decimal
+	marks map[string]fixedpoint.Fixed) bool {
+	var totalMargin, totalPnL, totalMM fixedpoint.Fixed
 	for _, pos := range positions {
 		cur := e.settlement.GetPosition(pos.AccountID, pos.Symbol)
 		if cur == nil || cur.Size.IsZero() {
@@ -646,15 +647,15 @@ const maxLiquidationMarkStaleness = 30 * time.Second
 // unavailable OR stale (no real trade within maxLiquidationMarkStaleness) —
 // callers already treat zero as "cannot evaluate, skip this position/account
 // this pass," which is the correct, conservative behavior for both cases.
-func (e *Engine) markPrice(symbol string) decimal.Decimal {
+func (e *Engine) markPrice(symbol string) fixedpoint.Fixed {
 	ticker, err := e.marketdata.Ticker(symbol, models.Futures)
 	if err != nil || ticker.MarkPrice.IsZero() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	if !ticker.MarkPriceFresh(maxLiquidationMarkStaleness) {
 		e.log.Warn("liquidation check skipped: mark price is stale (no recent trade)",
 			"symbol", symbol, "lastTradeAt", ticker.LastTradeAt)
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return ticker.MarkPrice
 }
@@ -663,7 +664,7 @@ func (e *Engine) markPrice(symbol string) decimal.Decimal {
 // slippage tolerance) to close the position through the matching engine at
 // real fill prices, then force-closes any unfilled remainder at the mark
 // price via settlement.ClosePosition.
-func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal, cfg *config.SymbolConfig) {
+func (e *Engine) forceClose(pos *settlement.Position, markPrice fixedpoint.Fixed, cfg *config.SymbolConfig) {
 	originalSize := pos.Size
 
 	// closingSide is the opposite side of the held position.
@@ -675,13 +676,13 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 	// Cap the fill price to mark ± slippage tolerance to protect against
 	// filling at arbitrarily bad prices in a thin book.
 	capPrice := markPrice
-	tol := decimal.NewFromFloat(liquidationSlippageTolerance)
+	tol := fixedpoint.MustFromString("0.01")
 	if closingSide == models.Sell {
 		// Closing a long: sell no lower than mark*(1-tol).
-		capPrice = markPrice.Mul(decimal.NewFromInt(1).Sub(tol))
+		capPrice = markPrice.Mul(fixedpoint.FromInt64(1).Sub(tol))
 	} else {
 		// Closing a short: buy no higher than mark*(1+tol).
-		capPrice = markPrice.Mul(decimal.NewFromInt(1).Add(tol))
+		capPrice = markPrice.Mul(fixedpoint.FromInt64(1).Add(tol))
 	}
 
 	order := &models.Order{
@@ -712,7 +713,7 @@ func (e *Engine) forceClose(pos *settlement.Position, markPrice decimal.Decimal,
 	// exists (i.e. the IOC order did not fully fill it). This avoids
 	// realizing PnL twice or at inconsistent prices for the same quantity.
 	if remaining := e.settlement.GetPosition(pos.AccountID, pos.Symbol); remaining != nil && !remaining.Size.IsZero() {
-		fee := decimal.Zero
+		fee := fixedpoint.Zero
 		if e.liquidationFee != nil {
 			notional := markPrice.Mul(remaining.Size.Abs())
 			fee = notional.Mul(e.liquidationFee(pos.AccountID))

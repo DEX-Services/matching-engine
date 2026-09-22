@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
-	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,8 +27,8 @@ func newOrder(id string, side models.OrderSide, price, qty string, orderType mod
 		Market:      models.Spot,
 		Side:        side,
 		Type:        orderType,
-		Price:       decimal.RequireFromString(price),
-		Quantity:    decimal.RequireFromString(qty),
+		Price:       fixedpoint.MustFromString(price),
+		Quantity:    fixedpoint.MustFromString(qty),
 		TimeInForce: models.GTC,
 		Status:      models.StatusPending,
 		CreatedAt:   time.Now(),
@@ -108,8 +108,8 @@ func TestConservation_SingleTrade(t *testing.T) {
 	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 
-	totalBuyFilled := decimal.Zero
-	totalSellFilled := decimal.Zero
+	totalBuyFilled := fixedpoint.Zero
+	totalSellFilled := fixedpoint.Zero
 	for _, t := range trades {
 		if t.MakerSide == models.Buy {
 			totalBuyFilled = totalBuyFilled.Add(t.Quantity)
@@ -119,7 +119,7 @@ func TestConservation_SingleTrade(t *testing.T) {
 	}
 
 	// In each trade, maker qty == taker qty, so aggregate both sides are equal.
-	totalQty := decimal.Zero
+	totalQty := fixedpoint.Zero
 	for _, trade := range trades {
 		totalQty = totalQty.Add(trade.Quantity)
 	}
@@ -143,12 +143,12 @@ func TestConservation_MultiplePartialFills(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, trades, 3, "should generate 3 trades")
 
-	totalTraded := decimal.Zero
+	totalTraded := fixedpoint.Zero
 	for _, t := range trades {
 		totalTraded = totalTraded.Add(t.Quantity)
 	}
 	assert.True(t, buy.Filled.Equal(totalTraded), "buyer filled qty must equal sum of trade quantities")
-	assert.True(t, totalTraded.Equal(decimal.NewFromInt(6)), "total traded must be 6")
+	assert.True(t, totalTraded.Equal(fixedpoint.FromInt64(6)), "total traded must be 6")
 }
 
 // ─── Invariant 3: Limit price never violated ─────────────────────────────────
@@ -173,7 +173,7 @@ func TestLimitPriceNeverViolated_Buy(t *testing.T) {
 	trades2, _, err := b.Submit(buy2)
 	require.NoError(t, err)
 	require.Len(t, trades2, 1)
-	assert.True(t, trades2[0].Price.Equal(decimal.NewFromInt(105)),
+	assert.True(t, trades2[0].Price.Equal(fixedpoint.FromInt64(105)),
 		"fill price must be maker price (105), not aggressor limit (110)")
 	// Aggressor got 105 which is ≤ their limit 110 — not worse.
 	assert.True(t, trades2[0].Price.LessThanOrEqual(buy2.Price),
@@ -217,7 +217,7 @@ func TestBookNeverCrossed(t *testing.T) {
 		{limitBuy("b2", "101", "2")},
 		{limitSell("s1", "102", "1")},
 		{limitSell("s2", "103", "4")},
-		{limitBuy("b3", "102", "5")}, // crosses s1 at 102
+		{limitBuy("b3", "102", "5")},  // crosses s1 at 102
 		{limitSell("s3", "100", "2")}, // crosses b1 at 100
 	}
 
@@ -253,7 +253,7 @@ func TestOrderTerminalState_MarketOrderFullyFilled(t *testing.T) {
 	mkt := &models.Order{
 		ID: "mkt-1", AccountID: "acct-mkt-1", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Buy, Type: models.Market,
-		Quantity: decimal.NewFromInt(5), Status: models.StatusPending,
+		Quantity: fixedpoint.FromInt64(5), Status: models.StatusPending,
 		CreatedAt: time.Now(),
 	}
 	_, _, err = b.Submit(mkt)
@@ -267,7 +267,7 @@ func TestOrderTerminalState_MarketOrderNoLiquidity(t *testing.T) {
 	mkt := &models.Order{
 		ID: "mkt-2", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Buy, Type: models.Market,
-		Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
+		Quantity: fixedpoint.FromInt64(1), Status: models.StatusPending,
 		CreatedAt: time.Now(),
 	}
 	_, _, err := b.Submit(mkt)
@@ -287,7 +287,7 @@ func TestOrderTerminalState_IOCPartiallyFilled(t *testing.T) {
 	assert.True(t, ioc.IsTerminal(), "IOC order must reach terminal state")
 	// Partially filled → remainder cancelled.
 	assert.Equal(t, models.StatusCancelled, ioc.Status)
-	assert.True(t, ioc.Filled.Equal(decimal.NewFromInt(3)))
+	assert.True(t, ioc.Filled.Equal(fixedpoint.FromInt64(3)))
 }
 
 func TestOrderTerminalState_FOKCancelledWhenCannotFill(t *testing.T) {
@@ -317,11 +317,11 @@ func TestPartialFill_StatusAndQuantities(t *testing.T) {
 	trades, _, err := b.Submit(sell)
 	require.NoError(t, err)
 	require.Len(t, trades, 1)
-	assert.True(t, trades[0].Quantity.Equal(decimal.NewFromInt(4)))
+	assert.True(t, trades[0].Quantity.Equal(fixedpoint.FromInt64(4)))
 
 	assert.Equal(t, models.StatusPartiallyFilled, buy.Status)
-	assert.True(t, buy.Filled.Equal(decimal.NewFromInt(4)))
-	assert.True(t, buy.RemainingQty().Equal(decimal.NewFromInt(6)))
+	assert.True(t, buy.Filled.Equal(fixedpoint.FromInt64(4)))
+	assert.True(t, buy.RemainingQty().Equal(fixedpoint.FromInt64(6)))
 
 	// buy-1 must still be resting.
 	_, open := b.OrderByID("buy-1")

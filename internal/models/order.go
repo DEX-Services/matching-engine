@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 // OrderSide represents buy or sell.
@@ -95,16 +95,16 @@ type Order struct {
 	Type          OrderType   `json:"type"`
 	TimeInForce   TimeInForce `json:"timeInForce"`
 
-	Price    decimal.Decimal `json:"price"` // zero for market orders
-	Quantity decimal.Decimal `json:"quantity"`
-	Filled   decimal.Decimal `json:"filled"`
+	Price    fixedpoint.Fixed `json:"price"` // zero for market orders
+	Quantity fixedpoint.Fixed `json:"quantity"`
+	Filled   fixedpoint.Fixed `json:"filled"`
 
 	Status    OrderStatus `json:"status"`
 	CreatedAt time.Time   `json:"createdAt"`
 	UpdatedAt time.Time   `json:"updatedAt"`
 
 	// Stop price for stop orders; zero otherwise.
-	StopPrice decimal.Decimal `json:"stopPrice,omitempty"`
+	StopPrice fixedpoint.Fixed `json:"stopPrice,omitempty"`
 
 	// ReduceOnly applies to futures; ignored by spot settlement.
 	ReduceOnly bool `json:"reduceOnly,omitempty"`
@@ -142,9 +142,9 @@ type Order struct {
 	QuoteCurrency string `json:"quoteCurrency,omitempty"`
 
 	// OptionType, StrikePrice, and Expiry apply to options only; ignored by spot/futures.
-	OptionType  string          `json:"optionType,omitempty"` // "CALL" | "PUT"
-	StrikePrice decimal.Decimal `json:"strikePrice,omitempty"`
-	Expiry      time.Time       `json:"expiry,omitempty"`
+	OptionType  string           `json:"optionType,omitempty"` // "CALL" | "PUT"
+	StrikePrice fixedpoint.Fixed `json:"strikePrice,omitempty"`
+	Expiry      time.Time        `json:"expiry,omitempty"`
 
 	// ComboLegs applies to ComboOptions orders only: the N option
 	// instrument symbols making up this combo, each with a signed ratio —
@@ -178,7 +178,7 @@ type Order struct {
 }
 
 // RemainingQty returns the unfilled portion of the order.
-func (o *Order) RemainingQty() decimal.Decimal {
+func (o *Order) RemainingQty() fixedpoint.Fixed {
 	return o.Quantity.Sub(o.Filled)
 }
 

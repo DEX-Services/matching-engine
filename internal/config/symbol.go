@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // SymbolConfig holds the static parameters for a single trading pair.
@@ -20,23 +20,23 @@ type SymbolConfig struct {
 	Market        models.MarketType
 	BaseCurrency  string
 	QuoteCurrency string
-	TickSize      decimal.Decimal // minimum price increment
-	LotSize       decimal.Decimal // minimum quantity increment
-	MinNotional   decimal.Decimal // minimum order value
-	MaxPrice      decimal.Decimal // upper price limit
-	MaxQuantity   decimal.Decimal // upper quantity limit per order
-	MakerFee      decimal.Decimal // fraction (e.g. 0.001 = 0.1%)
-	TakerFee      decimal.Decimal
+	TickSize      fixedpoint.Fixed // minimum price increment
+	LotSize       fixedpoint.Fixed // minimum quantity increment
+	MinNotional   fixedpoint.Fixed // minimum order value
+	MaxPrice      fixedpoint.Fixed // upper price limit
+	MaxQuantity   fixedpoint.Fixed // upper quantity limit per order
+	MakerFee      fixedpoint.Fixed // fraction (e.g. 0.001 = 0.1%)
+	TakerFee      fixedpoint.Fixed
 	Active        bool
 
 	// Futures-only. Zero/unset for Spot and Options.
-	MaxLeverage           int             // maximum leverage an account may select
-	MaintenanceMarginRate decimal.Decimal // fraction of notional required to avoid liquidation
-	FundingIntervalHours  int             // hours between funding settlements
+	MaxLeverage           int              // maximum leverage an account may select
+	MaintenanceMarginRate fixedpoint.Fixed // fraction of notional required to avoid liquidation
+	FundingIntervalHours  int              // hours between funding settlements
 
 	// Options-only. Zero/unset for Spot and Futures.
-	ContractMultiplier decimal.Decimal // contract size multiplier (e.g. 1 BTC per contract)
-	UnderlyingSymbol   string          // spot symbol used for mark/index price lookup
+	ContractMultiplier fixedpoint.Fixed // contract size multiplier (e.g. 1 BTC per contract)
+	UnderlyingSymbol   string           // spot symbol used for mark/index price lookup
 }
 
 // Registry is the in-memory symbol configuration store.
@@ -138,15 +138,15 @@ func (r *Registry) reload(ctx context.Context) error {
 			return fmt.Errorf("scan symbol_config row: %w", err)
 		}
 		c.Market = models.MarketType(market)
-		c.TickSize, _ = decimal.NewFromString(tickSize)
-		c.LotSize, _ = decimal.NewFromString(lotSize)
-		c.MinNotional, _ = decimal.NewFromString(minNotional)
-		c.MaxPrice, _ = decimal.NewFromString(maxPrice)
-		c.MaxQuantity, _ = decimal.NewFromString(maxQuantity)
-		c.MakerFee, _ = decimal.NewFromString(makerFee)
-		c.TakerFee, _ = decimal.NewFromString(takerFee)
-		c.MaintenanceMarginRate, _ = decimal.NewFromString(maintenanceMarginRate)
-		c.ContractMultiplier, _ = decimal.NewFromString(contractMultiplier)
+		c.TickSize, _ = fixedpoint.FromString(tickSize)
+		c.LotSize, _ = fixedpoint.FromString(lotSize)
+		c.MinNotional, _ = fixedpoint.FromString(minNotional)
+		c.MaxPrice, _ = fixedpoint.FromString(maxPrice)
+		c.MaxQuantity, _ = fixedpoint.FromString(maxQuantity)
+		c.MakerFee, _ = fixedpoint.FromString(makerFee)
+		c.TakerFee, _ = fixedpoint.FromString(takerFee)
+		c.MaintenanceMarginRate, _ = fixedpoint.FromString(maintenanceMarginRate)
+		c.ContractMultiplier, _ = fixedpoint.FromString(contractMultiplier)
 		fresh[c.Symbol+":"+market] = &c
 	}
 	if err := rows.Err(); err != nil {

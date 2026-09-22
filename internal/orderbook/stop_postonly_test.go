@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // These tests exercise the STOP and POST_ONLY code paths inside the book
@@ -20,7 +20,7 @@ func mkOrder(id string, side models.OrderSide, typ models.OrderType, price, qty 
 	return &models.Order{
 		ID: id, AccountID: "acct-" + id, Symbol: "BTC-USDT", Market: models.Spot,
 		Side: side, Type: typ, TimeInForce: models.GTC,
-		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.MustFromString(qty),
 		Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 }
@@ -29,7 +29,7 @@ func TestStopMarket_RestsUntriggered_ThenFiresOnLastTradePrice(t *testing.T) {
 	b := New("BTC-USDT", models.Spot)
 
 	stop := mkOrder("stop1", models.Buy, models.Stop, "0", "1")
-	stop.StopPrice = decimal.RequireFromString("100")
+	stop.StopPrice = fixedpoint.MustFromString("100")
 	if _, _, err := b.Submit(stop); err != nil {
 		t.Fatalf("stop order submission failed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestCheckMarkPriceTriggers_FiresWithoutAnyTrade(t *testing.T) {
 	b := New("BI2X-BI2XUSD", models.Futures)
 
 	stop := mkOrder("stop-mp1", models.Buy, models.Stop, "0", "1")
-	stop.StopPrice = decimal.RequireFromString("100")
+	stop.StopPrice = fixedpoint.MustFromString("100")
 	if _, _, err := b.Submit(stop); err != nil {
 		t.Fatalf("stop order submission failed: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestCheckMarkPriceTriggers_FiresWithoutAnyTrade(t *testing.T) {
 	}
 
 	// Mark price below trigger: must not fire.
-	if trades, _ := b.CheckMarkPriceTriggers(decimal.RequireFromString("99")); len(trades) != 0 {
+	if trades, _ := b.CheckMarkPriceTriggers(fixedpoint.MustFromString("99")); len(trades) != 0 {
 		t.Fatalf("mark price 99 (below trigger 100) fired %d trades, want 0", len(trades))
 	}
 	if stop.Status != models.StatusOpen {
@@ -178,7 +178,7 @@ func TestCheckMarkPriceTriggers_FiresWithoutAnyTrade(t *testing.T) {
 
 	// Mark price at/above trigger: must fire, purely from the mark-price
 	// check, with the book's lastTradePrice still untouched by any trade.
-	trades, _ := b.CheckMarkPriceTriggers(decimal.RequireFromString("100"))
+	trades, _ := b.CheckMarkPriceTriggers(fixedpoint.MustFromString("100"))
 	found := false
 	for _, tr := range trades {
 		if tr.TakerOrderID == "stop-mp1" || tr.MakerOrderID == "stop-mp1" {
@@ -200,14 +200,14 @@ func TestCheckMarkPriceTriggers_FiresWithoutAnyTrade(t *testing.T) {
 func TestCheckMarkPriceTriggers_NoOpWhenNothingCrosses(t *testing.T) {
 	b := New("BI2X-BI2XUSD", models.Futures)
 
-	if trades, cancelled := b.CheckMarkPriceTriggers(decimal.RequireFromString("50")); len(trades) != 0 || len(cancelled) != 0 {
+	if trades, cancelled := b.CheckMarkPriceTriggers(fixedpoint.MustFromString("50")); len(trades) != 0 || len(cancelled) != 0 {
 		t.Fatalf("empty book: got %d trades, %d cancelled, want 0/0", len(trades), len(cancelled))
 	}
 
 	stopBuy := mkOrder("stop-mp-nc1", models.Buy, models.Stop, "0", "1")
-	stopBuy.StopPrice = decimal.RequireFromString("200")
+	stopBuy.StopPrice = fixedpoint.MustFromString("200")
 	stopSell := mkOrder("stop-mp-nc2", models.Sell, models.Stop, "0", "1")
-	stopSell.StopPrice = decimal.RequireFromString("50")
+	stopSell.StopPrice = fixedpoint.MustFromString("50")
 	if _, _, err := b.Submit(stopBuy); err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestCheckMarkPriceTriggers_NoOpWhenNothingCrosses(t *testing.T) {
 	}
 
 	// Mark price 100 is between both triggers (buy needs >=200, sell needs <=50) — neither should fire.
-	if trades, cancelled := b.CheckMarkPriceTriggers(decimal.RequireFromString("100")); len(trades) != 0 || len(cancelled) != 0 {
+	if trades, cancelled := b.CheckMarkPriceTriggers(fixedpoint.MustFromString("100")); len(trades) != 0 || len(cancelled) != 0 {
 		t.Fatalf("mark price between both triggers: got %d trades, %d cancelled, want 0/0", len(trades), len(cancelled))
 	}
 	if stopBuy.Status != models.StatusOpen || stopSell.Status != models.StatusOpen {
@@ -225,7 +225,7 @@ func TestCheckMarkPriceTriggers_NoOpWhenNothingCrosses(t *testing.T) {
 
 	// Also confirm an invalid (non-positive) mark price is a safe no-op,
 	// e.g. before any real price has ever been reported for this symbol.
-	if trades, cancelled := b.CheckMarkPriceTriggers(decimal.Zero); len(trades) != 0 || len(cancelled) != 0 {
+	if trades, cancelled := b.CheckMarkPriceTriggers(fixedpoint.Zero); len(trades) != 0 || len(cancelled) != 0 {
 		t.Fatalf("zero mark price: got %d trades, %d cancelled, want 0/0 (must not panic or misfire)", len(trades), len(cancelled))
 	}
 }
@@ -244,7 +244,7 @@ func TestUntriggeredStop_CancellableViaOrderByIDThenCancel(t *testing.T) {
 	b := New("BTC-USDT", models.Spot)
 
 	stop := mkOrder("stop-cancel-1", models.Sell, models.Stop, "0", "1")
-	stop.StopPrice = decimal.RequireFromString("50")
+	stop.StopPrice = fixedpoint.MustFromString("50")
 	if _, _, err := b.Submit(stop); err != nil {
 		t.Fatalf("stop order submission failed: %v", err)
 	}
@@ -290,7 +290,7 @@ func TestOrderByID_MatchableAndStopOrders_BothFindable(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop := mkOrder("stop-1", models.Sell, models.Stop, "0", "1")
-	stop.StopPrice = decimal.RequireFromString("40")
+	stop.StopPrice = fixedpoint.MustFromString("40")
 	if _, _, err := b.Submit(stop); err != nil {
 		t.Fatal(err)
 	}

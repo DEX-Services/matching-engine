@@ -3,8 +3,8 @@ package risk
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // newStopMarketOrder builds a stop-market order: Type=Stop with StopPrice set
@@ -14,8 +14,8 @@ func newStopMarketOrder(accountID string, side models.OrderSide, qty, stopPrice 
 	return &models.Order{
 		ID: "stop-1", AccountID: accountID, Symbol: "BTC-USDT",
 		Side: side, Type: models.Stop,
-		Quantity:  decimal.RequireFromString(qty),
-		StopPrice: decimal.RequireFromString(stopPrice),
+		Quantity:  fixedpoint.MustFromString(qty),
+		StopPrice: fixedpoint.MustFromString(stopPrice),
 	}
 }
 
@@ -40,7 +40,7 @@ func TestCheck_StopMarket_RejectsZeroBalance(t *testing.T) {
 func TestCheck_StopMarket_AllowsPositiveBalance(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("trader", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newStopMarketOrder("trader", models.Buy, "1", "50000")
 	if err := checker.Check(order); err != nil {
@@ -74,7 +74,7 @@ func TestReleaseAmountFor_StopMarket_ReturnsZero(t *testing.T) {
 func TestChecker_Release_StopMarket_DoesNotTouchLedger(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("trader", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newStopMarketOrder("trader", models.Buy, "1", "50000")
 	before := ledger.Available("trader", "USDT")
@@ -94,12 +94,12 @@ func TestRequiredFor_StopLimit_UsesLimitPrice(t *testing.T) {
 	order := &models.Order{
 		ID: "stop-2", AccountID: "trader", Symbol: "BTC-USDT",
 		Side: models.Buy, Type: models.Stop,
-		Price:     decimal.RequireFromString("49000"), // stop-limit: rests at this price once triggered
-		Quantity:  decimal.RequireFromString("1"),
-		StopPrice: decimal.RequireFromString("50000"),
+		Price:     fixedpoint.MustFromString("49000"), // stop-limit: rests at this price once triggered
+		Quantity:  fixedpoint.MustFromString("1"),
+		StopPrice: fixedpoint.MustFromString("50000"),
 	}
 	asset, amount := RequiredFor(order)
-	if asset != "USDT" || !amount.Equal(decimal.RequireFromString("49000")) {
+	if asset != "USDT" || !amount.Equal(fixedpoint.MustFromString("49000")) {
 		t.Fatalf("RequiredFor(stop-limit) = (%q, %s), want (\"USDT\", 49000)", asset, amount)
 	}
 }

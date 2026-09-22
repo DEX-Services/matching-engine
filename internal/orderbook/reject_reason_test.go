@@ -3,8 +3,8 @@ package orderbook
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // These pin down that every StatusRejected/StatusCancelled transition inside
@@ -92,8 +92,8 @@ func TestRejectReason_SelfTradePrevention(t *testing.T) {
 	resting := &models.Order{
 		ID: "maker1", AccountID: "same-account", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Sell, Type: models.Limit, TimeInForce: models.GTC,
-		Price:    decimal.RequireFromString("100"),
-		Quantity: decimal.RequireFromString("1"), Status: models.StatusPending,
+		Price:    fixedpoint.MustFromString("100"),
+		Quantity: fixedpoint.MustFromString("1"), Status: models.StatusPending,
 	}
 	if _, _, err := b.Submit(resting); err != nil {
 		t.Fatal(err)
@@ -101,8 +101,8 @@ func TestRejectReason_SelfTradePrevention(t *testing.T) {
 	taker := &models.Order{
 		ID: "taker1", AccountID: "same-account", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Buy, Type: models.Limit, TimeInForce: models.GTC,
-		Price:    decimal.RequireFromString("100"),
-		Quantity: decimal.RequireFromString("1"), Status: models.StatusPending,
+		Price:    fixedpoint.MustFromString("100"),
+		Quantity: fixedpoint.MustFromString("1"), Status: models.StatusPending,
 	}
 	trades, cancelled, err := b.Submit(taker)
 	if err != nil {
@@ -121,12 +121,12 @@ func TestSelfTradePreventionDoesNotCancelNonCrossingQuotes(t *testing.T) {
 	ask := &models.Order{
 		ID: "ask", AccountID: "mm", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Sell, Type: models.Limit, TimeInForce: models.GTC,
-		Price: decimal.RequireFromString("101"), Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
+		Price: fixedpoint.MustFromString("101"), Quantity: fixedpoint.FromInt64(1), Status: models.StatusPending,
 	}
 	bid := &models.Order{
 		ID: "bid", AccountID: "mm", Symbol: "BTC-USDT", Market: models.Spot,
 		Side: models.Buy, Type: models.Limit, TimeInForce: models.GTC,
-		Price: decimal.RequireFromString("100"), Quantity: decimal.NewFromInt(1), Status: models.StatusPending,
+		Price: fixedpoint.MustFromString("100"), Quantity: fixedpoint.FromInt64(1), Status: models.StatusPending,
 	}
 	if _, _, err := b.Submit(ask); err != nil {
 		t.Fatal(err)

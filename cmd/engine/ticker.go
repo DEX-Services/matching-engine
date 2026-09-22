@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/dex/matching-engine/internal/ws"
-	"github.com/shopspring/decimal"
 )
 
 // buildTickerResponse assembles the per-symbol ticker payload shared by the
@@ -29,15 +29,15 @@ func buildTickerResponse(mdSvc *marketdata.Service, symbols *config.Registry, sy
 		Spread: ticker.Spread.String(),
 	}
 	if cfg, cerr := symbols.Get(sym, mkt); cerr == nil {
-		resp.MakerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
-		resp.TakerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+		resp.MakerFeePct = cfg.MakerFee.Mul(fixedpoint.FromInt64(100)).String()
+		resp.TakerFeePct = cfg.TakerFee.Mul(fixedpoint.FromInt64(100)).String()
 		if mkt == models.Futures {
-			resp.MaintenanceMarginRatePct = cfg.MaintenanceMarginRate.Mul(decimal.NewFromInt(100)).String()
+			resp.MaintenanceMarginRatePct = cfg.MaintenanceMarginRate.Mul(fixedpoint.FromInt64(100)).String()
 			if cfg.UnderlyingSymbol != "" {
 				if indexTicker, ierr := mdSvc.Ticker(cfg.UnderlyingSymbol, models.Spot); ierr == nil && indexTicker.MarkPrice.IsPositive() {
 					resp.IndexPrice = indexTicker.MarkPrice.String()
 					resp.FundingRatePct = settlement.CurrentFundingRate(ticker.MarkPrice, indexTicker.MarkPrice).
-						Mul(decimal.NewFromInt(100)).String()
+						Mul(fixedpoint.FromInt64(100)).String()
 				}
 			}
 		}

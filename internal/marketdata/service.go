@@ -9,15 +9,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
-	"github.com/shopspring/decimal"
 )
 
 // BookReader is implemented by matching.Engine (subset of its public API).
 type BookReader interface {
-	BestBid() decimal.Decimal
-	BestAsk() decimal.Decimal
+	BestBid() fixedpoint.Fixed
+	BestAsk() fixedpoint.Fixed
 	Depth(levels int) (bids, asks []orderbook.LevelSnapshot)
 }
 
@@ -25,13 +25,13 @@ type BookReader interface {
 type Ticker struct {
 	Symbol    string
 	Market    models.MarketType
-	BestBid   decimal.Decimal
-	BestAsk   decimal.Decimal
-	MidPrice  decimal.Decimal
-	MarkPrice decimal.Decimal // blended mark price for liquidation/funding
-	Spread    decimal.Decimal
-	BidDepth  decimal.Decimal // total qty on bid side (top 5 levels)
-	AskDepth  decimal.Decimal // total qty on ask side (top 5 levels)
+	BestBid   fixedpoint.Fixed
+	BestAsk   fixedpoint.Fixed
+	MidPrice  fixedpoint.Fixed
+	MarkPrice fixedpoint.Fixed // blended mark price for liquidation/funding
+	Spread    fixedpoint.Fixed
+	BidDepth  fixedpoint.Fixed // total qty on bid side (top 5 levels)
+	AskDepth  fixedpoint.Fixed // total qty on ask side (top 5 levels)
 	// LastTradeAt is the timestamp of the most recent trade recorded for
 	// this symbol/market, or the zero Time if none has ever traded. Used by
 	// liquidation/funding to refuse to act on a mark price derived from a
@@ -42,15 +42,15 @@ type Ticker struct {
 // Service aggregates market data across all registered symbols.
 type Service struct {
 	mu          sync.RWMutex
-	books       map[string]BookReader      // key: symbol+":"+market
-	lastPrices  map[string]decimal.Decimal // key: symbol+":"+market
-	lastTradeAt map[string]time.Time       // key: symbol+":"+market
-	trades      map[string][]recordedTrade // key: symbol+":"+market, oldest first
+	books       map[string]BookReader       // key: symbol+":"+market
+	lastPrices  map[string]fixedpoint.Fixed // key: symbol+":"+market
+	lastTradeAt map[string]time.Time        // key: symbol+":"+market
+	trades      map[string][]recordedTrade  // key: symbol+":"+market, oldest first
 }
 
 type recordedTrade struct {
-	price decimal.Decimal
-	qty   decimal.Decimal
+	price fixedpoint.Fixed
+	qty   fixedpoint.Fixed
 	at    time.Time
 }
 
@@ -60,9 +60,9 @@ type recordedTrade struct {
 type Summary struct {
 	Symbol       string
 	Market       models.MarketType
-	Price        decimal.Decimal
-	Change24hPct decimal.Decimal
-	Volume24h    decimal.Decimal
+	Price        fixedpoint.Fixed
+	Change24hPct fixedpoint.Fixed
+	Volume24h    fixedpoint.Fixed
 	Has24hData   bool
 	UpdatedAt    time.Time
 }
@@ -94,7 +94,7 @@ func (s *Service) Symbols() []SymbolKey {
 func NewService() *Service {
 	return &Service{
 		books:       make(map[string]BookReader),
-		lastPrices:  make(map[string]decimal.Decimal),
+		lastPrices:  make(map[string]fixedpoint.Fixed),
 		lastTradeAt: make(map[string]time.Time),
 		trades:      make(map[string][]recordedTrade),
 	}
@@ -110,7 +110,7 @@ func (s *Service) Register(symbol string, market models.MarketType, reader BookR
 // RecordTrade records the last trade price for a symbol/market, used to
 // compute a manipulation-resistant mark price. Called from the trade-event
 // subscriber goroutine in main.go.
-func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qty decimal.Decimal, at time.Time) {
+func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qty fixedpoint.Fixed, at time.Time) {
 	if price.IsZero() || price.IsNegative() {
 		return
 	}
@@ -160,7 +160,7 @@ func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, er
 	// stored slice — trimming lives on the RecordTrade write path (see the
 	// doc comment above).
 	cutoff := now.Add(-24 * time.Hour)
-	var opening decimal.Decimal
+	var opening fixedpoint.Fixed
 	for _, trade := range trades {
 		if trade.at.Before(cutoff) {
 			continue
@@ -173,7 +173,7 @@ func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, er
 	if opening.IsZero() || price.IsZero() {
 		return summary, nil
 	}
-	summary.Change24hPct = price.Sub(opening).Div(opening).Mul(decimal.NewFromInt(100))
+	summary.Change24hPct = price.Sub(opening).Div(opening).Mul(fixedpoint.FromInt64(100))
 	summary.Has24hData = true
 	return summary, nil
 }
@@ -205,10 +205,10 @@ func (s *Service) SummaryAll() []Summary {
 // "BTC-BI2XUSD"), or false if no Spot market data exists for it yet. Used by
 // risk.Checker (via the UnderlyingMarkSource interface) to price options
 // writer margin against the real underlying instead of only the strike.
-func (s *Service) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
+func (s *Service) UnderlyingMark(symbol string) (fixedpoint.Fixed, bool) {
 	ticker, err := s.Ticker(symbol, models.Spot)
 	if err != nil || !ticker.MarkPrice.IsPositive() {
-		return decimal.Decimal{}, false
+		return fixedpoint.Zero, false
 	}
 	return ticker.MarkPrice, true
 }
@@ -228,14 +228,14 @@ func (s *Service) Ticker(symbol string, market models.MarketType) (*Ticker, erro
 	bestBid := reader.BestBid()
 	bestAsk := reader.BestAsk()
 
-	var mid, spread decimal.Decimal
+	var mid, spread fixedpoint.Fixed
 	if !bestBid.IsZero() && !bestAsk.IsZero() {
-		mid = bestBid.Add(bestAsk).Div(decimal.NewFromInt(2))
+		mid = bestBid.Add(bestAsk).Div(fixedpoint.FromInt64(2))
 		spread = bestAsk.Sub(bestBid)
 	}
 
 	bids, asks := reader.Depth(5)
-	var bidDepth, askDepth decimal.Decimal
+	var bidDepth, askDepth fixedpoint.Fixed
 	for _, l := range bids {
 		bidDepth = bidDepth.Add(l.TotalQuantity)
 	}
@@ -280,14 +280,14 @@ func (t *Ticker) MarkPriceFresh(maxAge time.Duration) bool {
 // average but cap the deviation from mid to ±1% so a single wash trade
 // cannot skew the mark beyond the band. If only one source is available,
 // use it directly.
-func computeMarkPrice(mid, lastPrice decimal.Decimal) decimal.Decimal {
+func computeMarkPrice(mid, lastPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	if mid.IsZero() {
 		return lastPrice
 	}
 	if lastPrice.IsZero() {
 		return mid
 	}
-	blended := mid.Add(lastPrice).Div(decimal.NewFromInt(2))
+	blended := mid.Add(lastPrice).Div(fixedpoint.FromInt64(2))
 	cap := mid.Mul(markDeviationCap)
 	upper := mid.Add(cap)
 	lower := mid.Sub(cap)
@@ -303,17 +303,17 @@ func computeMarkPrice(mid, lastPrice decimal.Decimal) decimal.Decimal {
 // markDeviationCap bounds how far the blended mark price may deviate from the
 // mid-price, preventing a single manipulated/wash trade from moving the mark
 // more than this fraction.
-var markDeviationCap = decimal.NewFromFloat(0.01) // 1%
+var markDeviationCap = fixedpoint.MustFromString("0.01") // 1%
 
 // VWAP computes the volume-weighted average price for a hypothetical order of
 // `qty` on the given side, sweeping through the top `maxLevels` price levels.
 // Returns an error if there is insufficient liquidity.
-func (s *Service) VWAP(symbol string, market models.MarketType, side models.OrderSide, qty decimal.Decimal, maxLevels int) (decimal.Decimal, error) {
+func (s *Service) VWAP(symbol string, market models.MarketType, side models.OrderSide, qty fixedpoint.Fixed, maxLevels int) (fixedpoint.Fixed, error) {
 	s.mu.RLock()
 	reader, ok := s.books[symbol+":"+string(market)]
 	s.mu.RUnlock()
 	if !ok {
-		return decimal.Zero, fmt.Errorf("no market data for %s/%s", symbol, market)
+		return fixedpoint.Zero, fmt.Errorf("no market data for %s/%s", symbol, market)
 	}
 
 	bids, asks := reader.Depth(maxLevels)
@@ -325,24 +325,24 @@ func (s *Service) VWAP(symbol string, market models.MarketType, side models.Orde
 	}
 
 	remaining := qty
-	totalCost := decimal.Decimal{}
+	totalCost := fixedpoint.Zero
 
 	for _, lvl := range levels {
 		if remaining.IsZero() {
 			break
 		}
-		take := decimal.Min(remaining, lvl.TotalQuantity)
+		take := fixedpoint.Min(remaining, lvl.TotalQuantity)
 		totalCost = totalCost.Add(lvl.Price.Mul(take))
 		remaining = remaining.Sub(take)
 	}
 
 	if remaining.IsPositive() {
-		return decimal.Zero, fmt.Errorf("insufficient liquidity: %s unfilled out of %s", remaining, qty)
+		return fixedpoint.Zero, fmt.Errorf("insufficient liquidity: %s unfilled out of %s", remaining, qty)
 	}
 
 	filled := qty.Sub(remaining)
 	if filled.IsZero() {
-		return decimal.Zero, nil
+		return fixedpoint.Zero, nil
 	}
 	return totalCost.Div(filled), nil
 }

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,8 +33,8 @@ func testOrder(symbol string, side models.OrderSide, price, qty string) *models.
 		Market:      models.Spot,
 		Side:        side,
 		Type:        models.Limit,
-		Price:       decimal.RequireFromString(price),
-		Quantity:    decimal.RequireFromString(qty),
+		Price:       fixedpoint.MustFromString(price),
+		Quantity:    fixedpoint.MustFromString(qty),
 		TimeInForce: models.GTC,
 		Status:      models.StatusPending,
 		CreatedAt:   time.Now(),
@@ -193,7 +193,7 @@ func TestEngine_CheckMarkPriceTriggers_FiresThroughTheGoroutine(t *testing.T) {
 	stop.Market = models.Futures
 	stop.AccountID = "buyer-acct" // distinct from the resting ask below: same account would self-trade-prevent and cancel instead of fill
 	stop.Type = models.Stop
-	stop.StopPrice = decimal.RequireFromString("100")
+	stop.StopPrice = fixedpoint.MustFromString("100")
 	_, err := eng.Submit(stop)
 	require.NoError(t, err)
 	// Drain the OPEN event for the resting stop itself before asserting on
@@ -221,7 +221,7 @@ func TestEngine_CheckMarkPriceTriggers_FiresThroughTheGoroutine(t *testing.T) {
 	// occurred on this book (lastTradePrice is still its zero value) —
 	// proving this really goes through the mark-price path, not
 	// processStopTriggers/lastTradePrice.
-	trades := eng.CheckMarkPriceTriggers(decimal.RequireFromString("100"))
+	trades := eng.CheckMarkPriceTriggers(fixedpoint.MustFromString("100"))
 	require.Len(t, trades, 1, "mark price crossing the stop's trigger should produce exactly one trade")
 
 	// The engine must have published at least one resulting event for the

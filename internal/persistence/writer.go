@@ -423,7 +423,7 @@ func eventStmts(evt *models.Event) ([]eventStmt, error) {
 			    updated_at    = EXCLUDED.updated_at`,
 			args: []any{o.ID, o.ClientOrderID, o.AccountID, o.Symbol, string(o.Market),
 				string(o.Side), string(o.Type), string(o.TimeInForce),
-				o.Price, o.Quantity, o.Filled, string(o.Status), nullableString(o.RejectReason), o.CreatedAt, o.UpdatedAt},
+				o.Price.ToDecimal(), o.Quantity.ToDecimal(), o.Filled.ToDecimal(), string(o.Status), nullableString(o.RejectReason), o.CreatedAt, o.UpdatedAt},
 		})
 	}
 
@@ -436,7 +436,7 @@ func eventStmts(evt *models.Event) ([]eventStmt, error) {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			ON CONFLICT (id) DO NOTHING`,
 			args: []any{t.ID, t.Symbol, string(t.Market), t.MakerOrderID, t.TakerOrderID,
-				string(t.MakerSide), t.Price, t.Quantity, t.MakerFeePaid, t.TakerFeePaid, t.ExecutedAt, t.SequenceNumber},
+				string(t.MakerSide), t.Price.ToDecimal(), t.Quantity.ToDecimal(), t.MakerFeePaid.ToDecimal(), t.TakerFeePaid.ToDecimal(), t.ExecutedAt, t.SequenceNumber},
 		})
 	}
 
@@ -445,7 +445,7 @@ func eventStmts(evt *models.Event) ([]eventStmt, error) {
 		f := evt.Funding
 		stmts = append(stmts, eventStmt{
 			sql:  `INSERT INTO funding_payments (account_id, symbol, rate, amount) VALUES ($1, $2, $3, $4)`,
-			args: []any{f.AccountID, f.Symbol, f.Rate, f.Payment},
+			args: []any{f.AccountID, f.Symbol, f.Rate.ToDecimal(), f.Payment.ToDecimal()},
 		})
 	}
 
@@ -454,7 +454,7 @@ func eventStmts(evt *models.Event) ([]eventStmt, error) {
 		p := evt.RealizedPnl
 		stmts = append(stmts, eventStmt{
 			sql:  `INSERT INTO realized_pnl (account_id, symbol, closed_qty, pnl, margin_returned, is_liquidation) VALUES ($1, $2, $3, $4, $5, $6)`,
-			args: []any{p.AccountID, p.Symbol, p.ClosedQty, p.Pnl, p.MarginReturned, p.IsLiquidation},
+			args: []any{p.AccountID, p.Symbol, p.ClosedQty.ToDecimal(), p.Pnl.ToDecimal(), p.MarginReturned.ToDecimal(), p.IsLiquidation},
 		})
 	}
 

@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/backendclient"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,24 +29,24 @@ func (f fixedLegResolver) ResolveComboLegs(ctx context.Context, comboSymbol stri
 }
 
 type comboLegSpec struct {
-	strike decimal.Decimal
+	strike fixedpoint.Fixed
 	expiry time.Time
 	typ    string
 }
 
 type fixedMarkSource struct {
-	spot decimal.Decimal
+	spot fixedpoint.Fixed
 	legs map[string]comboLegSpec
 }
 
-func (f fixedMarkSource) UnderlyingMark(underlying string) (decimal.Decimal, bool) {
+func (f fixedMarkSource) UnderlyingMark(underlying string) (fixedpoint.Fixed, bool) {
 	return f.spot, true
 }
 
-func (f fixedMarkSource) LegSpec(ctx context.Context, legSymbol string) (decimal.Decimal, time.Time, string, string, bool) {
+func (f fixedMarkSource) LegSpec(ctx context.Context, legSymbol string) (fixedpoint.Fixed, time.Time, string, string, bool) {
 	l, ok := f.legs[legSymbol]
 	if !ok {
-		return decimal.Zero, time.Time{}, "", "", false
+		return fixedpoint.Zero, time.Time{}, "", "", false
 	}
 	return l.strike, l.expiry, l.typ, "BI2XUSD", true
 }
@@ -57,9 +57,9 @@ func (f fixedMarkSource) LegSpec(ctx context.Context, legSymbol string) (decimal
 // inherently float64-precision by construction, so end-to-end cash-flow
 // assertions built on it must tolerate that rather than demand bit-exact
 // decimal equality.
-func almostEqual(t *testing.T, got, want decimal.Decimal, msg string) {
+func almostEqual(t *testing.T, got, want fixedpoint.Fixed, msg string) {
 	t.Helper()
-	tolerance := decimal.NewFromFloat(0.0001)
+	tolerance := fixedpoint.MustFromString("0.0001")
 	if got.Sub(want).Abs().GreaterThan(tolerance) {
 		t.Fatalf("%s: got %s, want %s (tolerance %s)", msg, got, want, tolerance)
 	}
@@ -76,8 +76,8 @@ func almostEqual(t *testing.T, got, want decimal.Decimal, msg string) {
 // atomic matching, not client-coordinated separate orders.
 func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
 	options := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
@@ -88,10 +88,10 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 		underlying: "BTC-BI2XUSD",
 	}
 	marks := fixedMarkSource{
-		spot: decimal.NewFromInt(62000),
+		spot: fixedpoint.FromInt64(62000),
 		legs: map[string]comboLegSpec{
-			buySymbol:  {strike: decimal.NewFromInt(60000), expiry: expiry, typ: "CALL"},
-			sellSymbol: {strike: decimal.NewFromInt(65000), expiry: expiry, typ: "CALL"},
+			buySymbol:  {strike: fixedpoint.FromInt64(60000), expiry: expiry, typ: "CALL"},
+			sellSymbol: {strike: fixedpoint.FromInt64(65000), expiry: expiry, typ: "CALL"},
 		},
 	}
 	comboSettlement := settlement.NewComboSettlement(options, legs, marks)
@@ -104,7 +104,7 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	// credit of 200 to write (go short) the spread.
 	sellOrder := &models.Order{
 		ID: uuid.NewString(), AccountID: "writer", Symbol: comboSymbol, Market: models.ComboOptions,
-		Side: models.Sell, Type: models.Limit, Price: decimal.NewFromInt(200), Quantity: decimal.NewFromInt(1),
+		Side: models.Sell, Type: models.Limit, Price: fixedpoint.FromInt64(200), Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	trades, err := eng.Submit(sellOrder)
@@ -115,42 +115,42 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 	// the spread — this should match the resting sell in ONE trade.
 	buyOrder := &models.Order{
 		ID: uuid.NewString(), AccountID: "buyer", Symbol: comboSymbol, Market: models.ComboOptions,
-		Side: models.Buy, Type: models.Limit, Price: decimal.NewFromInt(200), Quantity: decimal.NewFromInt(1),
+		Side: models.Buy, Type: models.Limit, Price: fixedpoint.FromInt64(200), Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	trades, err = eng.Submit(buyOrder)
 	require.NoError(t, err)
 	require.Len(t, trades, 1, "one combo order crossing one resting combo order must produce exactly one trade")
-	require.True(t, trades[0].Price.Equal(decimal.NewFromInt(200)), "combo trade price should be the resting order's price (price-time priority)")
+	require.True(t, trades[0].Price.Equal(fixedpoint.FromInt64(200)), "combo trade price should be the resting order's price (price-time priority)")
 
 	// The single combo trade must have fanned out into positions on BOTH
 	// legs for BOTH accounts — this is the atomicity being tested: there is
 	// no possible intermediate state where only one leg exists, because
 	// ComboSettlement.Settle ran once, synchronously, inside the same
 	// matching-goroutine call that produced the trade.
-	buyerLong := options.GetPosition("buyer", buySymbol, decimal.NewFromInt(60000), expiry, "CALL")
+	buyerLong := options.GetPosition("buyer", buySymbol, fixedpoint.FromInt64(60000), expiry, "CALL")
 	require.NotNil(t, buyerLong, "buyer should hold a long position in the buy leg")
-	require.True(t, buyerLong.Size.Equal(decimal.NewFromInt(1)))
+	require.True(t, buyerLong.Size.Equal(fixedpoint.FromInt64(1)))
 
-	buyerShort := options.GetPosition("buyer", sellSymbol, decimal.NewFromInt(65000), expiry, "CALL")
+	buyerShort := options.GetPosition("buyer", sellSymbol, fixedpoint.FromInt64(65000), expiry, "CALL")
 	require.NotNil(t, buyerShort, "buyer should hold a short position in the sell leg")
-	require.True(t, buyerShort.Size.Equal(decimal.NewFromInt(-1)))
+	require.True(t, buyerShort.Size.Equal(fixedpoint.FromInt64(-1)))
 
-	writerShort := options.GetPosition("writer", buySymbol, decimal.NewFromInt(60000), expiry, "CALL")
+	writerShort := options.GetPosition("writer", buySymbol, fixedpoint.FromInt64(60000), expiry, "CALL")
 	require.NotNil(t, writerShort, "writer should hold a short position in the buy leg")
-	require.True(t, writerShort.Size.Equal(decimal.NewFromInt(-1)))
+	require.True(t, writerShort.Size.Equal(fixedpoint.FromInt64(-1)))
 
-	writerLong := options.GetPosition("writer", sellSymbol, decimal.NewFromInt(65000), expiry, "CALL")
+	writerLong := options.GetPosition("writer", sellSymbol, fixedpoint.FromInt64(65000), expiry, "CALL")
 	require.NotNil(t, writerLong, "writer should hold a long position in the sell leg")
-	require.True(t, writerLong.Size.Equal(decimal.NewFromInt(1)))
+	require.True(t, writerLong.Size.Equal(fixedpoint.FromInt64(1)))
 
 	// Net cash flow must equal exactly the traded net price (200), on both
 	// sides — the buyer paid 200 net, the writer received 200 net, no matter
 	// how the two legs' individual synthetic prices were split.
 	buyerBalance := ledger.Available("buyer", "BI2XUSD")
-	almostEqual(t, buyerBalance, decimal.NewFromInt(1_000_000-200), "buyer balance")
+	almostEqual(t, buyerBalance, fixedpoint.FromInt64(1_000_000-200), "buyer balance")
 	writerBalance := ledger.Available("writer", "BI2XUSD")
-	almostEqual(t, writerBalance, decimal.NewFromInt(1_000_000+200), "writer balance")
+	almostEqual(t, writerBalance, fixedpoint.FromInt64(1_000_000+200), "writer balance")
 }
 
 // TestComboOrderBook_IronCondorAtomicSettlement extends the atomicity proof
@@ -159,8 +159,8 @@ func TestComboOrderBook_AtomicTwoLegSettlement(t *testing.T) {
 // short legs all settle together from one real matched trade.
 func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
 	options := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
 	expiry := time.Now().Add(24 * time.Hour)
@@ -179,12 +179,12 @@ func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 		underlying: "BTC-BI2XUSD",
 	}
 	marks := fixedMarkSource{
-		spot: decimal.NewFromInt(60000),
+		spot: fixedpoint.FromInt64(60000),
 		legs: map[string]comboLegSpec{
-			longPut:   {strike: decimal.NewFromInt(50000), expiry: expiry, typ: "PUT"},
-			shortPut:  {strike: decimal.NewFromInt(55000), expiry: expiry, typ: "PUT"},
-			shortCall: {strike: decimal.NewFromInt(65000), expiry: expiry, typ: "CALL"},
-			longCall:  {strike: decimal.NewFromInt(70000), expiry: expiry, typ: "CALL"},
+			longPut:   {strike: fixedpoint.FromInt64(50000), expiry: expiry, typ: "PUT"},
+			shortPut:  {strike: fixedpoint.FromInt64(55000), expiry: expiry, typ: "PUT"},
+			shortCall: {strike: fixedpoint.FromInt64(65000), expiry: expiry, typ: "CALL"},
+			longCall:  {strike: fixedpoint.FromInt64(70000), expiry: expiry, typ: "CALL"},
 		},
 	}
 	comboSettlement := settlement.NewComboSettlement(options, legs, marks)
@@ -198,7 +198,7 @@ func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 	// a price the incoming BUY must meet or improve on).
 	sellOrder := &models.Order{
 		ID: uuid.NewString(), AccountID: "writer", Symbol: comboSymbol, Market: models.ComboOptions,
-		Side: models.Sell, Type: models.Limit, Price: decimal.NewFromInt(300), Quantity: decimal.NewFromInt(1),
+		Side: models.Sell, Type: models.Limit, Price: fixedpoint.FromInt64(300), Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	_, err := eng.Submit(sellOrder)
@@ -206,7 +206,7 @@ func TestComboOrderBook_IronCondorAtomicSettlement(t *testing.T) {
 
 	buyOrder := &models.Order{
 		ID: uuid.NewString(), AccountID: "buyer", Symbol: comboSymbol, Market: models.ComboOptions,
-		Side: models.Buy, Type: models.Limit, Price: decimal.NewFromInt(300), Quantity: decimal.NewFromInt(1),
+		Side: models.Buy, Type: models.Limit, Price: fixedpoint.FromInt64(300), Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	trades, err := eng.Submit(buyOrder)

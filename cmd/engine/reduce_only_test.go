@@ -3,22 +3,22 @@ package main
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/settlement"
-	"github.com/shopspring/decimal"
 )
 
 func longPosition(size string) *settlement.Position {
-	return &settlement.Position{Side: models.Buy, Size: decimal.RequireFromString(size)}
+	return &settlement.Position{Side: models.Buy, Size: fixedpoint.MustFromString(size)}
 }
 
 func shortPosition(size string) *settlement.Position {
-	return &settlement.Position{Side: models.Sell, Size: decimal.RequireFromString(size)}
+	return &settlement.Position{Side: models.Sell, Size: fixedpoint.MustFromString(size)}
 }
 
 func reduceOnlyOrder(side models.OrderSide, qty string) *models.Order {
 	return &models.Order{
-		Side: side, Quantity: decimal.RequireFromString(qty), ReduceOnly: true,
+		Side: side, Quantity: fixedpoint.MustFromString(qty), ReduceOnly: true,
 	}
 }
 

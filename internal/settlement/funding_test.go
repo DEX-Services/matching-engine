@@ -3,11 +3,11 @@ package settlement
 import (
 	"testing"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 func TestCurrentFundingRate_ZeroIndex_ReturnsZero(t *testing.T) {
-	rate := CurrentFundingRate(decimal.RequireFromString("50000"), decimal.Zero)
+	rate := CurrentFundingRate(fixedpoint.MustFromString("50000"), fixedpoint.Zero)
 	if !rate.IsZero() {
 		t.Fatalf("expected zero rate for zero index price, got %s", rate)
 	}
@@ -15,20 +15,20 @@ func TestCurrentFundingRate_ZeroIndex_ReturnsZero(t *testing.T) {
 
 func TestCurrentFundingRate_MarkAboveIndex_PositiveRate(t *testing.T) {
 	// mark 0.2% above index -> raw rate 0.002, under the 0.75% cap so it passes through uncapped.
-	mark := decimal.RequireFromString("50100")
-	index := decimal.RequireFromString("50000")
+	mark := fixedpoint.MustFromString("50100")
+	index := fixedpoint.MustFromString("50000")
 	rate := CurrentFundingRate(mark, index)
-	want := decimal.RequireFromString("0.002")
+	want := fixedpoint.MustFromString("0.002")
 	if !rate.Equal(want) {
 		t.Fatalf("rate = %s, want %s", rate, want)
 	}
 }
 
 func TestCurrentFundingRate_MarkBelowIndex_NegativeRate(t *testing.T) {
-	mark := decimal.RequireFromString("49900")
-	index := decimal.RequireFromString("50000")
+	mark := fixedpoint.MustFromString("49900")
+	index := fixedpoint.MustFromString("50000")
 	rate := CurrentFundingRate(mark, index)
-	want := decimal.RequireFromString("-0.002")
+	want := fixedpoint.MustFromString("-0.002")
 	if !rate.Equal(want) {
 		t.Fatalf("rate = %s, want %s", rate, want)
 	}
@@ -36,8 +36,8 @@ func TestCurrentFundingRate_MarkBelowIndex_NegativeRate(t *testing.T) {
 
 func TestCurrentFundingRate_CapsAtPositiveBound(t *testing.T) {
 	// mark 5% above index -> raw rate 0.05, must clamp to the 0.75% cap.
-	mark := decimal.RequireFromString("52500")
-	index := decimal.RequireFromString("50000")
+	mark := fixedpoint.MustFromString("52500")
+	index := fixedpoint.MustFromString("50000")
 	rate := CurrentFundingRate(mark, index)
 	if !rate.Equal(fundingRateCap) {
 		t.Fatalf("rate = %s, want cap %s", rate, fundingRateCap)
@@ -45,8 +45,8 @@ func TestCurrentFundingRate_CapsAtPositiveBound(t *testing.T) {
 }
 
 func TestCurrentFundingRate_CapsAtNegativeBound(t *testing.T) {
-	mark := decimal.RequireFromString("47500")
-	index := decimal.RequireFromString("50000")
+	mark := fixedpoint.MustFromString("47500")
+	index := fixedpoint.MustFromString("50000")
 	rate := CurrentFundingRate(mark, index)
 	if !rate.Equal(fundingRateCap.Neg()) {
 		t.Fatalf("rate = %s, want cap %s", rate, fundingRateCap.Neg())
@@ -54,7 +54,7 @@ func TestCurrentFundingRate_CapsAtNegativeBound(t *testing.T) {
 }
 
 func TestCurrentFundingRate_MarkEqualsIndex_ZeroRate(t *testing.T) {
-	price := decimal.RequireFromString("50000")
+	price := fixedpoint.MustFromString("50000")
 	rate := CurrentFundingRate(price, price)
 	if !rate.IsZero() {
 		t.Fatalf("expected zero rate when mark == index, got %s", rate)
@@ -69,7 +69,7 @@ func TestCurrentFundingRate_MarkEqualsIndex_ZeroRate(t *testing.T) {
 // here rather than silently in production.
 func TestCurrentFundingRate_SamePriceBothSides_AlwaysZero(t *testing.T) {
 	for _, p := range []string{"1", "50000", "0.0001", "999999"} {
-		price := decimal.RequireFromString(p)
+		price := fixedpoint.MustFromString(p)
 		if rate := CurrentFundingRate(price, price); !rate.IsZero() {
 			t.Fatalf("price=%s: expected zero rate when mark==index, got %s", p, rate)
 		}

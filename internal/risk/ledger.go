@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 // Ledger is the authoritative, in-memory balance store.
@@ -19,20 +19,20 @@ import (
 //     are fast and use a shared read lock.
 type Ledger struct {
 	mu       sync.RWMutex
-	balances map[string]map[string]decimal.Decimal // accountID → asset → total balance
-	reserved map[string]map[string]decimal.Decimal // accountID → asset → soft-reserved amount
+	balances map[string]map[string]fixedpoint.Fixed // accountID → asset → total balance
+	reserved map[string]map[string]fixedpoint.Fixed // accountID → asset → soft-reserved amount
 }
 
 // NewLedger creates an empty ledger.
 func NewLedger() *Ledger {
 	return &Ledger{
-		balances: make(map[string]map[string]decimal.Decimal),
-		reserved: make(map[string]map[string]decimal.Decimal),
+		balances: make(map[string]map[string]fixedpoint.Fixed),
+		reserved: make(map[string]map[string]fixedpoint.Fixed),
 	}
 }
 
 // Deposit credits amount of asset to accountID. Used for funding and tests.
-func (l *Ledger) Deposit(accountID, asset string, amount decimal.Decimal) error {
+func (l *Ledger) Deposit(accountID, asset string, amount fixedpoint.Fixed) error {
 	if !amount.IsPositive() {
 		return fmt.Errorf("deposit amount must be positive, got %s", amount)
 	}
@@ -44,21 +44,21 @@ func (l *Ledger) Deposit(accountID, asset string, amount decimal.Decimal) error 
 }
 
 // Available returns the free (unreserved) balance.
-func (l *Ledger) Available(accountID, asset string) decimal.Decimal {
+func (l *Ledger) Available(accountID, asset string) fixedpoint.Fixed {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.available(accountID, asset)
 }
 
 // Balance returns the total balance (including reserved).
-func (l *Ledger) Balance(accountID, asset string) decimal.Decimal {
+func (l *Ledger) Balance(accountID, asset string) fixedpoint.Fixed {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.balances[accountID][asset]
 }
 
 // Reserved returns the amount currently soft-locked for open orders.
-func (l *Ledger) Reserved(accountID, asset string) decimal.Decimal {
+func (l *Ledger) Reserved(accountID, asset string) fixedpoint.Fixed {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.reserved[accountID][asset]
@@ -66,7 +66,7 @@ func (l *Ledger) Reserved(accountID, asset string) decimal.Decimal {
 
 // Reserve soft-locks amount for an open order (pre-trade hold).
 // Returns an error when the available balance is insufficient.
-func (l *Ledger) Reserve(accountID, asset string, amount decimal.Decimal) error {
+func (l *Ledger) Reserve(accountID, asset string, amount fixedpoint.Fixed) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ensure(accountID)
@@ -79,11 +79,11 @@ func (l *Ledger) Reserve(accountID, asset string, amount decimal.Decimal) error 
 }
 
 // Release frees a previously reserved amount (on cancel or rejection).
-func (l *Ledger) Release(accountID, asset string, amount decimal.Decimal) {
+func (l *Ledger) Release(accountID, asset string, amount fixedpoint.Fixed) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cur := l.reserved[accountID][asset]
-	l.reserved[accountID][asset] = decimal.Max(decimal.Zero, cur.Sub(amount))
+	l.reserved[accountID][asset] = fixedpoint.Max(fixedpoint.Zero, cur.Sub(amount))
 }
 
 // ReplaceReservations sets the reservation totals for an account in one
@@ -91,7 +91,7 @@ func (l *Ledger) Release(accountID, asset string, amount decimal.Decimal) {
 // the supplied targets represent the account's entire active quote ladder.
 // Validation happens before any mutation, so an insufficient replacement
 // leaves the previous reservations untouched.
-func (l *Ledger) ReplaceReservations(accountID string, targets map[string]decimal.Decimal) error {
+func (l *Ledger) ReplaceReservations(accountID string, targets map[string]fixedpoint.Fixed) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ensure(accountID)
@@ -105,7 +105,7 @@ func (l *Ledger) ReplaceReservations(accountID string, targets map[string]decima
 	}
 	for asset := range l.reserved[accountID] {
 		if _, ok := targets[asset]; !ok {
-			l.reserved[accountID][asset] = decimal.Zero
+			l.reserved[accountID][asset] = fixedpoint.Zero
 		}
 	}
 	for asset, target := range targets {
@@ -116,7 +116,7 @@ func (l *Ledger) ReplaceReservations(accountID string, targets map[string]decima
 
 // Debit removes amount from accountID's balance and releases the same reservation.
 // Called synchronously by settlement handlers after a fill.
-func (l *Ledger) Debit(accountID, asset string, amount decimal.Decimal) error {
+func (l *Ledger) Debit(accountID, asset string, amount fixedpoint.Fixed) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	bal := l.balances[accountID][asset]
@@ -127,13 +127,13 @@ func (l *Ledger) Debit(accountID, asset string, amount decimal.Decimal) error {
 	l.balances[accountID][asset] = bal.Sub(amount)
 	// Release reservation up to the debited amount.
 	res := l.reserved[accountID][asset]
-	l.reserved[accountID][asset] = decimal.Max(decimal.Zero, res.Sub(amount))
+	l.reserved[accountID][asset] = fixedpoint.Max(fixedpoint.Zero, res.Sub(amount))
 	return nil
 }
 
 // Credit adds amount to accountID's balance.
 // Called synchronously by settlement handlers after a fill.
-func (l *Ledger) Credit(accountID, asset string, amount decimal.Decimal) {
+func (l *Ledger) Credit(accountID, asset string, amount fixedpoint.Fixed) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.ensure(accountID)
@@ -142,19 +142,19 @@ func (l *Ledger) Credit(accountID, asset string, amount decimal.Decimal) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-func (l *Ledger) available(accountID, asset string) decimal.Decimal {
+func (l *Ledger) available(accountID, asset string) fixedpoint.Fixed {
 	bal := l.balances[accountID][asset]
 	res := l.reserved[accountID][asset]
 	v := bal.Sub(res)
 	if v.IsNegative() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return v
 }
 
 func (l *Ledger) ensure(accountID string) {
 	if l.balances[accountID] == nil {
-		l.balances[accountID] = make(map[string]decimal.Decimal)
-		l.reserved[accountID] = make(map[string]decimal.Decimal)
+		l.balances[accountID] = make(map[string]fixedpoint.Fixed)
+		l.reserved[accountID] = make(map[string]fixedpoint.Fixed)
 	}
 }

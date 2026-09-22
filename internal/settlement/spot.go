@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/backendclient"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
-	"github.com/shopspring/decimal"
 )
 
 // FeeLookup returns the maker/taker fee fractions for a symbol/market and
@@ -18,7 +18,7 @@ import (
 // FEE-TIER-SYSTEM-PLAN.md). Returning zeros means no fees are charged.
 // Satisfied by a closure over feeconfig.Registry + discounts.Registry, both
 // in-memory-only reads — safe to call on the settlement hot path.
-type FeeLookup func(symbol string, market models.MarketType, accountID string) (maker, taker decimal.Decimal)
+type FeeLookup func(symbol string, market models.MarketType, accountID string) (maker, taker fixedpoint.Fixed)
 
 // SpotSettlement transfers base and quote assets between buyer and seller
 // immediately upon trade execution.
@@ -66,7 +66,7 @@ func (s *SpotSettlement) Settle(trade *models.Trade) error {
 	if trade.MakerSide == models.Buy {
 		makerAccountID, takerAccountID = buyerID, sellerID
 	}
-	var makerFee, takerFee decimal.Decimal
+	var makerFee, takerFee fixedpoint.Fixed
 	if s.fees != nil {
 		makerRate, _ := s.fees(trade.Symbol, trade.Market, makerAccountID)
 		_, takerRate := s.fees(trade.Symbol, trade.Market, takerAccountID)

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // Checker performs pre-trade risk validation against the in-memory Ledger.
@@ -27,7 +27,7 @@ func NewChecker(ledger *Ledger) *Checker {
 // avoid risk importing marketdata (marketdata does not import risk either,
 // but this keeps the dependency direction explicit and one-way).
 type UnderlyingMarkSource interface {
-	UnderlyingMark(symbol string) (decimal.Decimal, bool)
+	UnderlyingMark(symbol string) (fixedpoint.Fixed, bool)
 }
 
 // markSource is package-level rather than a Checker field because notionalFor
@@ -65,7 +65,7 @@ const shortOptionMarginFloorPct = "0.20"
 // Falls back to the original strike×qty behavior when no mark price is
 // available yet (source unset, or the underlying has no live book) so
 // options trading never becomes *more* permissive than today by accident.
-func shortOptionMargin(order *models.Order, qty, premiumPrice decimal.Decimal) decimal.Decimal {
+func shortOptionMargin(order *models.Order, qty, premiumPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	cashSecured := order.StrikePrice.Mul(qty)
 	if markSource == nil {
 		return cashSecured
@@ -84,22 +84,22 @@ func shortOptionMargin(order *models.Order, qty, premiumPrice decimal.Decimal) d
 	premium := premiumPrice.Mul(qty)
 
 	underlyingNotional := spot.Mul(qty)
-	floorPct, _ := decimal.NewFromString(shortOptionMarginFloorPct)
+	floorPct, _ := fixedpoint.FromString(shortOptionMarginFloorPct)
 	floor := premium.Add(underlyingNotional.Mul(floorPct))
 
-	var itm decimal.Decimal
+	var itm fixedpoint.Fixed
 	if strings.EqualFold(order.OptionType, "CALL") {
-		itm = decimal.Max(decimal.Zero, spot.Sub(order.StrikePrice)).Mul(qty)
+		itm = fixedpoint.Max(fixedpoint.Zero, spot.Sub(order.StrikePrice)).Mul(qty)
 	} else {
-		itm = decimal.Max(decimal.Zero, order.StrikePrice.Sub(spot)).Mul(qty)
+		itm = fixedpoint.Max(fixedpoint.Zero, order.StrikePrice.Sub(spot)).Mul(qty)
 	}
 
-	required := decimal.Max(floor, itm)
+	required := fixedpoint.Max(floor, itm)
 	if required.GreaterThan(cashSecured) {
 		return cashSecured
 	}
 	if required.IsNegative() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return required
 }
@@ -117,7 +117,7 @@ func shortOptionMargin(order *models.Order, qty, premiumPrice decimal.Decimal) d
 // settlement.OptionsPosition) as the best available stand-in for "premium
 // already received" — the position doesn't carry a live order price the way
 // a fresh order does.
-func RequiredOptionsMargin(symbol, optionType string, strike, qty, premiumPerUnit decimal.Decimal, quoteCurrency string) decimal.Decimal {
+func RequiredOptionsMargin(symbol, optionType string, strike, qty, premiumPerUnit fixedpoint.Fixed, quoteCurrency string) fixedpoint.Fixed {
 	order := &models.Order{
 		Symbol: symbol, OptionType: optionType, StrikePrice: strike,
 		QuoteCurrency: quoteCurrency, Side: models.Sell, Market: models.Options,
@@ -187,20 +187,20 @@ func RequiredOptionsMargin(symbol, optionType string, strike, qty, premiumPerUni
 // ComboMaxLossMargin([]ComboLegSpec{{Strike: a, OptionType: "CALL", Ratio: 1},
 // {Strike: b, OptionType: "CALL", Ratio: -1}}, qty, c) whenever both legs are
 // the same option type — verified by TestComboMaxLossMargin_MatchesVerticalSpreadMargin.
-func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit decimal.Decimal) decimal.Decimal {
+func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit fixedpoint.Fixed) fixedpoint.Fixed {
 	if !qty.IsPositive() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	strikeDistance := buyStrike.Sub(sellStrike).Abs().Mul(qty)
 	switch {
 	case netCredit.IsNegative():
-		return decimal.Zero
+		return fixedpoint.Zero
 	case netCredit.IsZero():
 		return strikeDistance
 	default:
 		required := strikeDistance.Sub(netCredit)
 		if required.IsNegative() {
-			return decimal.Zero
+			return fixedpoint.Zero
 		}
 		return required
 	}
@@ -209,7 +209,7 @@ func VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit decimal.Decimal)
 // ComboLegSpec is one leg of a multi-leg options combo, for
 // ComboMaxLossMargin's payoff-diagram calculation.
 type ComboLegSpec struct {
-	Strike     decimal.Decimal
+	Strike     fixedpoint.Fixed
 	OptionType string // "CALL" | "PUT"
 	// Ratio is signed: positive = long this leg (bought), negative = short
 	// (written), magnitude = how many contracts of this leg per 1 unit of
@@ -251,15 +251,15 @@ type ComboLegSpec struct {
 // Returns the required margin (>= 0); a combo whose worst-case payoff is
 // still non-negative (a true "cannot lose" structure, e.g. impossible in
 // practice but not excluded by the math) returns 0.
-func ComboMaxLossMargin(legs []ComboLegSpec, qty, netCredit decimal.Decimal) decimal.Decimal {
+func ComboMaxLossMargin(legs []ComboLegSpec, qty, netCredit fixedpoint.Fixed) fixedpoint.Fixed {
 	if !qty.IsPositive() || len(legs) == 0 {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 
 	// Breakpoints: S=0 plus every leg's strike (deduplicated implicitly by
 	// just evaluating the payoff at each one — duplicates cost nothing).
-	breakpoints := make([]decimal.Decimal, 0, len(legs)+1)
-	breakpoints = append(breakpoints, decimal.Zero)
+	breakpoints := make([]fixedpoint.Fixed, 0, len(legs)+1)
+	breakpoints = append(breakpoints, fixedpoint.Zero)
 	for _, leg := range legs {
 		breakpoints = append(breakpoints, leg.Strike)
 	}
@@ -273,18 +273,18 @@ func ComboMaxLossMargin(legs []ComboLegSpec, qty, netCredit decimal.Decimal) dec
 	// needed for it, matching VerticalSpreadMargin's identical rule), and a
 	// net-credit spread's premium is money already banked that offsets part
 	// of the pure-options worst case, again matching VerticalSpreadMargin.
-	worstIntrinsic := decimal.Zero
+	worstIntrinsic := fixedpoint.Zero
 	first := true
 	for _, s := range breakpoints {
-		intrinsic := decimal.Zero
+		intrinsic := fixedpoint.Zero
 		for _, leg := range legs {
-			var legPayoff decimal.Decimal
+			var legPayoff fixedpoint.Fixed
 			if strings.EqualFold(leg.OptionType, "CALL") {
-				legPayoff = decimal.Max(decimal.Zero, s.Sub(leg.Strike))
+				legPayoff = fixedpoint.Max(fixedpoint.Zero, s.Sub(leg.Strike))
 			} else {
-				legPayoff = decimal.Max(decimal.Zero, leg.Strike.Sub(s))
+				legPayoff = fixedpoint.Max(fixedpoint.Zero, leg.Strike.Sub(s))
 			}
-			intrinsic = intrinsic.Add(legPayoff.Mul(decimal.NewFromInt(int64(leg.Ratio))))
+			intrinsic = intrinsic.Add(legPayoff.Mul(fixedpoint.FromInt64(int64(leg.Ratio))))
 		}
 		if first || intrinsic.LessThan(worstIntrinsic) {
 			worstIntrinsic = intrinsic
@@ -310,13 +310,13 @@ func ComboMaxLossMargin(legs []ComboLegSpec, qty, netCredit decimal.Decimal) dec
 	//     at 0).
 	switch {
 	case netCredit.IsNegative():
-		return decimal.Zero
+		return fixedpoint.Zero
 	case netCredit.IsZero():
 		return worstLoss
 	default:
 		required := worstLoss.Sub(netCredit)
 		if required.IsNegative() {
-			return decimal.Zero
+			return fixedpoint.Zero
 		}
 		return required
 	}
@@ -339,7 +339,7 @@ func comboLegSpecs(order *models.Order) ([]ComboLegSpec, bool) {
 		if len(parts) < 5 {
 			return nil, false
 		}
-		strike, err := decimal.NewFromString(parts[2])
+		strike, err := fixedpoint.FromString(parts[2])
 		if err != nil || !strike.IsPositive() {
 			return nil, false
 		}
@@ -452,7 +452,7 @@ func (c *Checker) Check(order *models.Order) error {
 	// the required asset.
 	if order.Type == models.Market || (order.Type == models.Stop && !order.Price.IsPositive()) {
 		asset := assetFor(order)
-		if c.ledger.Available(order.AccountID, asset).LessThanOrEqual(decimal.Zero) {
+		if c.ledger.Available(order.AccountID, asset).LessThanOrEqual(fixedpoint.Zero) {
 			return fmt.Errorf("insufficient %s: available=0", asset)
 		}
 		return nil
@@ -490,12 +490,12 @@ func (c *Checker) Reserve(order *models.Order) error {
 // carry no price of their own. Returns the asset and amount reserved so the
 // caller can release the unused residual after the order fills, or the full
 // amount if it is rejected/unfilled.
-func (c *Checker) ReserveMarket(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal, err error) {
+func (c *Checker) ReserveMarket(order *models.Order, estPrice fixedpoint.Fixed) (asset string, amount fixedpoint.Fixed, err error) {
 	// Mirrors Reserve/Check's ReduceOnly-futures exemption — a market-order
 	// close (e.g. "Close Position" submitted as MARKET) is exactly as much a
 	// reduce-only close as a limit one, and needs no fresh reservation.
 	if exemptFromFreshReservation(order) {
-		return assetFor(order), decimal.Zero, nil
+		return assetFor(order), fixedpoint.Zero, nil
 	}
 	asset, amount = requiredAt(order, estPrice)
 	if amount.IsZero() {
@@ -555,9 +555,9 @@ func (c *Checker) Release(order *models.Order) {
 // that must mirror the same reservation externally. Mirrors Reserve's market-
 // order skip: market orders have no known notional at submission time, so no
 // amount is returned.
-func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
+func RequiredFor(order *models.Order) (asset string, amount fixedpoint.Fixed) {
 	if order.Type == models.Market || (order.Type == models.Stop && !order.Price.IsPositive()) {
-		return "", decimal.Zero
+		return "", fixedpoint.Zero
 	}
 	// Mirrors Reserve's ReduceOnly-futures exemption exactly: this function's
 	// whole job is to tell an external caller (the Postgres balance-lock
@@ -565,7 +565,7 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 	// caller would durably lock funds for a reservation the engine's own
 	// in-memory ledger never actually took.
 	if exemptFromFreshReservation(order) {
-		return assetFor(order), decimal.Zero
+		return assetFor(order), fixedpoint.Zero
 	}
 	return required(order)
 }
@@ -575,14 +575,14 @@ func RequiredFor(order *models.Order) (asset string, amount decimal.Decimal) {
 // carry no price of their own. Used by the order handler to reserve funds
 // before a market order matches so an unfunded account can't receive base for
 // free when settlement's debit later fails.
-func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset string, amount decimal.Decimal) {
+func EstimatedRequired(order *models.Order, estPrice fixedpoint.Fixed) (asset string, amount fixedpoint.Fixed) {
 	// Mirrors Reserve/RequiredFor's ReduceOnly-futures exemption — a MARKET
 	// "Close Position" order takes this path (submit.go routes Market-type
 	// orders here regardless of ReduceOnly), and needs the same treatment as
 	// a reduce-only limit close: no fresh reservation for an order that can
 	// only shrink an existing, already-margined position.
 	if exemptFromFreshReservation(order) {
-		return assetFor(order), decimal.Zero
+		return assetFor(order), fixedpoint.Zero
 	}
 	return requiredAt(order, estPrice)
 }
@@ -590,8 +590,8 @@ func EstimatedRequired(order *models.Order, estPrice decimal.Decimal) (asset str
 // FilledDebit returns the total amount settlement will debit for the filled
 // portion of order across the given trades, using the same notional rules as
 // Reserve so a residual release is always consistent with what was reserved.
-func FilledDebit(order *models.Order, trades []*models.Trade) decimal.Decimal {
-	total := decimal.Zero
+func FilledDebit(order *models.Order, trades []*models.Trade) fixedpoint.Fixed {
+	total := fixedpoint.Zero
 	for _, t := range trades {
 		debit := notionalFor(order, t.Quantity, t.Price)
 		// Spot buyers pay their maker/taker fee in quote, so releasing only
@@ -612,9 +612,9 @@ func FilledDebit(order *models.Order, trades []*models.Trade) decimal.Decimal {
 // ReleaseAmountFor exposes the asset and amount that Release would free for
 // order, for callers outside this package that must mirror the same release
 // externally. Mirrors Release's market-order skip.
-func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal) {
+func ReleaseAmountFor(order *models.Order) (asset string, amount fixedpoint.Fixed) {
 	if order.Type == models.Market {
-		return "", decimal.Zero
+		return "", fixedpoint.Zero
 	}
 	if order.Type == models.Stop && !order.Price.IsPositive() {
 		// An untriggered stop-market order still holds its worst-case
@@ -623,7 +623,7 @@ func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal
 		// a resting-notional release amount from, so nothing is released
 		// here. The full reservation is freed on cancel via the normal
 		// order-cancellation path instead.
-		return "", decimal.Zero
+		return "", fixedpoint.Zero
 	}
 	return releaseAmount(order)
 }
@@ -633,26 +633,26 @@ func ReleaseAmountFor(order *models.Order) (asset string, amount decimal.Decimal
 // Reserve, before anything has filled.
 // Symbol format: "BASE-QUOTE" (e.g. "BTC-BI2XUSD").
 // Buyers lock quote currency (price × qty); sellers lock base currency (qty).
-func required(order *models.Order) (asset string, amount decimal.Decimal) {
+func required(order *models.Order) (asset string, amount fixedpoint.Fixed) {
 	return assetFor(order), notionalFor(order, order.Quantity, order.Price)
 }
 
 // requiredAt is like required but evaluates the notional at an explicit price,
 // used for market orders whose own Price is zero (the caller passes the best
 // opposite quote as a worst-case estimate).
-func requiredAt(order *models.Order, price decimal.Decimal) (asset string, amount decimal.Decimal) {
+func requiredAt(order *models.Order, price fixedpoint.Fixed) (asset string, amount fixedpoint.Fixed) {
 	return assetFor(order), notionalFor(order, order.Quantity, price)
 }
 
 // releaseAmount returns the asset and amount that should be released for an
 // order being cancelled or rejected, based on the UNFILLED remainder only.
-func releaseAmount(order *models.Order) (asset string, amount decimal.Decimal) {
+func releaseAmount(order *models.Order) (asset string, amount fixedpoint.Fixed) {
 	return assetFor(order), notionalFor(order, order.RemainingQty(), order.Price)
 }
 
 // releaseAmountAt is like releaseAmount but evaluates at an explicit price,
 // for market orders whose own Price is zero.
-func releaseAmountAt(order *models.Order, price decimal.Decimal) (asset string, amount decimal.Decimal) {
+func releaseAmountAt(order *models.Order, price fixedpoint.Fixed) (asset string, amount fixedpoint.Fixed) {
 	return assetFor(order), notionalFor(order, order.RemainingQty(), price)
 }
 
@@ -700,14 +700,14 @@ func assetFor(order *models.Order) string {
 // MarginRequired returns the margin (in quote currency) needed to open a
 // futures position of the given notional at the given leverage. Shared by
 // the risk checker and futures settlement so the two never disagree.
-func MarginRequired(notional decimal.Decimal, leverage int) decimal.Decimal {
+func MarginRequired(notional fixedpoint.Fixed, leverage int) fixedpoint.Fixed {
 	if leverage < 1 {
 		leverage = 1
 	}
-	return notional.Div(decimal.NewFromInt(int64(leverage)))
+	return notional.Div(fixedpoint.FromInt64(int64(leverage)))
 }
 
-func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decimal {
+func notionalFor(order *models.Order, qty, price fixedpoint.Fixed) fixedpoint.Fixed {
 	switch order.Market {
 	case models.Futures:
 		notional := price.Mul(qty)
@@ -732,7 +732,7 @@ func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decima
 		// by the caller — see cmd/engine's combo order construction.
 		specs, ok := comboLegSpecs(order)
 		if !ok {
-			return decimal.Zero // malformed combo symbols: fail open to zero here, validateAndPrepareCombo already rejects this before Check ever runs
+			return fixedpoint.Zero // malformed combo symbols: fail open to zero here, validateAndPrepareCombo already rejects this before Check ever runs
 		}
 		netCredit := price.Neg() // BUY at net debit price -> credit is negative; BUY at net credit -> credit is positive
 		if order.IsBuy() {
@@ -743,7 +743,7 @@ func notionalFor(order *models.Order, qty, price decimal.Decimal) decimal.Decima
 		// against an already-margined position, the same way a futures
 		// ReduceOnly close needs no fresh margin check (see Checker.Check's
 		// InternalLiquidation short-circuit for the analogous futures case).
-		return decimal.Zero
+		return fixedpoint.Zero
 	case models.Options:
 		if order.IsBuy() {
 			// Premium owed by the buyer.

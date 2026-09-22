@@ -3,8 +3,8 @@ package attached
 import (
 	"log/slog"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // Canceller is the subset of the matching registry the listener needs to
@@ -27,7 +27,7 @@ type Submitter interface {
 // current base-asset wallet balance instead of a margined position size —
 // see NewListener's spotPos parameter.
 type PositionSizer interface {
-	CurrentSize(accountID, symbol string) decimal.Decimal
+	CurrentSize(accountID, symbol string) fixedpoint.Fixed
 }
 
 // Listener reacts to order/liquidation events for orders that belong to an
@@ -174,7 +174,7 @@ func (l *Listener) cancelGroupLegs(g *Group) {
 // Cancel/SubmitSnapshot paths rather than adding a new mutation surface to
 // the matching core.
 func (l *Listener) resizeGroupLegs(g *Group) {
-	if g.ProtectedQty.LessThanOrEqual(decimal.Zero) {
+	if g.ProtectedQty.LessThanOrEqual(fixedpoint.Zero) {
 		l.cancelGroupLegs(g)
 		return
 	}

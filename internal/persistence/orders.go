@@ -3,9 +3,11 @@ package persistence
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
@@ -19,8 +21,8 @@ import (
 type OrderHistoryItem struct {
 	ID, Symbol, Market, Side, Type, Status string
 	RejectReason                           string
-	Price, Quantity, Filled                decimal.Decimal
-	AvgFillPrice, FeePaid                  decimal.Decimal
+	Price, Quantity, Filled                fixedpoint.Fixed
+	AvgFillPrice, FeePaid                  fixedpoint.Fixed
 	CreatedAt, UpdatedAt                   time.Time
 }
 
@@ -100,12 +102,29 @@ func OrderHistory(ctx context.Context, pool *pgxpool.Pool, f OrderHistoryFilter)
 	for rows.Next() {
 		var o OrderHistoryItem
 		var reason *string
+		var price, quantity, filled, avgFillPrice, feePaid decimal.Decimal
 		if err := rows.Scan(&o.ID, &o.Symbol, &o.Market, &o.Side, &o.Type, &o.Status, &reason,
-			&o.Price, &o.Quantity, &o.Filled, &o.AvgFillPrice, &o.FeePaid, &o.CreatedAt, &o.UpdatedAt); err != nil {
+			&price, &quantity, &filled, &avgFillPrice, &feePaid, &o.CreatedAt, &o.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if reason != nil {
 			o.RejectReason = *reason
+		}
+		var convErr error
+		if o.Price, convErr = fixedpoint.FromDecimal(price); convErr != nil {
+			return nil, fmt.Errorf("order %s: price: %w", o.ID, convErr)
+		}
+		if o.Quantity, convErr = fixedpoint.FromDecimal(quantity); convErr != nil {
+			return nil, fmt.Errorf("order %s: quantity: %w", o.ID, convErr)
+		}
+		if o.Filled, convErr = fixedpoint.FromDecimal(filled); convErr != nil {
+			return nil, fmt.Errorf("order %s: filled: %w", o.ID, convErr)
+		}
+		if o.AvgFillPrice, convErr = fixedpoint.FromDecimal(avgFillPrice); convErr != nil {
+			return nil, fmt.Errorf("order %s: avg_fill_price: %w", o.ID, convErr)
+		}
+		if o.FeePaid, convErr = fixedpoint.FromDecimal(feePaid); convErr != nil {
+			return nil, fmt.Errorf("order %s: fee_paid: %w", o.ID, convErr)
 		}
 		out = append(out, o)
 	}
@@ -116,7 +135,7 @@ func OrderHistory(ctx context.Context, pool *pgxpool.Pool, f OrderHistoryFilter)
 // account's order, as opposed to OrderHistoryItem's per-order aggregate.
 type FillItem struct {
 	TradeID, OrderID, Symbol, Market, Side string
-	Price, Quantity, FeePaid               decimal.Decimal
+	Price, Quantity, FeePaid               fixedpoint.Fixed
 	ExecutedAt                             time.Time
 }
 
@@ -182,9 +201,20 @@ func Fills(ctx context.Context, pool *pgxpool.Pool, f FillsFilter) ([]FillItem, 
 	out := make([]FillItem, 0)
 	for rows.Next() {
 		var f FillItem
+		var price, quantity, feePaid decimal.Decimal
 		if err := rows.Scan(&f.TradeID, &f.OrderID, &f.Symbol, &f.Market, &f.Side,
-			&f.Price, &f.Quantity, &f.FeePaid, &f.ExecutedAt); err != nil {
+			&price, &quantity, &feePaid, &f.ExecutedAt); err != nil {
 			return nil, err
+		}
+		var convErr error
+		if f.Price, convErr = fixedpoint.FromDecimal(price); convErr != nil {
+			return nil, fmt.Errorf("fill %s: price: %w", f.TradeID, convErr)
+		}
+		if f.Quantity, convErr = fixedpoint.FromDecimal(quantity); convErr != nil {
+			return nil, fmt.Errorf("fill %s: quantity: %w", f.TradeID, convErr)
+		}
+		if f.FeePaid, convErr = fixedpoint.FromDecimal(feePaid); convErr != nil {
+			return nil, fmt.Errorf("fill %s: fee_paid: %w", f.TradeID, convErr)
 		}
 		out = append(out, f)
 	}
@@ -200,7 +230,7 @@ func Fills(ctx context.Context, pool *pgxpool.Pool, f FillsFilter) ([]FillItem, 
 type OrderStatus struct {
 	Found  bool
 	Status string
-	Filled decimal.Decimal
+	Filled fixedpoint.Fixed
 }
 
 // OrderStatusByID reads an order's persisted status and filled quantity. A
@@ -222,5 +252,9 @@ func OrderStatusByID(ctx context.Context, pool *pgxpool.Pool, orderID string) (O
 	if err != nil {
 		return OrderStatus{}, err
 	}
-	return OrderStatus{Found: true, Status: status, Filled: filled}, nil
+	fp, convErr := fixedpoint.FromDecimal(filled)
+	if convErr != nil {
+		return OrderStatus{}, fmt.Errorf("order %s: filled: %w", orderID, convErr)
+	}
+	return OrderStatus{Found: true, Status: status, Filled: fp}, nil
 }

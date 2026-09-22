@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -39,8 +39,8 @@ func order(symbol string, side models.OrderSide, price, qty string) *models.Orde
 		Market:      models.Spot,
 		Side:        side,
 		Type:        models.Limit,
-		Price:       decimal.RequireFromString(price),
-		Quantity:    decimal.RequireFromString(qty),
+		Price:       fixedpoint.MustFromString(price),
+		Quantity:    fixedpoint.MustFromString(qty),
 		TimeInForce: models.GTC,
 		Status:      models.StatusPending,
 		CreatedAt:   time.Now(),

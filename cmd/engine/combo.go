@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // comboMemoryFallback holds combo instruments in-process when Postgres is
@@ -150,14 +150,14 @@ func (a *comboSettlementAdapter) ResolveComboLegs(ctx context.Context, comboSymb
 	return inst.Legs, inst.Underlying, nil
 }
 
-func (a *comboSettlementAdapter) UnderlyingMark(underlying string) (decimal.Decimal, bool) {
+func (a *comboSettlementAdapter) UnderlyingMark(underlying string) (fixedpoint.Fixed, bool) {
 	return a.mdSvc.UnderlyingMark(underlying)
 }
 
-func (a *comboSettlementAdapter) LegSpec(ctx context.Context, legSymbol string) (strike decimal.Decimal, expiry time.Time, optionType, quoteCurrency string, ok bool) {
+func (a *comboSettlementAdapter) LegSpec(ctx context.Context, legSymbol string) (strike fixedpoint.Fixed, expiry time.Time, optionType, quoteCurrency string, ok bool) {
 	inst, err := loadOptionInstrument(ctx, a.pool, legSymbol)
 	if err != nil || inst == nil {
-		return decimal.Zero, time.Time{}, "", "", false
+		return fixedpoint.Zero, time.Time{}, "", "", false
 	}
 	quote := "BI2XUSD"
 	if parts := splitOptionSymbol(legSymbol); len(parts) >= 2 {

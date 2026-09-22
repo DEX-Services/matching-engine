@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // SpreadRequest is the JSON body for POST /spread. A variable-length leg
@@ -84,7 +84,7 @@ func spreadHandler(d submitDeps) http.HandlerFunc {
 			http.Error(w, "legs must contain at least 2 entries", http.StatusBadRequest)
 			return
 		}
-		qty, qerr := decimal.NewFromString(req.Qty)
+		qty, qerr := fixedpoint.FromString(req.Qty)
 		if qerr != nil || !qty.IsPositive() {
 			http.Error(w, "qty must be a positive number", http.StatusBadRequest)
 			return
@@ -102,7 +102,7 @@ func spreadHandler(d submitDeps) http.HandlerFunc {
 		case "MARKET":
 			orderType = models.Market
 		}
-		price, perr := decimal.NewFromString(req.Price)
+		price, perr := fixedpoint.FromString(req.Price)
 		if orderType != models.Market && (perr != nil || !price.IsPositive()) {
 			http.Error(w, "price must be a positive net limit price (a positive number; use side to express long/short, not price sign)", http.StatusBadRequest)
 			return

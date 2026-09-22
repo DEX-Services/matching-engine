@@ -18,14 +18,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // Registry is the in-memory per-user discount store.
 type Registry struct {
 	mu   sync.RWMutex
-	byID map[string]decimal.Decimal // userID -> discount fraction (0.15 == 15%)
+	byID map[string]fixedpoint.Fixed // userID -> discount fraction (0.15 == 15%)
 	pool *pgxpool.Pool
 	log  *slog.Logger
 }
@@ -33,12 +33,12 @@ type Registry struct {
 // NewInMemoryRegistry creates an empty Registry with no Postgres backing —
 // every user reads back a zero discount. Used when Postgres is disabled.
 func NewInMemoryRegistry() *Registry {
-	return &Registry{byID: make(map[string]decimal.Decimal), log: slog.Default()}
+	return &Registry{byID: make(map[string]fixedpoint.Fixed), log: slog.Default()}
 }
 
 // NewRegistry creates a Registry and loads initial discounts from Postgres.
 func NewRegistry(ctx context.Context, pool *pgxpool.Pool) (*Registry, error) {
-	r := &Registry{byID: make(map[string]decimal.Decimal), pool: pool, log: slog.Default()}
+	r := &Registry{byID: make(map[string]fixedpoint.Fixed), pool: pool, log: slog.Default()}
 	if err := r.reload(ctx); err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func NewRegistry(ctx context.Context, pool *pgxpool.Pool) (*Registry, error) {
 // ActiveDiscountFor returns userID's current fee discount as a fraction
 // (0.15 for 15%off), or zero if they have no active subscription. A plain
 // in-memory map read — safe to call on the settlement hot path.
-func (r *Registry) ActiveDiscountFor(userID string) decimal.Decimal {
+func (r *Registry) ActiveDiscountFor(userID string) fixedpoint.Fixed {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.byID[userID]
@@ -87,17 +87,17 @@ func (r *Registry) reload(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	fresh := make(map[string]decimal.Decimal)
+	fresh := make(map[string]fixedpoint.Fixed)
 	for rows.Next() {
 		var userID, pctStr string
 		if err := rows.Scan(&userID, &pctStr); err != nil {
 			return fmt.Errorf("scan subscription row: %w", err)
 		}
-		pct, err := decimal.NewFromString(pctStr)
+		pct, err := fixedpoint.FromString(pctStr)
 		if err != nil {
 			continue
 		}
-		discount := pct.Div(decimal.NewFromInt(100)) // discount_pct is e.g. 15 -> 0.15
+		discount := pct.Div(fixedpoint.FromInt64(100)) // discount_pct is e.g. 15 -> 0.15
 		if existing, ok := fresh[userID]; !ok || discount.GreaterThan(existing) {
 			fresh[userID] = discount
 		}

@@ -18,6 +18,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
@@ -52,7 +53,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 
 // Observation is one contract's most recently recorded implied vol.
 type Observation struct {
-	Strike     decimal.Decimal
+	Strike     fixedpoint.Fixed
 	Expiry     time.Time
 	OptionType string
 	IV         float64 // annualized, e.g. 0.6 = 60%
@@ -69,7 +70,7 @@ const maxObservationAge = 24 * time.Hour
 // book price (see cmd/engine/main.go) — never for the flat assumedVol
 // fallback, which would just be recording the assumption back to itself.
 // A nil pool (Postgres unconfigured) makes this a no-op.
-func (s *Store) Record(ctx context.Context, underlying string, strike decimal.Decimal, expiry time.Time, optionType string, iv float64) {
+func (s *Store) Record(ctx context.Context, underlying string, strike fixedpoint.Fixed, expiry time.Time, optionType string, iv float64) {
 	if s == nil || s.pool == nil || iv <= 0 {
 		return
 	}
@@ -81,7 +82,7 @@ func (s *Store) Record(ctx context.Context, underlying string, strike decimal.De
 		VALUES ($1, $2, $3, $4, $5, NOW())
 		ON CONFLICT (underlying_symbol, strike_price, expiry, option_type)
 		DO UPDATE SET iv = EXCLUDED.iv, observed_at = EXCLUDED.observed_at`,
-		underlying, strike, expiry, optionType, iv)
+		underlying, strike.ToDecimal(), expiry, optionType, iv)
 }
 
 // Interpolate returns an IV estimate for (strike, expiry, optionType) derived
@@ -97,7 +98,7 @@ func (s *Store) Record(ctx context.Context, underlying string, strike decimal.De
 // have a live book price to imply IV from directly, so there is no "own"
 // observation to prefer here; every row for this (expiry, optionType) is a
 // same-expiry NEIGHBOR's data.
-func (s *Store) Interpolate(ctx context.Context, underlying string, strike decimal.Decimal, expiry time.Time, optionType string) (float64, bool) {
+func (s *Store) Interpolate(ctx context.Context, underlying string, strike fixedpoint.Fixed, expiry time.Time, optionType string) (float64, bool) {
 	if s == nil || s.pool == nil {
 		return 0, false
 	}
@@ -129,7 +130,7 @@ func (s *Store) Interpolate(ctx context.Context, underlying string, strike decim
 	if len(points) == 0 {
 		return 0, false
 	}
-	target, _ := strike.Float64()
+	target, _ := strike.ToDecimal().Float64()
 	strikes := make([]float64, len(points))
 	ivs := make([]float64, len(points))
 	for i, p := range points {

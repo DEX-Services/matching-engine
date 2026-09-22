@@ -9,9 +9,9 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
-	"github.com/shopspring/decimal"
 )
 
 // defaultLeverage is used when an order does not specify one (e.g. legacy
@@ -23,9 +23,9 @@ type Position struct {
 	AccountID  string
 	Symbol     string
 	Side       models.OrderSide
-	Size       decimal.Decimal
-	EntryPrice decimal.Decimal // volume-weighted average entry
-	Margin     decimal.Decimal // initial margin held in the ledger
+	Size       fixedpoint.Fixed
+	EntryPrice fixedpoint.Fixed // volume-weighted average entry
+	Margin     fixedpoint.Fixed // initial margin held in the ledger
 	Leverage   int
 	MarginMode string // models.MarginIsolated | models.MarginCross
 	UpdatedAt  time.Time
@@ -38,26 +38,26 @@ func (p *Position) IsCrossMargin() bool {
 
 // MaintenanceMargin returns the minimum margin (in quote currency) the
 // position must retain at the given mark price before liquidation triggers.
-func (p *Position) MaintenanceMargin(markPrice, maintenanceMarginRate decimal.Decimal) decimal.Decimal {
+func (p *Position) MaintenanceMargin(markPrice, maintenanceMarginRate fixedpoint.Fixed) fixedpoint.Fixed {
 	notional := markPrice.Mul(p.Size.Abs())
 	return notional.Mul(maintenanceMarginRate)
 }
 
 // MarginRatio returns (margin + unrealizedPnL) / notional. Below the
 // maintenance margin rate, the position is subject to liquidation.
-func (p *Position) MarginRatio(markPrice decimal.Decimal) decimal.Decimal {
+func (p *Position) MarginRatio(markPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	notional := markPrice.Mul(p.Size.Abs())
 	if notional.IsZero() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	equity := p.Margin.Add(p.PnL(markPrice))
 	return equity.Div(notional)
 }
 
 // PnL returns unrealised profit/loss given the current mark price.
-func (p *Position) PnL(markPrice decimal.Decimal) decimal.Decimal {
+func (p *Position) PnL(markPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	if p.Size.IsZero() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	diff := markPrice.Sub(p.EntryPrice).Mul(p.Size)
 	if p.Side == models.Sell {
@@ -125,7 +125,7 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 	if trade.MakerSide == models.Buy {
 		makerAccountID, takerAccountID = buyerID, sellerID
 	}
-	var makerFee, takerFee decimal.Decimal
+	var makerFee, takerFee fixedpoint.Fixed
 	if f.fees != nil {
 		makerRate, _ := f.fees(trade.Symbol, trade.Market, makerAccountID)
 		_, takerRate := f.fees(trade.Symbol, trade.Market, takerAccountID)
@@ -164,7 +164,7 @@ func (f *FuturesSettlement) Settle(trade *models.Trade) error {
 // against the account's quote-asset balance in addition to the margin debit
 // — it is not held as position margin and is never returned to the account.
 func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset string, side models.OrderSide,
-	qty, price decimal.Decimal, leverage int, marginMode string, isLiquidation bool, fee decimal.Decimal) error {
+	qty, price fixedpoint.Fixed, leverage int, marginMode string, isLiquidation bool, fee fixedpoint.Fixed) error {
 	if fee.IsPositive() {
 		if err := f.ledger.Debit(accountID, quoteAsset, fee); err != nil {
 			return fmt.Errorf("debit futures fee: %w", err)
@@ -206,7 +206,7 @@ func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset str
 		return nil
 	}
 
-	closeQty := decimal.Min(qty, existing.Size)
+	closeQty := fixedpoint.Min(qty, existing.Size)
 	openQty := qty.Sub(closeQty)
 
 	f.closePortion(tradeID, accountID, symbol, quoteAsset, price, closeQty, isLiquidation)
@@ -235,7 +235,7 @@ func (f *FuturesSettlement) applyFill(tradeID, accountID, symbol, quoteAsset str
 // closeQty of accountID's existing position at symbol, crediting the result
 // to the ledger and (asynchronously) to Postgres. Deletes the position if it
 // is fully closed.
-func (f *FuturesSettlement) closePortion(tradeID, accountID, symbol, quoteAsset string, price, closeQty decimal.Decimal, isLiquidation bool) {
+func (f *FuturesSettlement) closePortion(tradeID, accountID, symbol, quoteAsset string, price, closeQty fixedpoint.Fixed, isLiquidation bool) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -287,7 +287,7 @@ func (f *FuturesSettlement) closePortion(tradeID, accountID, symbol, quoteAsset 
 // loss beyond the released margin is applied as a real debit. A failed debit
 // is logged as a critical error so the ledger divergence is visible for
 // reconciliation instead of being silently ignored.
-func (f *FuturesSettlement) realizeAndCredit(tradeID, accountID, quoteAsset string, margin, pnl decimal.Decimal, isolated bool) {
+func (f *FuturesSettlement) realizeAndCredit(tradeID, accountID, quoteAsset string, margin, pnl fixedpoint.Fixed, isolated bool) {
 	settlement := margin.Add(pnl)
 	if isolated && settlement.IsNegative() {
 		// Isolated margin: loss is capped at the position's margin.
@@ -295,7 +295,7 @@ func (f *FuturesSettlement) realizeAndCredit(tradeID, accountID, quoteAsset stri
 		slog.Warn("isolated margin loss exceeds position margin; capping loss at posted margin",
 			"account", accountID, "asset", quoteAsset,
 			"margin", margin, "pnl", pnl, "shortfall", settlement.Neg())
-		settlement = decimal.Zero
+		settlement = fixedpoint.Zero
 	}
 	if settlement.IsPositive() {
 		f.ledger.Credit(accountID, quoteAsset, settlement)
@@ -336,7 +336,7 @@ func effectiveMarginMode(mode string) string {
 }
 
 func (f *FuturesSettlement) updatePosition(accountID, symbol string, side models.OrderSide,
-	qty, price, margin decimal.Decimal, leverage int, marginMode string) {
+	qty, price, margin fixedpoint.Fixed, leverage int, marginMode string) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -381,7 +381,7 @@ func (f *FuturesSettlement) AllPositions() []*Position {
 // between the lookup and the margin update, which would apply the funding
 // payment to a detached struct. The ledger has its own mutex; the lock order
 // is always FuturesSettlement.mu → Ledger.mu, which is deadlock-free.
-func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decimal.Decimal, quoteAsset string) error {
+func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment fixedpoint.Fixed, quoteAsset string) error {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -414,7 +414,7 @@ func (f *FuturesSettlement) ApplyFunding(accountID, symbol string, payment decim
 // the discount-adjusted FeeLookup, same as maker/taker fees elsewhere in this
 // file, so this method itself stays fee-shape-agnostic and just deducts
 // whatever amount it's given.
-func (f *FuturesSettlement) ClosePosition(closeEventID, accountID, symbol, quoteAsset string, markPrice, liquidationFee decimal.Decimal) {
+func (f *FuturesSettlement) ClosePosition(closeEventID, accountID, symbol, quoteAsset string, markPrice, liquidationFee fixedpoint.Fixed) {
 	key := accountID + ":" + symbol
 	f.mu.Lock()
 	pos, ok := f.positions[key]
@@ -453,10 +453,10 @@ func (f *FuturesSettlement) GetPosition(accountID, symbol string) *Position {
 // symbol (zero if there is no open position). Implements
 // internal/attached.PositionSizer for the OCO/resize listener, which needs
 // exposure magnitude only, not direction.
-func (f *FuturesSettlement) CurrentSize(accountID, symbol string) decimal.Decimal {
+func (f *FuturesSettlement) CurrentSize(accountID, symbol string) fixedpoint.Fixed {
 	pos := f.GetPosition(accountID, symbol)
 	if pos == nil {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return pos.Size.Abs()
 }

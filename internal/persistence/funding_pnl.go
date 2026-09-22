@@ -2,10 +2,12 @@ package persistence
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
@@ -13,8 +15,8 @@ import (
 // FundingPaymentItem is one persisted funding settlement for an account.
 type FundingPaymentItem struct {
 	Symbol    string
-	Rate      decimal.Decimal
-	Amount    decimal.Decimal
+	Rate      fixedpoint.Fixed
+	Amount    fixedpoint.Fixed
 	CreatedAt time.Time
 }
 
@@ -66,8 +68,16 @@ func FundingHistory(ctx context.Context, pool *pgxpool.Pool, f HistoryFilter) ([
 	out := make([]FundingPaymentItem, 0)
 	for rows.Next() {
 		var it FundingPaymentItem
-		if err := rows.Scan(&it.Symbol, &it.Rate, &it.Amount, &it.CreatedAt); err != nil {
+		var rate, amount decimal.Decimal
+		if err := rows.Scan(&it.Symbol, &rate, &amount, &it.CreatedAt); err != nil {
 			return nil, err
+		}
+		var convErr error
+		if it.Rate, convErr = fixedpoint.FromDecimal(rate); convErr != nil {
+			return nil, fmt.Errorf("funding payment %s: rate: %w", it.Symbol, convErr)
+		}
+		if it.Amount, convErr = fixedpoint.FromDecimal(amount); convErr != nil {
+			return nil, fmt.Errorf("funding payment %s: amount: %w", it.Symbol, convErr)
 		}
 		out = append(out, it)
 	}
@@ -77,9 +87,9 @@ func FundingHistory(ctx context.Context, pool *pgxpool.Pool, f HistoryFilter) ([
 // RealizedPnlItem is one persisted position-closing settlement.
 type RealizedPnlItem struct {
 	Symbol         string
-	ClosedQty      decimal.Decimal
-	Pnl            decimal.Decimal
-	MarginReturned decimal.Decimal
+	ClosedQty      fixedpoint.Fixed
+	Pnl            fixedpoint.Fixed
+	MarginReturned fixedpoint.Fixed
 	IsLiquidation  bool
 	CreatedAt      time.Time
 }
@@ -120,8 +130,19 @@ func RealizedPnlHistory(ctx context.Context, pool *pgxpool.Pool, f HistoryFilter
 	out := make([]RealizedPnlItem, 0)
 	for rows.Next() {
 		var it RealizedPnlItem
-		if err := rows.Scan(&it.Symbol, &it.ClosedQty, &it.Pnl, &it.MarginReturned, &it.IsLiquidation, &it.CreatedAt); err != nil {
+		var closedQty, pnl, marginReturned decimal.Decimal
+		if err := rows.Scan(&it.Symbol, &closedQty, &pnl, &marginReturned, &it.IsLiquidation, &it.CreatedAt); err != nil {
 			return nil, err
+		}
+		var convErr error
+		if it.ClosedQty, convErr = fixedpoint.FromDecimal(closedQty); convErr != nil {
+			return nil, fmt.Errorf("realized pnl %s: closed_qty: %w", it.Symbol, convErr)
+		}
+		if it.Pnl, convErr = fixedpoint.FromDecimal(pnl); convErr != nil {
+			return nil, fmt.Errorf("realized pnl %s: pnl: %w", it.Symbol, convErr)
+		}
+		if it.MarginReturned, convErr = fixedpoint.FromDecimal(marginReturned); convErr != nil {
+			return nil, fmt.Errorf("realized pnl %s: margin_returned: %w", it.Symbol, convErr)
 		}
 		out = append(out, it)
 	}

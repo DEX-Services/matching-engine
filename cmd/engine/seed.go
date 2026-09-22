@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // seedSymbolConfigs inserts default configuration rows for every pair this
@@ -223,7 +223,7 @@ func seedOptionInstruments(ctx context.Context, pool *pgxpool.Pool) {
 					INSERT INTO option_instruments (symbol, underlying_symbol, strike_price, expiry, option_type)
 					VALUES ($1, $2, $3, $4, $5)
 					ON CONFLICT DO NOTHING`,
-					symbol, "BTC-BI2XUSD", decimal.NewFromInt(int64(strike)), expiry, optType)
+					symbol, "BTC-BI2XUSD", fixedpoint.FromInt64(int64(strike)), expiry, optType)
 				if err != nil {
 					slog.Error("seed option_instruments", "symbol", symbol, "error", err)
 				}
@@ -237,7 +237,7 @@ type optionInstrument struct {
 	Symbol     string
 	Underlying string
 	OptionType string
-	Strike     decimal.Decimal
+	Strike     fixedpoint.Fixed
 	Expiry     time.Time
 }
 
@@ -264,7 +264,7 @@ func loadOptionInstruments(ctx context.Context, pool *pgxpool.Pool, underlying s
 		if err := rows.Scan(&inst.Symbol, &inst.Underlying, &inst.OptionType, &strike, &inst.Expiry); err != nil {
 			return nil, fmt.Errorf("scan option_instrument: %w", err)
 		}
-		inst.Strike, _ = decimal.NewFromString(strike)
+		inst.Strike, _ = fixedpoint.FromString(strike)
 		out = append(out, inst)
 	}
 	return out, rows.Err()
@@ -286,6 +286,6 @@ func loadOptionInstrument(ctx context.Context, pool *pgxpool.Pool, symbol string
 	if err != nil {
 		return nil, fmt.Errorf("query option_instrument %s: %w", symbol, err)
 	}
-	inst.Strike, _ = decimal.NewFromString(strike)
+	inst.Strike, _ = fixedpoint.FromString(strike)
 	return &inst, nil
 }

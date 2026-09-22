@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // Key names for fee_config rows. Every key here is seeded on boot with the
@@ -50,7 +50,7 @@ var defaultRates = map[string]string{
 // Registry is the in-memory fee-rate store, hot-reloaded from Postgres.
 type Registry struct {
 	mu    sync.RWMutex
-	rates map[string]decimal.Decimal
+	rates map[string]fixedpoint.Fixed
 	pool  *pgxpool.Pool
 	log   *slog.Logger
 }
@@ -59,9 +59,9 @@ type Registry struct {
 // with no Postgres backing (used when Postgres is disabled, e.g. local dev
 // without a DB) — Rate() still returns sensible values instead of zero.
 func NewInMemoryRegistry() *Registry {
-	r := &Registry{rates: make(map[string]decimal.Decimal), log: slog.Default()}
+	r := &Registry{rates: make(map[string]fixedpoint.Fixed), log: slog.Default()}
 	for k, v := range defaultRates {
-		if d, err := decimal.NewFromString(v); err == nil {
+		if d, err := fixedpoint.FromString(v); err == nil {
 			r.rates[k] = d
 		}
 	}
@@ -71,7 +71,7 @@ func NewInMemoryRegistry() *Registry {
 // NewRegistry creates a Registry and loads initial rates from Postgres.
 func NewRegistry(ctx context.Context, pool *pgxpool.Pool) (*Registry, error) {
 	r := &Registry{
-		rates: make(map[string]decimal.Decimal),
+		rates: make(map[string]fixedpoint.Fixed),
 		pool:  pool,
 		log:   slog.Default(),
 	}
@@ -83,7 +83,7 @@ func NewRegistry(ctx context.Context, pool *pgxpool.Pool) (*Registry, error) {
 
 // Rate returns the current rate for key, or zero if unconfigured. A plain
 // in-memory map read — safe to call on the settlement hot path.
-func (r *Registry) Rate(key string) decimal.Decimal {
+func (r *Registry) Rate(key string) fixedpoint.Fixed {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.rates[key]
@@ -91,10 +91,10 @@ func (r *Registry) Rate(key string) decimal.Decimal {
 
 // All returns a snapshot of every configured rate, keyed by fee_config.key.
 // Used by the admin API to list current values.
-func (r *Registry) All() map[string]decimal.Decimal {
+func (r *Registry) All() map[string]fixedpoint.Fixed {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make(map[string]decimal.Decimal, len(r.rates))
+	out := make(map[string]fixedpoint.Fixed, len(r.rates))
 	for k, v := range r.rates {
 		out[k] = v
 	}
@@ -125,13 +125,13 @@ func (r *Registry) reload(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	fresh := make(map[string]decimal.Decimal)
+	fresh := make(map[string]fixedpoint.Fixed)
 	for rows.Next() {
 		var key, rateStr string
 		if err := rows.Scan(&key, &rateStr); err != nil {
 			return fmt.Errorf("scan fee_config row: %w", err)
 		}
-		rate, err := decimal.NewFromString(rateStr)
+		rate, err := fixedpoint.FromString(rateStr)
 		if err != nil {
 			r.log.Error("fee_config row has unparseable rate; skipping", "key", key, "raw", rateStr)
 			continue

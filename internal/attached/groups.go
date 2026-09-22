@@ -6,15 +6,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 type Leg struct {
 	ID         string
-	StopPrice  decimal.Decimal
-	LimitPrice decimal.Decimal
+	StopPrice  fixedpoint.Fixed
+	LimitPrice fixedpoint.Fixed
 	Active     bool
 }
 
@@ -28,7 +28,7 @@ type Group struct {
 	// EntrySide is the entry order's side. Both protective legs close the
 	// position, so they submit on the opposite side (entry BUY -> legs SELL).
 	EntrySide            models.OrderSide
-	ProtectedQty         decimal.Decimal
+	ProtectedQty         fixedpoint.Fixed
 	TakeProfit, StopLoss *Leg
 	TriggeredLeg         string
 }
@@ -42,8 +42,8 @@ func NewRegistry() *Registry { return &Registry{groups: make(map[string]*Group)}
 
 // Activate stores only the actual filled quantity. A zero-fill entry creates
 // no protection, so an unfilled/resting entry cannot leave stray exits live.
-func (r *Registry) Activate(g Group, filled decimal.Decimal) error {
-	if filled.LessThanOrEqual(decimal.Zero) {
+func (r *Registry) Activate(g Group, filled fixedpoint.Fixed) error {
+	if filled.LessThanOrEqual(fixedpoint.Zero) {
 		return nil
 	}
 	if g.ID == "" || g.ParentOrderID == "" || (g.TakeProfit == nil && g.StopLoss == nil) {
@@ -101,14 +101,14 @@ func (r *Registry) Trigger(id, legID string) (*Group, string, error) {
 // Resize caps protection to remaining exposure; zero exposure removes it.
 // On removal, the returned Group still carries the (now-stale) leg IDs so
 // the caller can cancel them — only the ok flag signals the group is gone.
-func (r *Registry) Resize(id string, exposure decimal.Decimal) (*Group, bool) {
+func (r *Registry) Resize(id string, exposure fixedpoint.Fixed) (*Group, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	g, ok := r.groups[id]
 	if !ok {
 		return nil, false
 	}
-	if exposure.LessThanOrEqual(decimal.Zero) {
+	if exposure.LessThanOrEqual(fixedpoint.Zero) {
 		delete(r.groups, id)
 		copy := *g
 		return &copy, false
@@ -206,7 +206,7 @@ func closingSide(entrySide models.OrderSide) models.OrderSide {
 // shared lock rather than reserving this leg's own qty a second time —
 // see Execute's doc comment for why a second, independent per-leg
 // reservation would double-lock the same underlying holding.
-func BuildLegOrder(g Group, leg *Leg, role string, qty decimal.Decimal) *models.Order {
+func BuildLegOrder(g Group, leg *Leg, role string, qty fixedpoint.Fixed) *models.Order {
 	o := &models.Order{
 		ID:          uuid.NewString(),
 		AccountID:   g.AccountID,

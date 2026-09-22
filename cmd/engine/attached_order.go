@@ -9,10 +9,10 @@ import (
 
 	"github.com/dex/matching-engine/internal/attached"
 	"github.com/dex/matching-engine/internal/backendclient"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // spotPositionSizer implements attached.PositionSizer for SPOT groups
@@ -33,10 +33,10 @@ type spotPositionSizer struct {
 // "BASE-QUOTE" form (e.g. "BI2X-BI2XUSD"); the base asset is everything
 // before the first "-", same split used throughout this package for spot
 // symbols (see risk.assetFor's default case).
-func (s *spotPositionSizer) CurrentSize(accountID, symbol string) decimal.Decimal {
+func (s *spotPositionSizer) CurrentSize(accountID, symbol string) fixedpoint.Fixed {
 	base, _, ok := strings.Cut(symbol, "-")
 	if !ok || base == "" {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	return s.ledger.Balance(accountID, base)
 }
@@ -56,8 +56,8 @@ type AttachedOrderResponse struct {
 // "sl" (e.g. tpPrice, slStopPrice) to keep the existing query-param style
 // used by /order instead of introducing a JSON-body request shape.
 type legSpec struct {
-	price     decimal.Decimal
-	stopPrice decimal.Decimal
+	price     fixedpoint.Fixed
+	stopPrice fixedpoint.Fixed
 	present   bool
 }
 
@@ -72,8 +72,8 @@ func parseLegSpec(q map[string][]string, prefix string) legSpec {
 	if priceStr == "" && stopStr == "" {
 		return legSpec{}
 	}
-	price, _ := decimal.NewFromString(priceStr)
-	stop, _ := decimal.NewFromString(stopStr)
+	price, _ := fixedpoint.FromString(priceStr)
+	stop, _ := fixedpoint.FromString(stopStr)
 	return legSpec{price: price, stopPrice: stop, present: true}
 }
 
@@ -109,8 +109,8 @@ func attachedOrderHandler(d submitDeps, attachedReg *attached.Registry) http.Han
 		case "STOP":
 			orderType = models.Stop
 		}
-		price, _ := decimal.NewFromString(q.Get("price"))
-		qty, _ := decimal.NewFromString(q.Get("qty"))
+		price, _ := fixedpoint.FromString(q.Get("price"))
+		qty, _ := fixedpoint.FromString(q.Get("qty"))
 		leverage, _ := strconv.Atoi(q.Get("leverage"))
 		reduceOnly := q.Get("reduceOnly") == "true"
 

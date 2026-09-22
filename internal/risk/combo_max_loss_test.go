@@ -3,7 +3,7 @@ package risk
 import (
 	"testing"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 func TestComboMaxLossMargin_MatchesVerticalSpreadMargin(t *testing.T) {
@@ -30,10 +30,10 @@ func TestComboMaxLossMargin_MatchesVerticalSpreadMargin(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			buyStrike := decimal.NewFromInt(tc.buyStrike)
-			sellStrike := decimal.NewFromInt(tc.sellStrike)
-			qty := decimal.NewFromInt(tc.qty)
-			netCredit := decimal.NewFromInt(tc.netCredit)
+			buyStrike := fixedpoint.FromInt64(tc.buyStrike)
+			sellStrike := fixedpoint.FromInt64(tc.sellStrike)
+			qty := fixedpoint.FromInt64(tc.qty)
+			netCredit := fixedpoint.FromInt64(tc.netCredit)
 
 			want := VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit)
 			got := ComboMaxLossMargin([]ComboLegSpec{
@@ -49,10 +49,10 @@ func TestComboMaxLossMargin_MatchesVerticalSpreadMargin(t *testing.T) {
 
 func TestComboMaxLossMargin_PutVerticalMatchesToo(t *testing.T) {
 	// Bear put spread: buy 65000 put, sell 60000 put, opened for a 500 debit.
-	buyStrike := decimal.NewFromInt(65000)
-	sellStrike := decimal.NewFromInt(60000)
-	qty := decimal.NewFromInt(1)
-	netCredit := decimal.NewFromInt(-500) // debit paid
+	buyStrike := fixedpoint.FromInt64(65000)
+	sellStrike := fixedpoint.FromInt64(60000)
+	qty := fixedpoint.FromInt64(1)
+	netCredit := fixedpoint.FromInt64(-500) // debit paid
 
 	want := VerticalSpreadMargin(buyStrike, sellStrike, qty, netCredit)
 	got := ComboMaxLossMargin([]ComboLegSpec{
@@ -69,16 +69,16 @@ func TestComboMaxLossMargin_IronCondorMaxLossIsWingWidth(t *testing.T) {
 	// sell 65000 call, buy 70000 call (call spread, width 5000). Both wings
 	// have the same width, so max loss = wing width - net credit received.
 	legs := []ComboLegSpec{
-		{Strike: decimal.NewFromInt(50000), OptionType: "PUT", Ratio: 1},   // long put wing
-		{Strike: decimal.NewFromInt(55000), OptionType: "PUT", Ratio: -1},  // short put
-		{Strike: decimal.NewFromInt(65000), OptionType: "CALL", Ratio: -1}, // short call
-		{Strike: decimal.NewFromInt(70000), OptionType: "CALL", Ratio: 1},  // long call wing
+		{Strike: fixedpoint.FromInt64(50000), OptionType: "PUT", Ratio: 1},   // long put wing
+		{Strike: fixedpoint.FromInt64(55000), OptionType: "PUT", Ratio: -1},  // short put
+		{Strike: fixedpoint.FromInt64(65000), OptionType: "CALL", Ratio: -1}, // short call
+		{Strike: fixedpoint.FromInt64(70000), OptionType: "CALL", Ratio: 1},  // long call wing
 	}
-	netCredit := decimal.NewFromInt(800) // opened for an 800 credit
-	qty := decimal.NewFromInt(1)
+	netCredit := fixedpoint.FromInt64(800) // opened for an 800 credit
+	qty := fixedpoint.FromInt64(1)
 
 	got := ComboMaxLossMargin(legs, qty, netCredit)
-	want := decimal.NewFromInt(5000).Sub(netCredit) // wing width (5000) - credit
+	want := fixedpoint.FromInt64(5000).Sub(netCredit) // wing width (5000) - credit
 	if !got.Equal(want) {
 		t.Fatalf("iron condor max loss margin = %s, want %s", got, want)
 	}
@@ -93,13 +93,13 @@ func TestComboMaxLossMargin_IronCondorBoundedEvenAtExtremeUnderlying(t *testing.
 	// (this margin model is price-independent by construction — it is the
 	// true worst case over ALL possible prices, not a VaR estimate).
 	legs := []ComboLegSpec{
-		{Strike: decimal.NewFromInt(50000), OptionType: "PUT", Ratio: 1},
-		{Strike: decimal.NewFromInt(55000), OptionType: "PUT", Ratio: -1},
-		{Strike: decimal.NewFromInt(65000), OptionType: "CALL", Ratio: -1},
-		{Strike: decimal.NewFromInt(70000), OptionType: "CALL", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(50000), OptionType: "PUT", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(55000), OptionType: "PUT", Ratio: -1},
+		{Strike: fixedpoint.FromInt64(65000), OptionType: "CALL", Ratio: -1},
+		{Strike: fixedpoint.FromInt64(70000), OptionType: "CALL", Ratio: 1},
 	}
-	got := ComboMaxLossMargin(legs, decimal.NewFromInt(1), decimal.Zero)
-	want := decimal.NewFromInt(5000) // wing width, zero credit case
+	got := ComboMaxLossMargin(legs, fixedpoint.FromInt64(1), fixedpoint.Zero)
+	want := fixedpoint.FromInt64(5000) // wing width, zero credit case
 	if !got.Equal(want) {
 		t.Fatalf("iron condor margin at zero credit = %s, want %s", got, want)
 	}
@@ -111,12 +111,12 @@ func TestComboMaxLossMargin_ButterflyMaxLossIsNetDebit(t *testing.T) {
 	// the debit paid (like a vertical debit spread) — verify the debit
 	// branch applies correctly with a ratio-2 middle leg.
 	legs := []ComboLegSpec{
-		{Strike: decimal.NewFromInt(55000), OptionType: "CALL", Ratio: 1},
-		{Strike: decimal.NewFromInt(60000), OptionType: "CALL", Ratio: -2},
-		{Strike: decimal.NewFromInt(65000), OptionType: "CALL", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(55000), OptionType: "CALL", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(60000), OptionType: "CALL", Ratio: -2},
+		{Strike: fixedpoint.FromInt64(65000), OptionType: "CALL", Ratio: 1},
 	}
-	netCredit := decimal.NewFromInt(-200) // 200 debit paid to open
-	got := ComboMaxLossMargin(legs, decimal.NewFromInt(1), netCredit)
+	netCredit := fixedpoint.FromInt64(-200) // 200 debit paid to open
+	got := ComboMaxLossMargin(legs, fixedpoint.FromInt64(1), netCredit)
 	if !got.IsZero() {
 		t.Fatalf("debit-financed butterfly margin = %s, want 0 (the debit paid already IS the max loss)", got)
 	}
@@ -124,29 +124,29 @@ func TestComboMaxLossMargin_ButterflyMaxLossIsNetDebit(t *testing.T) {
 
 func TestComboMaxLossMargin_ScalesWithQty(t *testing.T) {
 	legs := []ComboLegSpec{
-		{Strike: decimal.NewFromInt(60000), OptionType: "CALL", Ratio: -1},
-		{Strike: decimal.NewFromInt(65000), OptionType: "CALL", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(60000), OptionType: "CALL", Ratio: -1},
+		{Strike: fixedpoint.FromInt64(65000), OptionType: "CALL", Ratio: 1},
 	}
-	one := ComboMaxLossMargin(legs, decimal.NewFromInt(1), decimal.NewFromInt(500))
-	three := ComboMaxLossMargin(legs, decimal.NewFromInt(3), decimal.NewFromInt(1500)) // netCredit also scales with qty in real usage
-	want := one.Mul(decimal.NewFromInt(3))
+	one := ComboMaxLossMargin(legs, fixedpoint.FromInt64(1), fixedpoint.FromInt64(500))
+	three := ComboMaxLossMargin(legs, fixedpoint.FromInt64(3), fixedpoint.FromInt64(1500)) // netCredit also scales with qty in real usage
+	want := one.Mul(fixedpoint.FromInt64(3))
 	if !three.Equal(want) {
 		t.Fatalf("3x qty margin = %s, want %s (3x the 1-qty margin)", three, want)
 	}
 }
 
 func TestComboMaxLossMargin_EmptyLegsIsZero(t *testing.T) {
-	if got := ComboMaxLossMargin(nil, decimal.NewFromInt(1), decimal.NewFromInt(500)); !got.IsZero() {
+	if got := ComboMaxLossMargin(nil, fixedpoint.FromInt64(1), fixedpoint.FromInt64(500)); !got.IsZero() {
 		t.Fatalf("empty-legs margin = %s, want 0", got)
 	}
 }
 
 func TestComboMaxLossMargin_ZeroQtyIsZero(t *testing.T) {
 	legs := []ComboLegSpec{
-		{Strike: decimal.NewFromInt(60000), OptionType: "CALL", Ratio: -1},
-		{Strike: decimal.NewFromInt(65000), OptionType: "CALL", Ratio: 1},
+		{Strike: fixedpoint.FromInt64(60000), OptionType: "CALL", Ratio: -1},
+		{Strike: fixedpoint.FromInt64(65000), OptionType: "CALL", Ratio: 1},
 	}
-	if got := ComboMaxLossMargin(legs, decimal.Zero, decimal.NewFromInt(500)); !got.IsZero() {
+	if got := ComboMaxLossMargin(legs, fixedpoint.Zero, fixedpoint.FromInt64(500)); !got.IsZero() {
 		t.Fatalf("zero-qty margin = %s, want 0", got)
 	}
 }

@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/config"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // optionsEnabled is the single switch for options/combos, per the product
@@ -156,12 +156,12 @@ type MarketMetadata struct {
 func marketMetadata(def marketDefinition, cfg *config.SymbolConfig) MarketMetadata {
 	// The defaults are the schema defaults used when a local engine runs without
 	// Postgres. Production values come from symbol_configs and replace them.
-	tickSize, lotSize := decimal.RequireFromString("0.01"), decimal.RequireFromString("0.00001")
-	minNotional, maxPrice, maxQuantity := decimal.NewFromInt(1), decimal.NewFromInt(1_000_000), decimal.NewFromInt(1_000_000)
-	makerFee, takerFee := decimal.RequireFromString("0.001"), decimal.RequireFromString("0.001")
+	tickSize, lotSize := fixedpoint.MustFromString("0.01"), fixedpoint.MustFromString("0.00001")
+	minNotional, maxPrice, maxQuantity := fixedpoint.FromInt64(1), fixedpoint.FromInt64(1_000_000), fixedpoint.FromInt64(1_000_000)
+	makerFee, takerFee := fixedpoint.MustFromString("0.001"), fixedpoint.MustFromString("0.001")
 	base, quote := def.base, def.quote
 	maxLeverage := 0
-	mmr := decimal.Zero
+	mmr := fixedpoint.Zero
 	if cfg != nil {
 		tickSize, lotSize = cfg.TickSize, cfg.LotSize
 		minNotional, maxPrice, maxQuantity = cfg.MinNotional, cfg.MaxPrice, cfg.MaxQuantity
@@ -174,9 +174,9 @@ func marketMetadata(def marketDefinition, cfg *config.SymbolConfig) MarketMetada
 		BaseCurrency: base, QuoteCurrency: quote,
 		TickSize: tickSize.String(), LotSize: lotSize.String(),
 		MinNotional: minNotional.String(), MaxPrice: maxPrice.String(), MaxQuantity: maxQuantity.String(),
-		MakerFeePct:       makerFee.Mul(decimal.NewFromInt(100)).String(),
-		TakerFeePct:       takerFee.Mul(decimal.NewFromInt(100)).String(),
-		MaintenanceMargin: mmr.Mul(decimal.NewFromInt(100)).String(),
+		MakerFeePct:       makerFee.Mul(fixedpoint.FromInt64(100)).String(),
+		TakerFeePct:       takerFee.Mul(fixedpoint.FromInt64(100)).String(),
+		MaintenanceMargin: mmr.Mul(fixedpoint.FromInt64(100)).String(),
 		MaxLeverage:       maxLeverage,
 		EnabledOrderTypes: []string{string(models.Limit), string(models.Market), string(models.Stop), string(models.IOC), string(models.FOK), string(models.PostOnly)},
 	}

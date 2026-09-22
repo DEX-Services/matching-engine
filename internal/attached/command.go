@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // Command is the engine-facing atomic unit: entry plus declarative exits.
@@ -65,7 +65,7 @@ func Execute(reg *Registry, cmd Command, submit Submit, submitLeg SubmitLeg, res
 	if err != nil {
 		return nil, nil, err
 	}
-	if result.Filled.LessThanOrEqual(decimal.Zero) {
+	if result.Filled.LessThanOrEqual(fixedpoint.Zero) {
 		return result, nil, nil
 	}
 	cmd.Group.AccountID, cmd.Group.Symbol = result.AccountID, result.Symbol
@@ -89,7 +89,7 @@ func Execute(reg *Registry, cmd Command, submit Submit, submitLeg SubmitLeg, res
 			// never be placed — same phantom-group cleanup as the
 			// zero-legs-placed case below, for the same reason: leave no
 			// registry entry around with nothing real backing it.
-			reg.Resize(group.ID, decimal.Zero)
+			reg.Resize(group.ID, fixedpoint.Zero)
 			return result, nil, nil
 		}
 	}
@@ -140,7 +140,7 @@ func Execute(reg *Registry, cmd Command, submit Submit, submitLeg SubmitLeg, res
 		if err := releaseGroup(*group); err != nil {
 			slog.Default().Error("attached: failed to release shared SPOT reservation after all legs failed to place — funds may be stuck, needs manual investigation", "group", group.ID, "account", group.AccountID, "err", err)
 		}
-		reg.Resize(group.ID, decimal.Zero) // remove the group entirely: no legs exist for it to protect
+		reg.Resize(group.ID, fixedpoint.Zero) // remove the group entirely: no legs exist for it to protect
 		return result, nil, nil
 	}
 	return result, group, nil

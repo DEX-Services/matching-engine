@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
-	"github.com/shopspring/decimal"
 )
 
 // ── Request types ─────────────────────────────────────────────────────────────
@@ -34,15 +34,15 @@ const (
 
 type request struct {
 	kind      reqKind
-	order     *models.Order   // reqSubmit
-	orderID   string          // reqCancel / reqModify
-	newPrice  decimal.Decimal // reqModify
-	newQty    decimal.Decimal // reqModify
-	levels    int             // reqDepth
-	account   string          // reqReplaceAccountOrders
-	orders    []*models.Order // reqReplaceAccountOrders
-	snapshot  bool            // reqSubmit: also populate result.orderSnapshot
-	markPrice decimal.Decimal // reqCheckMarkPriceTriggers
+	order     *models.Order    // reqSubmit
+	orderID   string           // reqCancel / reqModify
+	newPrice  fixedpoint.Fixed // reqModify
+	newQty    fixedpoint.Fixed // reqModify
+	levels    int              // reqDepth
+	account   string           // reqReplaceAccountOrders
+	orders    []*models.Order  // reqReplaceAccountOrders
+	snapshot  bool             // reqSubmit: also populate result.orderSnapshot
+	markPrice fixedpoint.Fixed // reqCheckMarkPriceTriggers
 	resultCh  chan<- result
 }
 
@@ -56,8 +56,8 @@ type result struct {
 	found         bool
 	bids          []orderbook.LevelSnapshot
 	asks          []orderbook.LevelSnapshot
-	bestBid       decimal.Decimal
-	bestAsk       decimal.Decimal
+	bestBid       fixedpoint.Fixed
+	bestAsk       fixedpoint.Fixed
 }
 
 // ReleaseFunc returns an order's reserved funds to the risk ledger. Invoked
@@ -191,7 +191,7 @@ func (e *Engine) Cancel(orderID string) (*models.Order, error) {
 }
 
 // Modify replaces price/qty on a resting order (cancel-and-replace).
-func (e *Engine) Modify(orderID string, newPrice, newQty decimal.Decimal) (*models.Order, []*models.Trade, error) {
+func (e *Engine) Modify(orderID string, newPrice, newQty fixedpoint.Fixed) (*models.Order, []*models.Trade, error) {
 	ch := make(chan result, 1)
 	e.inputCh <- request{kind: reqModify, orderID: orderID, newPrice: newPrice, newQty: newQty, resultCh: ch}
 	r := <-ch
@@ -206,7 +206,7 @@ func (e *Engine) Modify(orderID string, newPrice, newQty decimal.Decimal) (*mode
 // printing at the trigger level). Safe to call frequently/periodically; a
 // no-op when nothing is triggered. Blocks until processed by the engine
 // goroutine, consistent with Submit/Cancel/Modify.
-func (e *Engine) CheckMarkPriceTriggers(markPrice decimal.Decimal) []*models.Trade {
+func (e *Engine) CheckMarkPriceTriggers(markPrice fixedpoint.Fixed) []*models.Trade {
 	ch := make(chan result, 1)
 	e.inputCh <- request{kind: reqCheckMarkPriceTriggers, markPrice: markPrice, resultCh: ch}
 	r := <-ch
@@ -262,7 +262,7 @@ func (e *Engine) Stop() {
 
 // BestBid returns the current best bid price. Routed through the engine
 // goroutine so it never races with concurrent book mutation.
-func (e *Engine) BestBid() decimal.Decimal {
+func (e *Engine) BestBid() fixedpoint.Fixed {
 	ch := make(chan result, 1)
 	e.inputCh <- request{kind: reqDepth, levels: 0, resultCh: ch}
 	r := <-ch
@@ -271,7 +271,7 @@ func (e *Engine) BestBid() decimal.Decimal {
 
 // BestAsk returns the current best ask price. Routed through the engine
 // goroutine so it never races with concurrent book mutation.
-func (e *Engine) BestAsk() decimal.Decimal {
+func (e *Engine) BestAsk() fixedpoint.Fixed {
 	ch := make(chan result, 1)
 	e.inputCh <- request{kind: reqDepth, levels: 0, resultCh: ch}
 	r := <-ch

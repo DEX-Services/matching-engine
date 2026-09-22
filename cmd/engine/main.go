@@ -23,6 +23,7 @@ import (
 	"github.com/dex/matching-engine/internal/discounts"
 	"github.com/dex/matching-engine/internal/events"
 	"github.com/dex/matching-engine/internal/feeconfig"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/liquidation"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
@@ -39,7 +40,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
-	"github.com/shopspring/decimal"
 )
 
 func main() {
@@ -96,8 +96,8 @@ func main() {
 	// FEE-TIER-SYSTEM-PLAN.md §1a — every read here is a plain in-memory map
 	// lookup, never a DB/network call, so this is safe on the settlement hot
 	// path regardless of trade volume.
-	feeLookup := func(symbol string, market models.MarketType, accountID string) (maker, taker decimal.Decimal) {
-		var makerRate, takerRate decimal.Decimal
+	feeLookup := func(symbol string, market models.MarketType, accountID string) (maker, taker fixedpoint.Fixed) {
+		var makerRate, takerRate fixedpoint.Fixed
 		if symReg := symbolRegistryRef.Load(); symReg != nil {
 			if cfg, err := symReg.Get(symbol, market); err == nil && (cfg.MakerFee.IsPositive() || cfg.TakerFee.IsPositive()) {
 				makerRate, takerRate = cfg.MakerFee, cfg.TakerFee
@@ -113,12 +113,12 @@ func main() {
 				}
 			}
 		}
-		discount := decimal.Zero
+		discount := fixedpoint.Zero
 		if discReg := discountRegistryRef.Load(); discReg != nil {
 			discount = discReg.ActiveDiscountFor(accountID)
 		}
 		if discount.IsPositive() {
-			factor := decimal.NewFromInt(1).Sub(discount)
+			factor := fixedpoint.FromInt64(1).Sub(discount)
 			makerRate = makerRate.Mul(factor)
 			takerRate = takerRate.Mul(factor)
 		}
@@ -403,14 +403,14 @@ func main() {
 	// Liquidation penalty (feeconfig.KeyLiquidation, e.g. 2%), discount-adjusted
 	// per the confirmed product decision that it IS reduced by a user's fee
 	// tier like any other fee. In-memory-only reads, same as feeLookup above.
-	liqEngine.SetLiquidationFee(func(accountID string) decimal.Decimal {
-		rate := decimal.Zero
+	liqEngine.SetLiquidationFee(func(accountID string) fixedpoint.Fixed {
+		rate := fixedpoint.Zero
 		if feeReg := feeConfigRegistryRef.Load(); feeReg != nil {
 			rate = feeReg.Rate(feeconfig.KeyLiquidation)
 		}
 		if discReg := discountRegistryRef.Load(); discReg != nil {
 			if discount := discReg.ActiveDiscountFor(accountID); discount.IsPositive() {
-				rate = rate.Mul(decimal.NewFromInt(1).Sub(discount))
+				rate = rate.Mul(fixedpoint.FromInt64(1).Sub(discount))
 			}
 		}
 		return rate
@@ -532,11 +532,11 @@ func main() {
 		case "STOP":
 			orderType = models.Stop
 		}
-		price, _ := decimal.NewFromString(q.Get("price"))
-		qty, _ := decimal.NewFromString(q.Get("qty"))
+		price, _ := fixedpoint.FromString(q.Get("price"))
+		qty, _ := fixedpoint.FromString(q.Get("qty"))
 		leverage, _ := strconv.Atoi(q.Get("leverage"))
-		strike, _ := decimal.NewFromString(q.Get("strike"))
-		stopPrice, _ := decimal.NewFromString(q.Get("stopPrice"))
+		strike, _ := fixedpoint.FromString(q.Get("strike"))
+		stopPrice, _ := fixedpoint.FromString(q.Get("stopPrice"))
 		reduceOnly := q.Get("reduceOnly") == "true"
 		var expiry time.Time
 		if exp := q.Get("expiry"); exp != "" {
@@ -670,14 +670,14 @@ func main() {
 			// never-triggered stop.
 			asset := ""
 			if eng, gerr := reg.Get(order.Symbol, order.Market); gerr == nil {
-				var estPrice decimal.Decimal
+				var estPrice fixedpoint.Fixed
 				if order.IsBuy() {
 					estPrice = eng.BestAsk()
 				} else {
 					estPrice = eng.BestBid()
 				}
 				if estPrice.IsPositive() {
-					var amount decimal.Decimal
+					var amount fixedpoint.Fixed
 					asset, amount = risk.EstimatedRequired(order, estPrice)
 					if amount.IsPositive() {
 						ledger.Release(order.AccountID, asset, amount)
@@ -731,7 +731,7 @@ func main() {
 		bidLevels, askLevels := eng.Depth(levels)
 		toDTO := func(levels []orderbook.LevelSnapshot) []DepthLevel {
 			out := make([]DepthLevel, 0, len(levels))
-			var total decimal.Decimal
+			var total fixedpoint.Fixed
 			for _, l := range levels {
 				total = total.Add(l.TotalQuantity)
 				out = append(out, DepthLevel{
@@ -1023,7 +1023,7 @@ func main() {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		amount, err := decimal.NewFromString(req.Amount)
+		amount, err := fixedpoint.FromString(req.Amount)
 		if err != nil || !amount.IsPositive() {
 			http.Error(w, "amount must be a positive decimal", http.StatusBadRequest)
 			return
@@ -1070,7 +1070,7 @@ func main() {
 			if p.AccountID != account || p.Size.IsZero() {
 				continue
 			}
-			mark := decimal.Zero
+			mark := fixedpoint.Zero
 			if ticker, err := mdSvc.Ticker(p.Symbol, models.Futures); err == nil {
 				mark = ticker.MarkPrice
 			}
@@ -1195,8 +1195,8 @@ func main() {
 	// 		// default than what was already assumed.
 	// 		makerFeePct, takerFeePct := "0.1", "0.1"
 	// 		if cfg, err := symbolRegistryRef.Load().Get(underlying, models.Options); err == nil {
-	// 			makerFeePct = cfg.MakerFee.Mul(decimal.NewFromInt(100)).String()
-	// 			takerFeePct = cfg.TakerFee.Mul(decimal.NewFromInt(100)).String()
+	// 			makerFeePct = cfg.MakerFee.Mul(fixedpoint.FromInt64(100)).String()
+	// 			takerFeePct = cfg.TakerFee.Mul(fixedpoint.FromInt64(100)).String()
 	// 		}
 	// 		writeJSON(w, http.StatusOK, OptionChainResponse{
 	// 			Underlying: underlying, Spot: spotTicker.MidPrice.String(), Chain: out,
@@ -1599,8 +1599,8 @@ func accumulatePortfolioGreeks(totals *PortfolioGreeksDTO, p *settlement.Options
 	if err != nil || !spotTicker.MarkPrice.IsPositive() {
 		return
 	}
-	spot, _ := spotTicker.MarkPrice.Float64()
-	strike, _ := p.StrikePrice.Float64()
+	spot, _ := spotTicker.MarkPrice.ToDecimal().Float64()
+	strike, _ := p.StrikePrice.ToDecimal().Float64()
 	tYears := time.Until(p.Expiry).Hours() / 24 / 365
 	if tYears <= 0 {
 		return
@@ -1611,7 +1611,7 @@ func accumulatePortfolioGreeks(totals *PortfolioGreeksDTO, p *settlement.Options
 	}
 	isCall := p.OptionType == "CALL"
 	greeks := pricing.CalcGreeks(spot, strike, tYears, vol, riskFreeRate, isCall)
-	size, _ := p.Size.Float64() // signed: positive long, negative short
+	size, _ := p.Size.ToDecimal().Float64() // signed: positive long, negative short
 
 	totals.Delta += greeks.Delta * size
 	totals.Gamma += greeks.Gamma * size
@@ -1655,14 +1655,14 @@ func splitOptionSymbol(symbol string) []string {
 
 func runDemo(reg *matching.Registry, ledger *risk.Ledger) {
 	const sym, mkt = "BTC-USDT", models.Spot
-	_ = ledger.Deposit("buyer", "USDT", decimal.NewFromInt(100_000))
-	_ = ledger.Deposit("seller", "BTC", decimal.NewFromInt(100))
+	_ = ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(100_000))
+	_ = ledger.Deposit("seller", "BTC", fixedpoint.FromInt64(100))
 
 	sub := func(acct string, side models.OrderSide, price, qty string) *models.Order {
 		o := &models.Order{
 			ID: uuid.NewString(), AccountID: acct, Symbol: sym, Market: mkt,
-			Side: side, Type: models.Limit, Price: decimal.RequireFromString(price),
-			Quantity: decimal.RequireFromString(qty), TimeInForce: models.GTC,
+			Side: side, Type: models.Limit, Price: fixedpoint.MustFromString(price),
+			Quantity: fixedpoint.MustFromString(qty), TimeInForce: models.GTC,
 			Status: models.StatusPending, CreatedAt: time.Now(),
 		}
 		trades, err := reg.Submit(o)
@@ -1692,7 +1692,7 @@ func runDemo(reg *matching.Registry, ledger *risk.Ledger) {
 
 	mktO := &models.Order{
 		ID: uuid.NewString(), AccountID: "seller", Symbol: sym, Market: mkt,
-		Side: models.Sell, Type: models.Market, Quantity: decimal.NewFromInt(6),
+		Side: models.Sell, Type: models.Market, Quantity: fixedpoint.FromInt64(6),
 		Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	trades, _ := reg.Submit(mktO)

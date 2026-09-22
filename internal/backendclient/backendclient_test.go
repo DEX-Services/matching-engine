@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 func TestToRawUnits_ConvertsDollarDecimalToRawInteger(t *testing.T) {
@@ -20,7 +20,7 @@ func TestToRawUnits_ConvertsDollarDecimalToRawInteger(t *testing.T) {
 		"0":             "0",
 	}
 	for in, want := range cases {
-		got := ToRawUnits(decimal.RequireFromString(in))
+		got := ToRawUnits(fixedpoint.MustFromString(in))
 		if got != want {
 			t.Errorf("ToRawUnits(%s) = %s, want %s", in, got, want)
 		}

@@ -1,8 +1,8 @@
 package orderbook
 
 import (
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // OrderBook is the interface that all matching engines use.
@@ -16,13 +16,13 @@ type OrderBook interface {
 	Cancel(orderID string) (*models.Order, error)
 
 	// Modify replaces price/qty of a resting order (cancel-and-replace, losing time priority).
-	Modify(orderID string, newPrice, newQty decimal.Decimal) (order *models.Order, trades []*models.Trade, cancelled []*models.Order, err error)
+	Modify(orderID string, newPrice, newQty fixedpoint.Fixed) (order *models.Order, trades []*models.Trade, cancelled []*models.Order, err error)
 
 	// BestBid returns the highest resting bid price, or zero if no bids.
-	BestBid() decimal.Decimal
+	BestBid() fixedpoint.Fixed
 
 	// BestAsk returns the lowest resting ask price, or zero if no asks.
-	BestAsk() decimal.Decimal
+	BestAsk() fixedpoint.Fixed
 
 	// Depth returns up to `levels` price levels for each side (bids descending, asks ascending)
 	// as immutable snapshots.

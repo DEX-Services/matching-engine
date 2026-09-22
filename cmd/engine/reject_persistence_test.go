@@ -8,12 +8,12 @@ import (
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // These cover the fix for the previously-documented gap: an order rejected
@@ -43,7 +43,7 @@ func TestRejectPipeline_PublishesEventOrderRejected(t *testing.T) {
 
 	o := &models.Order{
 		ID: uuid.NewString(), AccountID: "acct1", Symbol: "BTC-USDC", Market: models.Futures,
-		Side: models.Sell, Type: models.Market, Quantity: decimal.NewFromInt(1),
+		Side: models.Sell, Type: models.Market, Quantity: fixedpoint.FromInt64(1),
 		ReduceOnly: true, TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 
@@ -89,7 +89,7 @@ func TestRejectPipeline_InvalidSlippageBps_PublishesEvent(t *testing.T) {
 
 	o := &models.Order{
 		ID: uuid.NewString(), AccountID: "acct1", Symbol: "BTC-USDT", Market: models.Spot,
-		Side: models.Buy, Type: models.Market, Quantity: decimal.NewFromInt(1),
+		Side: models.Buy, Type: models.Market, Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 
@@ -116,7 +116,7 @@ func TestRejectPipeline_NilBus_DoesNotPanic(t *testing.T) {
 	d.bus = nil // explicit: no bus configured
 	o := &models.Order{
 		ID: uuid.NewString(), AccountID: "acct1", Symbol: "BTC-USDC", Market: models.Futures,
-		Side: models.Sell, Type: models.Market, Quantity: decimal.NewFromInt(1),
+		Side: models.Sell, Type: models.Market, Quantity: fixedpoint.FromInt64(1),
 		ReduceOnly: true, TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	if _, _, _, err := submitOrderPipeline(context.Background(), d, o, ""); err == nil {

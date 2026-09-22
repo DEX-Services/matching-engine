@@ -4,19 +4,19 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 func TestExecuteActivatesOnlyActualFill(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BTC-USDC"}
 	g := Group{ID: "g", ParentOrderID: "p", StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(2); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(2); return o, nil }
 	var placedLegs []*models.Order
 	submitLeg := func(o *models.Order) error { placedLegs = append(placedLegs, o); return nil }
 	out, got, err := Execute(r, Command{g, e}, submit, submitLeg, nil, nil)
-	if err != nil || out == nil || got == nil || !got.ProtectedQty.Equal(decimal.NewFromInt(2)) {
+	if err != nil || out == nil || got == nil || !got.ProtectedQty.Equal(fixedpoint.FromInt64(2)) {
 		t.Fatalf("got %#v, %v", got, err)
 	}
 	if len(placedLegs) != 1 || placedLegs[0].GroupRole != "SL" {
@@ -50,7 +50,7 @@ func TestExecute_SpotCallsReserveGroupOnceBeforeLegs(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BI2X-BI2XUSD", Side: models.Buy}
 	g := Group{ID: "g", ParentOrderID: "p", Market: models.Spot, TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(5); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(5); return o, nil }
 	var placedLegs []*models.Order
 	submitLeg := func(o *models.Order) error { placedLegs = append(placedLegs, o); return nil }
 
@@ -62,7 +62,7 @@ func TestExecute_SpotCallsReserveGroupOnceBeforeLegs(t *testing.T) {
 		if rg.Market != models.Spot {
 			t.Fatalf("reserveGroup called with Market=%s, want Spot", rg.Market)
 		}
-		if !rg.ProtectedQty.Equal(decimal.NewFromInt(5)) {
+		if !rg.ProtectedQty.Equal(fixedpoint.FromInt64(5)) {
 			t.Fatalf("reserveGroup called with ProtectedQty=%s, want 5 (the actual fill)", rg.ProtectedQty)
 		}
 		return nil
@@ -95,7 +95,7 @@ func TestExecute_SpotSkipsLegsWhenReserveGroupFails(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BI2X-BI2XUSD", Side: models.Buy}
 	g := Group{ID: "g", ParentOrderID: "p", Market: models.Spot, TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(5); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(5); return o, nil }
 	legCalled := false
 	submitLeg := func(o *models.Order) error { legCalled = true; return nil }
 	reserveGroup := func(rg Group) error { return fmt.Errorf("insufficient balance") }
@@ -116,7 +116,7 @@ func TestExecute_FuturesNeverCallsReserveGroup(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BI2X-BI2XUSD", Side: models.Buy}
 	g := Group{ID: "g", ParentOrderID: "p", Market: models.Futures, StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(5); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(5); return o, nil }
 	submitLeg := func(o *models.Order) error { return nil }
 	reserveCalled := false
 	reserveGroup := func(rg Group) error { reserveCalled = true; return nil }
@@ -142,12 +142,12 @@ func TestExecute_SpotReleasesReservationWhenAllLegsFailToPlace(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BI2X-BI2XUSD", Side: models.Buy}
 	g := Group{ID: "g", ParentOrderID: "p", Market: models.Spot, TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(5); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(5); return o, nil }
 	submitLeg := func(o *models.Order) error { return fmt.Errorf("symbol halted") } // BOTH legs fail
 	reserveGroup := func(rg Group) error { return nil }                             // reservation itself succeeds
 
 	releaseCalls := 0
-	var releasedQty decimal.Decimal
+	var releasedQty fixedpoint.Fixed
 	releaseGroup := func(rg Group) error {
 		releaseCalls++
 		releasedQty = rg.ProtectedQty
@@ -161,7 +161,7 @@ func TestExecute_SpotReleasesReservationWhenAllLegsFailToPlace(t *testing.T) {
 	if releaseCalls != 1 {
 		t.Fatalf("releaseGroup called %d times, want exactly 1", releaseCalls)
 	}
-	if !releasedQty.Equal(decimal.NewFromInt(5)) {
+	if !releasedQty.Equal(fixedpoint.FromInt64(5)) {
 		t.Fatalf("releaseGroup called with ProtectedQty=%s, want 5 (the actual fill, matching what reserveGroup locked)", releasedQty)
 	}
 	if got != nil {
@@ -182,7 +182,7 @@ func TestExecute_SpotDoesNotReleaseWhenAtLeastOneLegPlaced(t *testing.T) {
 	r := NewRegistry()
 	e := &models.Order{ID: "p", AccountID: "a", Symbol: "BI2X-BI2XUSD", Side: models.Buy}
 	g := Group{ID: "g", ParentOrderID: "p", Market: models.Spot, TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	submit := func(o *models.Order) (*models.Order, error) { o.Filled = decimal.NewFromInt(5); return o, nil }
+	submit := func(o *models.Order) (*models.Order, error) { o.Filled = fixedpoint.FromInt64(5); return o, nil }
 	submitLeg := func(o *models.Order) error {
 		if o.GroupRole == "SL" {
 			return fmt.Errorf("symbol halted") // only SL fails; TP succeeds

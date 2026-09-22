@@ -3,8 +3,8 @@ package attached
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 type fakeCanceller struct{ cancelled []string }
@@ -21,14 +21,14 @@ func (f *fakeSubmitter) SubmitSnapshot(o *models.Order) ([]*models.Trade, *model
 	return nil, o, nil
 }
 
-type fakePositionSizer struct{ size decimal.Decimal }
+type fakePositionSizer struct{ size fixedpoint.Fixed }
 
-func (f *fakePositionSizer) CurrentSize(accountID, symbol string) decimal.Decimal { return f.size }
+func (f *fakePositionSizer) CurrentSize(accountID, symbol string) fixedpoint.Fixed { return f.size }
 
 func TestListenerOCOCancelsSiblingOnFill(t *testing.T) {
 	reg := NewRegistry()
 	g := Group{ID: "g", AccountID: "acct", Symbol: "BTC-USDC", ParentOrderID: "p", TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	if err := reg.Activate(g, decimal.NewFromInt(1)); err != nil {
+	if err := reg.Activate(g, fixedpoint.FromInt64(1)); err != nil {
 		t.Fatal(err)
 	}
 	cancel := &fakeCanceller{}
@@ -53,12 +53,12 @@ func TestListenerOCOCancelsSiblingOnFill(t *testing.T) {
 func TestListenerResizesOnExternalFill(t *testing.T) {
 	reg := NewRegistry()
 	g := Group{ID: "g", AccountID: "acct", Symbol: "BTC-USDC", ParentOrderID: "p", TakeProfit: &Leg{ID: "tp"}, StopLoss: &Leg{ID: "sl"}}
-	if err := reg.Activate(g, decimal.NewFromInt(5)); err != nil {
+	if err := reg.Activate(g, fixedpoint.FromInt64(5)); err != nil {
 		t.Fatal(err)
 	}
 	cancel := &fakeCanceller{}
 	submit := &fakeSubmitter{}
-	pos := &fakePositionSizer{size: decimal.NewFromInt(2)} // position partially closed down to 2
+	pos := &fakePositionSizer{size: fixedpoint.FromInt64(2)} // position partially closed down to 2
 	l := NewListener(reg, cancel, submit, pos, pos)
 
 	// A partial close fill on the account/symbol, unrelated to the group's own legs.
@@ -74,12 +74,12 @@ func TestListenerResizesOnExternalFill(t *testing.T) {
 		t.Fatalf("expected both legs resubmitted at reduced qty, got %d", len(submit.submitted))
 	}
 	for _, o := range submit.submitted {
-		if !o.Quantity.Equal(decimal.NewFromInt(2)) {
+		if !o.Quantity.Equal(fixedpoint.FromInt64(2)) {
 			t.Fatalf("expected resized leg qty=2, got %s", o.Quantity)
 		}
 	}
 	got, ok := reg.Get("g")
-	if !ok || !got.ProtectedQty.Equal(decimal.NewFromInt(2)) {
+	if !ok || !got.ProtectedQty.Equal(fixedpoint.FromInt64(2)) {
 		t.Fatalf("expected registry to reflect resized protection, got %#v", got)
 	}
 }
@@ -87,12 +87,12 @@ func TestListenerResizesOnExternalFill(t *testing.T) {
 func TestListenerRemovesGroupOnZeroExposure(t *testing.T) {
 	reg := NewRegistry()
 	g := Group{ID: "g", AccountID: "acct", Symbol: "BTC-USDC", ParentOrderID: "p", StopLoss: &Leg{ID: "sl"}}
-	if err := reg.Activate(g, decimal.NewFromInt(3)); err != nil {
+	if err := reg.Activate(g, fixedpoint.FromInt64(3)); err != nil {
 		t.Fatal(err)
 	}
 	cancel := &fakeCanceller{}
 	submit := &fakeSubmitter{}
-	pos := &fakePositionSizer{size: decimal.Zero} // position fully closed / liquidated
+	pos := &fakePositionSizer{size: fixedpoint.Zero} // position fully closed / liquidated
 	l := NewListener(reg, cancel, submit, pos, pos)
 
 	l.handle(&models.Event{Type: models.EventLiquidation, Liquidation: &models.Liquidation{AccountID: "acct", Symbol: "BTC-USDC"}})
@@ -108,7 +108,7 @@ func TestListenerRemovesGroupOnZeroExposure(t *testing.T) {
 func TestGroupsForAndRelinkLeg(t *testing.T) {
 	reg := NewRegistry()
 	g := Group{ID: "g", AccountID: "acct", Symbol: "BTC-USDC", ParentOrderID: "p", TakeProfit: &Leg{ID: "tp"}}
-	if err := reg.Activate(g, decimal.NewFromInt(1)); err != nil {
+	if err := reg.Activate(g, fixedpoint.FromInt64(1)); err != nil {
 		t.Fatal(err)
 	}
 	found := reg.GroupsFor("acct", "BTC-USDC")

@@ -3,38 +3,38 @@ package settlement
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
-	"github.com/shopspring/decimal"
 )
 
 // discountedFees builds a FeeLookup with fixed base rates and a per-account
 // discount map, mirroring how cmd/engine/main.go composes feeconfig +
 // discounts into one closure — without needing a live Postgres-backed
 // registry in these unit tests.
-func discountedFees(makerRate, takerRate decimal.Decimal, discounts map[string]decimal.Decimal) FeeLookup {
-	return func(symbol string, market models.MarketType, accountID string) (decimal.Decimal, decimal.Decimal) {
+func discountedFees(makerRate, takerRate fixedpoint.Fixed, discounts map[string]fixedpoint.Fixed) FeeLookup {
+	return func(symbol string, market models.MarketType, accountID string) (fixedpoint.Fixed, fixedpoint.Fixed) {
 		discount := discounts[accountID]
-		factor := decimal.NewFromInt(1).Sub(discount)
+		factor := fixedpoint.FromInt64(1).Sub(discount)
 		return makerRate.Mul(factor), takerRate.Mul(factor)
 	}
 }
 
 func TestSpotSettlement_ChargesDiscountedFeePerAccount(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Credit("buyer", "USDT", decimal.NewFromInt(1_000_000))
-	ledger.Credit("seller", "BTC", decimal.NewFromInt(1_000_000))
+	ledger.Credit("buyer", "USDT", fixedpoint.FromInt64(1_000_000))
+	ledger.Credit("seller", "BTC", fixedpoint.FromInt64(1_000_000))
 
-	maker := decimal.NewFromFloat(0.0015) // 0.15%
-	taker := decimal.NewFromFloat(0.0045) // 0.45%
+	maker := fixedpoint.MustFromString("0.0015") // 0.15%
+	taker := fixedpoint.MustFromString("0.0045") // 0.45%
 	// Buyer (taker here) has a 20% discount; seller (maker) has none.
-	fees := discountedFees(maker, taker, map[string]decimal.Decimal{
-		"buyer": decimal.NewFromFloat(0.20),
+	fees := discountedFees(maker, taker, map[string]fixedpoint.Fixed{
+		"buyer": fixedpoint.MustFromString("0.20"),
 	})
 	s := NewSpotSettlement(ledger, nil, fees)
 
-	qty := decimal.NewFromInt(1)
-	price := decimal.NewFromInt(50000)
+	qty := fixedpoint.FromInt64(1)
+	price := fixedpoint.FromInt64(50000)
 	trade := &models.Trade{
 		ID: "t1", Symbol: "BTC-USDT", Market: models.Spot,
 		Price: price, Quantity: qty, MakerSide: models.Sell,
@@ -46,8 +46,8 @@ func TestSpotSettlement_ChargesDiscountedFeePerAccount(t *testing.T) {
 	}
 
 	notional := price.Mul(qty)
-	wantTakerFee := notional.Mul(taker).Mul(decimal.NewFromFloat(0.80)) // buyer's 20% discount applied
-	wantMakerFee := notional.Mul(maker)                                 // seller: no discount
+	wantTakerFee := notional.Mul(taker).Mul(fixedpoint.MustFromString("0.80")) // buyer's 20% discount applied
+	wantMakerFee := notional.Mul(maker)                                        // seller: no discount
 
 	if !trade.TakerFeePaid.Equal(wantTakerFee) {
 		t.Errorf("taker (buyer) fee = %s, want %s (discounted)", trade.TakerFeePaid, wantTakerFee)
@@ -59,16 +59,16 @@ func TestSpotSettlement_ChargesDiscountedFeePerAccount(t *testing.T) {
 
 func TestFuturesSettlement_ChargesMakerTakerFee(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Credit("buyer", "USDC", decimal.NewFromInt(1_000_000))
-	ledger.Credit("seller", "USDC", decimal.NewFromInt(1_000_000))
+	ledger.Credit("buyer", "USDC", fixedpoint.FromInt64(1_000_000))
+	ledger.Credit("seller", "USDC", fixedpoint.FromInt64(1_000_000))
 
-	maker := decimal.NewFromFloat(0.00015) // 0.015%
-	taker := decimal.NewFromFloat(0.00045) // 0.045%
+	maker := fixedpoint.MustFromString("0.00015") // 0.015%
+	taker := fixedpoint.MustFromString("0.00045") // 0.045%
 	fees := discountedFees(maker, taker, nil)
 	f := NewFuturesSettlement(ledger, nil, nil, fees)
 
-	qty := decimal.NewFromInt(1)
-	price := decimal.NewFromInt(50000)
+	qty := fixedpoint.FromInt64(1)
+	price := fixedpoint.FromInt64(50000)
 	trade := &models.Trade{
 		ID: "t1", Symbol: "BTC-USDC", Market: models.Futures,
 		Price: price, Quantity: qty, MakerSide: models.Buy,
@@ -93,8 +93,8 @@ func TestFuturesSettlement_ChargesMakerTakerFee(t *testing.T) {
 	// Confirm the fee was actually debited from balance (on top of margin),
 	// not just recorded on the trade struct: buyer started with 1,000,000,
 	// paid margin (price*qty/leverage = 5000) plus their maker fee.
-	margin := decimal.NewFromInt(50000).Div(decimal.NewFromInt(10))
-	wantBuyerBalance := decimal.NewFromInt(1_000_000).Sub(margin).Sub(wantMakerFee)
+	margin := fixedpoint.FromInt64(50000).Div(fixedpoint.FromInt64(10))
+	wantBuyerBalance := fixedpoint.FromInt64(1_000_000).Sub(margin).Sub(wantMakerFee)
 	gotBuyerBalance := ledger.Available("buyer", "USDC")
 	if !gotBuyerBalance.Equal(wantBuyerBalance) {
 		t.Errorf("buyer available balance = %s, want %s (margin + fee both debited)", gotBuyerBalance, wantBuyerBalance)
@@ -106,13 +106,13 @@ func TestFuturesSettlement_NilFeeLookupChargesNothing(t *testing.T) {
 	// package does) must behave exactly as before this feature existed —
 	// zero fees, not a nil-pointer panic.
 	ledger := risk.NewLedger()
-	ledger.Credit("buyer", "USDC", decimal.NewFromInt(1_000_000))
-	ledger.Credit("seller", "USDC", decimal.NewFromInt(1_000_000))
+	ledger.Credit("buyer", "USDC", fixedpoint.FromInt64(1_000_000))
+	ledger.Credit("seller", "USDC", fixedpoint.FromInt64(1_000_000))
 	f := NewFuturesSettlement(ledger, nil, nil, nil)
 
 	trade := &models.Trade{
 		ID: "t1", Symbol: "BTC-USDC", Market: models.Futures,
-		Price: decimal.NewFromInt(50000), Quantity: decimal.NewFromInt(1), MakerSide: models.Buy,
+		Price: fixedpoint.FromInt64(50000), Quantity: fixedpoint.FromInt64(1), MakerSide: models.Buy,
 		BuyOrder:  &models.Order{AccountID: "buyer", Leverage: 10, MarginMode: models.MarginIsolated},
 		SellOrder: &models.Order{AccountID: "seller", Leverage: 10, MarginMode: models.MarginIsolated},
 	}
@@ -129,19 +129,19 @@ func TestClosePosition_ChargesLiquidationFee(t *testing.T) {
 	f := NewFuturesSettlement(ledger, nil, nil, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
-	qty := decimal.NewFromInt(1)
-	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
+	qty := fixedpoint.FromInt64(1)
+	openLong(t, f, ledger, "acct1", symbol, quote, qty, fixedpoint.FromInt64(50000))
 
 	balanceBeforeClose := ledger.Available("acct1", quote)
 
-	markPrice := decimal.NewFromInt(50000) // flat PnL, isolates the fee's effect
+	markPrice := fixedpoint.FromInt64(50000) // flat PnL, isolates the fee's effect
 	notional := markPrice.Mul(qty)
-	liquidationFee := notional.Mul(decimal.NewFromFloat(0.02)) // 2%, the platform default
+	liquidationFee := notional.Mul(fixedpoint.MustFromString("0.02")) // 2%, the platform default
 
 	f.ClosePosition("close1", "acct1", symbol, quote, markPrice, liquidationFee)
 
-	margin := decimal.NewFromInt(50000).Div(decimal.NewFromInt(10))   // leverage 10
-	wantBalance := balanceBeforeClose.Add(margin).Sub(liquidationFee) // margin released, minus the fee
+	margin := fixedpoint.FromInt64(50000).Div(fixedpoint.FromInt64(10)) // leverage 10
+	wantBalance := balanceBeforeClose.Add(margin).Sub(liquidationFee)   // margin released, minus the fee
 	gotBalance := ledger.Available("acct1", quote)
 	if !gotBalance.Equal(wantBalance) {
 		t.Errorf("balance after liquidation close = %s, want %s (margin released minus liquidation fee)", gotBalance, wantBalance)
@@ -150,18 +150,18 @@ func TestClosePosition_ChargesLiquidationFee(t *testing.T) {
 
 func TestClosePosition_ZeroLiquidationFeeChangesNothing(t *testing.T) {
 	// Regression guard: every pre-existing caller passed no fee concept at
-	// all; confirm passing decimal.Zero reproduces that exact prior behavior.
+	// all; confirm passing fixedpoint.Zero reproduces that exact prior behavior.
 	ledger := risk.NewLedger()
 	f := NewFuturesSettlement(ledger, nil, nil, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
-	qty := decimal.NewFromInt(1)
-	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
+	qty := fixedpoint.FromInt64(1)
+	openLong(t, f, ledger, "acct1", symbol, quote, qty, fixedpoint.FromInt64(50000))
 	balanceBeforeClose := ledger.Available("acct1", quote)
 
-	f.ClosePosition("close1", "acct1", symbol, quote, decimal.NewFromInt(50000), decimal.Zero)
+	f.ClosePosition("close1", "acct1", symbol, quote, fixedpoint.FromInt64(50000), fixedpoint.Zero)
 
-	margin := decimal.NewFromInt(50000).Div(decimal.NewFromInt(10))
+	margin := fixedpoint.FromInt64(50000).Div(fixedpoint.FromInt64(10))
 	wantBalance := balanceBeforeClose.Add(margin)
 	if got := ledger.Available("acct1", quote); !got.Equal(wantBalance) {
 		t.Errorf("balance = %s, want %s (margin released, no fee)", got, wantBalance)

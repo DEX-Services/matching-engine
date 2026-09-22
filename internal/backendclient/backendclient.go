@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 // RawUnitScale is the number of decimals Dex-Backend's Postgres user_balances
@@ -30,8 +30,8 @@ const RawUnitScale = 6
 
 // ToRawUnits converts a decimal dollar amount (e.g. engine risk notionals) to
 // the raw integer string Dex-Backend expects.
-func ToRawUnits(amount decimal.Decimal) string {
-	return amount.Shift(RawUnitScale).Truncate(0).String()
+func ToRawUnits(amount fixedpoint.Fixed) string {
+	return amount.ToDecimal().Shift(RawUnitScale).Truncate(0).String()
 }
 
 // Client calls Dex-Backend's internal balance-lock endpoints. A nil/zero-value

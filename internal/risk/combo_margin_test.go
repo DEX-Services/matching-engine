@@ -3,14 +3,14 @@ package risk
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 func comboOrder(side models.OrderSide, legs []models.ComboLeg, price string) *models.Order {
 	return &models.Order{
 		ID: "c1", AccountID: "acct", Market: models.ComboOptions, Side: side, Type: models.Limit,
-		Price: decimal.RequireFromString(price), Quantity: decimal.NewFromInt(1),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.FromInt64(1),
 		ComboLegs: legs, QuoteCurrency: "BI2XUSD",
 	}
 }
@@ -31,10 +31,10 @@ func TestComboLegSpecs_ParsesAllLegs(t *testing.T) {
 	if len(specs) != 2 {
 		t.Fatalf("got %d specs, want 2", len(specs))
 	}
-	if !specs[0].Strike.Equal(decimal.NewFromInt(60000)) || specs[0].OptionType != "CALL" || specs[0].Ratio != 1 {
+	if !specs[0].Strike.Equal(fixedpoint.FromInt64(60000)) || specs[0].OptionType != "CALL" || specs[0].Ratio != 1 {
 		t.Fatalf("leg 0 = %+v, want strike 60000 CALL ratio 1", specs[0])
 	}
-	if !specs[1].Strike.Equal(decimal.NewFromInt(65000)) || specs[1].OptionType != "CALL" || specs[1].Ratio != -1 {
+	if !specs[1].Strike.Equal(fixedpoint.FromInt64(65000)) || specs[1].OptionType != "CALL" || specs[1].Ratio != -1 {
 		t.Fatalf("leg 1 = %+v, want strike 65000 CALL ratio -1", specs[1])
 	}
 }
@@ -75,7 +75,7 @@ func TestNotionalFor_ComboBuyNetDebitNeedsNoMargin(t *testing.T) {
 	// price=400 (net debit, since a BUY combo order specifies the debit it's
 	// willing to pay): netCredit = -400 -> margin = 0.
 	o := comboOrder(models.Buy, verticalLegs(), "400")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(400))
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(400))
 	if !got.IsZero() {
 		t.Fatalf("combo net-debit margin = %s, want 0", got)
 	}
@@ -89,7 +89,7 @@ func TestNotionalFor_ComboBuyNetCreditNeedsStrikeDistanceMinusCredit(t *testing.
 	// margin at all: max(0, 0 - credit) = 0. This mirrors
 	// VerticalSpreadMargin's identical behavior for the same leg shape.
 	o := comboOrder(models.Buy, verticalLegs(), "-500")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(-500))
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(-500))
 	if !got.IsZero() {
 		t.Fatalf("combo margin for a can't-lose structure with a credit = %s, want 0", got)
 	}
@@ -110,8 +110,8 @@ func TestNotionalFor_ComboCreditCollectingShortCallSpread(t *testing.T) {
 		{Symbol: "BTC-BI2XUSD-65000-20260101-CALL", Ratio: 1},
 	}
 	o := comboOrder(models.Buy, legs, "-500")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(-500))
-	want := decimal.NewFromInt(4500) // strikeDistance(5000) - credit(500)
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(-500))
+	want := fixedpoint.FromInt64(4500) // strikeDistance(5000) - credit(500)
 	if !got.Equal(want) {
 		t.Fatalf("credit-collecting short call spread margin = %s, want %s", got, want)
 	}
@@ -121,7 +121,7 @@ func TestNotionalFor_ComboSellNeedsNoNewMargin(t *testing.T) {
 	// A SELL combo order closes/reverses an existing position — no fresh
 	// margin reservation of its own, same as a reduce-only futures close.
 	o := comboOrder(models.Sell, verticalLegs(), "400")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(400))
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(400))
 	if !got.IsZero() {
 		t.Fatalf("combo SELL margin = %s, want 0", got)
 	}
@@ -130,7 +130,7 @@ func TestNotionalFor_ComboSellNeedsNoNewMargin(t *testing.T) {
 func TestNotionalFor_ComboMalformedLegsFailsClosedToZero(t *testing.T) {
 	legs := []models.ComboLeg{{Symbol: "garbage", Ratio: 1}, {Symbol: "also-garbage", Ratio: -1}}
 	o := comboOrder(models.Buy, legs, "400")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(400))
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(400))
 	if !got.IsZero() {
 		t.Fatalf("malformed combo margin = %s, want 0 (fail-open is handled by validateAndPrepareCombo rejecting this before Check runs)", got)
 	}
@@ -145,8 +145,8 @@ func TestNotionalFor_ComboIronCondor(t *testing.T) {
 	}
 	// Opened for an 800 credit -> margin = wing width (5000) - 800 = 4200.
 	o := comboOrder(models.Buy, legs, "-800")
-	got := notionalFor(o, decimal.NewFromInt(1), decimal.NewFromInt(-800))
-	want := decimal.NewFromInt(4200)
+	got := notionalFor(o, fixedpoint.FromInt64(1), fixedpoint.FromInt64(-800))
+	want := fixedpoint.FromInt64(4200)
 	if !got.Equal(want) {
 		t.Fatalf("iron condor combo margin = %s, want %s", got, want)
 	}

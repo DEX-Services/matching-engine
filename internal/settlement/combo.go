@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/pricing"
 	"github.com/shopspring/decimal"
@@ -29,9 +30,9 @@ type ComboLegResolver interface {
 // marketdata.Service + the option_instruments table in cmd/engine.
 type ComboOptionsMarkSource interface {
 	// UnderlyingMark returns the underlying's current mark price.
-	UnderlyingMark(underlying string) (decimal.Decimal, bool)
+	UnderlyingMark(underlying string) (fixedpoint.Fixed, bool)
 	// LegSpec returns an option leg's strike, expiry, and CALL/PUT type.
-	LegSpec(ctx context.Context, legSymbol string) (strike decimal.Decimal, expiry time.Time, optionType string, quoteCurrency string, ok bool)
+	LegSpec(ctx context.Context, legSymbol string) (strike fixedpoint.Fixed, expiry time.Time, optionType string, quoteCurrency string, ok bool)
 }
 
 // ComboSettlement settles trades on a native N-leg combo order book
@@ -54,7 +55,7 @@ type ComboSettlement struct {
 	options  *OptionsSettlement
 	legs     ComboLegResolver
 	marks    ComboOptionsMarkSource
-	riskFree decimal.Decimal
+	riskFree fixedpoint.Fixed
 }
 
 // NewComboSettlement creates a ComboSettlement. options is the SAME
@@ -62,7 +63,7 @@ type ComboSettlement struct {
 // positions and manually-built positions in the same contract must be one
 // combined position, not tracked separately).
 func NewComboSettlement(options *OptionsSettlement, legs ComboLegResolver, marks ComboOptionsMarkSource) *ComboSettlement {
-	return &ComboSettlement{options: options, legs: legs, marks: marks, riskFree: decimal.NewFromFloat(0.03)}
+	return &ComboSettlement{options: options, legs: legs, marks: marks, riskFree: fixedpoint.MustFromString("0.03")}
 }
 
 // Settle fans a combo trade out into its N option legs and settles all of
@@ -111,7 +112,7 @@ func (c *ComboSettlement) Settle(trade *models.Trade) error {
 	comboSeller := trade.SellOrder
 
 	for i, spec := range specs {
-		legQty := trade.Quantity.Mul(decimal.NewFromInt(int64(abs(spec.ratio))))
+		legQty := trade.Quantity.Mul(fixedpoint.FromInt64(int64(abs(spec.ratio))))
 		legPrice := legPrices[i]
 
 		var buyerOfLeg, sellerOfLeg *models.Order
@@ -161,7 +162,7 @@ func abs(n int) int {
 type legSpecWithSymbol struct {
 	symbol     string
 	ratio      int
-	strike     decimal.Decimal
+	strike     fixedpoint.Fixed
 	expiry     time.Time
 	optionType string
 	quote      string
@@ -171,7 +172,7 @@ type legSpecWithSymbol struct {
 // needs to record a position: AccountID, Symbol, Side, OptionType, Strike,
 // Expiry, QuoteCurrency. comboOrder carries the real AccountID/QuoteCurrency
 // from whichever side of the combo trade this leg-order represents.
-func legOrder(comboOrder *models.Order, symbol string, side models.OrderSide, strike decimal.Decimal, expiry time.Time, optionType, quote string) *models.Order {
+func legOrder(comboOrder *models.Order, symbol string, side models.OrderSide, strike fixedpoint.Fixed, expiry time.Time, optionType, quote string) *models.Order {
 	q := comboOrder.QuoteCurrency
 	if q == "" {
 		q = quote
@@ -224,30 +225,30 @@ func legOrder(comboOrder *models.Order, symbol string, side models.OrderSide, st
 // leg near zero and force the OTHER leg negative instead). Both are
 // documented here so a future change to this function doesn't reintroduce
 // either mistake.
-func splitComboNetPrice(netPrice decimal.Decimal, specs []legSpecWithSymbol, underlying string, marks ComboOptionsMarkSource, riskFreeRate decimal.Decimal) []decimal.Decimal {
+func splitComboNetPrice(netPrice fixedpoint.Fixed, specs []legSpecWithSymbol, underlying string, marks ComboOptionsMarkSource, riskFreeRate fixedpoint.Fixed) []fixedpoint.Fixed {
 	n := len(specs)
-	epsilon := decimal.NewFromFloat(0.0001)
+	epsilon := fixedpoint.MustFromString("0.0001")
 
 	spot, ok := marks.UnderlyingMark(underlying)
-	theos := make([]decimal.Decimal, n)
+	theos := make([]fixedpoint.Fixed, n)
 	if ok && spot.IsPositive() {
-		spotF, _ := spot.Float64()
-		rateF, _ := riskFreeRate.Float64()
+		spotF, _ := spot.ToDecimal().Float64()
+		rateF, _ := riskFreeRate.ToDecimal().Float64()
 		const assumedVol = 0.6 // matches /option-chain's fallback until the IV surface covers every leg
 		for i, spec := range specs {
-			strikeF, _ := spec.strike.Float64()
+			strikeF, _ := spec.strike.ToDecimal().Float64()
 			tYears := time.Until(spec.expiry).Hours() / 24 / 365
 			theo := pricing.Price(spotF, strikeF, tYears, assumedVol, rateF, spec.optionType == "CALL")
-			theos[i] = decimal.NewFromFloat(theo)
+			theos[i] = fixedpoint.MustFromDecimal(decimal.NewFromFloat(theo))
 		}
 	}
 
-	modeledNet := decimal.Zero
+	modeledNet := fixedpoint.Zero
 	for i, spec := range specs {
-		modeledNet = modeledNet.Add(theos[i].Mul(decimal.NewFromInt(int64(spec.ratio))))
+		modeledNet = modeledNet.Add(theos[i].Mul(fixedpoint.FromInt64(int64(spec.ratio))))
 	}
 
-	prices := make([]decimal.Decimal, n)
+	prices := make([]fixedpoint.Fixed, n)
 	sameSign := (netPrice.IsPositive() && modeledNet.IsPositive()) || (netPrice.IsNegative() && modeledNet.IsNegative())
 	if sameSign {
 		scale := netPrice.Div(modeledNet)
@@ -280,14 +281,14 @@ func splitComboNetPrice(netPrice decimal.Decimal, specs []legSpecWithSymbol, und
 	sort.Slice(order, func(a, b int) bool { return abs(specs[order[a]].ratio) > abs(specs[order[b]].ratio) })
 
 	for _, settleIdx := range order {
-		otherSum := decimal.Zero
+		otherSum := fixedpoint.Zero
 		for i, spec := range specs {
 			if i == settleIdx {
 				continue
 			}
-			otherSum = otherSum.Add(epsilon.Mul(decimal.NewFromInt(int64(spec.ratio))))
+			otherSum = otherSum.Add(epsilon.Mul(fixedpoint.FromInt64(int64(spec.ratio))))
 		}
-		settleRatio := decimal.NewFromInt(int64(specs[settleIdx].ratio))
+		settleRatio := fixedpoint.FromInt64(int64(specs[settleIdx].ratio))
 		candidate := netPrice.Sub(otherSum).Div(settleRatio)
 		if candidate.IsPositive() {
 			for i := range specs {

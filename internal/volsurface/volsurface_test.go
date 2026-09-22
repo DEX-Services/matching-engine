@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shopspring/decimal"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 )
 
 func TestNilPoolIsSafeNoop(t *testing.T) {
@@ -14,9 +14,9 @@ func TestNilPoolIsSafeNoop(t *testing.T) {
 	expiry := time.Now().Add(30 * 24 * time.Hour)
 
 	// Record must not panic with a nil pool.
-	s.Record(ctx, "BTC-BI2XUSD", decimal.NewFromInt(60000), expiry, "CALL", 0.55)
+	s.Record(ctx, "BTC-BI2XUSD", fixedpoint.FromInt64(60000), expiry, "CALL", 0.55)
 
-	iv, ok := s.Interpolate(ctx, "BTC-BI2XUSD", decimal.NewFromInt(60000), expiry, "CALL")
+	iv, ok := s.Interpolate(ctx, "BTC-BI2XUSD", fixedpoint.FromInt64(60000), expiry, "CALL")
 	if ok {
 		t.Fatalf("expected no interpolation from a nil-pool store, got iv=%f", iv)
 	}
@@ -27,8 +27,8 @@ func TestNilStoreIsSafe(t *testing.T) {
 	ctx := context.Background()
 	expiry := time.Now().Add(30 * 24 * time.Hour)
 
-	s.Record(ctx, "BTC-BI2XUSD", decimal.NewFromInt(60000), expiry, "CALL", 0.55)
-	if _, ok := s.Interpolate(ctx, "BTC-BI2XUSD", decimal.NewFromInt(60000), expiry, "CALL"); ok {
+	s.Record(ctx, "BTC-BI2XUSD", fixedpoint.FromInt64(60000), expiry, "CALL", 0.55)
+	if _, ok := s.Interpolate(ctx, "BTC-BI2XUSD", fixedpoint.FromInt64(60000), expiry, "CALL"); ok {
 		t.Fatal("expected no interpolation from a nil *Store")
 	}
 }

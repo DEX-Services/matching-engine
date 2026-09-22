@@ -5,14 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 func sampleInstrument(symbol, underlying, optionType, strike string, expiry time.Time) *optionInstrument {
 	return &optionInstrument{
 		Symbol: symbol, Underlying: underlying, OptionType: optionType,
-		Strike: decimal.RequireFromString(strike), Expiry: expiry,
+		Strike: fixedpoint.MustFromString(strike), Expiry: expiry,
 	}
 }
 

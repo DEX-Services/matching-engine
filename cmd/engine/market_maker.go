@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/dex/matching-engine/internal/backendclient"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // MMReplaceRequest is an internal-only, all-or-nothing market-maker ladder.
@@ -63,7 +63,7 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			return
 		}
 		market := models.MarketType(req.Market)
-		ref, err := decimal.NewFromString(req.ReferencePrice)
+		ref, err := fixedpoint.FromString(req.ReferencePrice)
 		if req.Account == "" || req.Symbol == "" || (len(req.Orders) != 0 && (err != nil || !ref.IsPositive() || len(req.Orders) != 10)) {
 			http.Error(w, "account and symbol are required; replacement needs a positive referencePrice and exactly ten orders", http.StatusBadRequest)
 			return
@@ -78,11 +78,11 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 		}
 
 		orders := make([]*models.Order, 0, len(req.Orders))
-		targets := map[string]decimal.Decimal{}
+		targets := map[string]fixedpoint.Fixed{}
 		buys, sells := 0, 0
 		for _, q := range req.Orders {
-			price, perr := decimal.NewFromString(q.Price)
-			qty, qerr := decimal.NewFromString(q.Qty)
+			price, perr := fixedpoint.FromString(q.Price)
+			qty, qerr := fixedpoint.FromString(q.Qty)
 			side := models.OrderSide(q.Side)
 			if perr != nil || qerr != nil || !price.IsPositive() || !qty.IsPositive() || (side != models.Buy && side != models.Sell) {
 				http.Error(w, "invalid quote", http.StatusBadRequest)
@@ -122,7 +122,7 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 		// Fetch existing account reservations before replacing them. Dedicated MM
 		// wallets have no unrelated orders, so these are their exact old totals.
 		eng, _ := d.reg.Get(req.Symbol, market)
-		oldTargets := map[string]decimal.Decimal{}
+		oldTargets := map[string]fixedpoint.Fixed{}
 		for _, o := range eng.AllOrders() {
 			if o.AccountID != req.Account {
 				continue
@@ -135,7 +135,7 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 		// survive a stop/restart.
 		for asset := range oldTargets {
 			if _, ok := targets[asset]; !ok {
-				targets[asset] = decimal.Zero
+				targets[asset] = fixedpoint.Zero
 			}
 		}
 		// After an engine restart the live book is empty, so oldTargets has no
@@ -154,12 +154,12 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			parts := strings.SplitN(strings.ToUpper(req.Symbol), "-", 2)
 			if len(parts) == 2 {
 				if market != models.Futures {
-					targets[parts[0]] = decimal.Zero
+					targets[parts[0]] = fixedpoint.Zero
 				}
-				targets[parts[1]] = decimal.Zero
+				targets[parts[1]] = fixedpoint.Zero
 			}
 		}
-		toRaw := func(m map[string]decimal.Decimal) map[string]string {
+		toRaw := func(m map[string]fixedpoint.Fixed) map[string]string {
 			out := make(map[string]string, len(m))
 			for asset, amount := range m {
 				out[asset] = backendclient.ToRawUnits(amount)

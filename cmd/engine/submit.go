@@ -8,13 +8,13 @@ import (
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // submitDeps bundles the shared state the order-submission pipeline needs.
@@ -78,7 +78,7 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	// existing, well-tested price-limited matching path instead of adding a
 	// second code path.
 	if o.Type == models.Market && slippageBps != "" {
-		bps, berr := decimal.NewFromString(slippageBps)
+		bps, berr := fixedpoint.FromString(slippageBps)
 		if berr != nil || bps.IsNegative() {
 			return rejectPipeline(d, o, "invalid slippageBps", http.StatusBadRequest, fmt.Errorf("invalid slippageBps"))
 		}
@@ -86,18 +86,18 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		if gerr != nil {
 			return rejectPipeline(d, o, gerr.Error(), http.StatusBadRequest, fmt.Errorf("invalid order: %w", gerr))
 		}
-		var refPrice decimal.Decimal
+		var refPrice fixedpoint.Fixed
 		if o.IsBuy() {
 			refPrice = eng.BestAsk()
 		} else {
 			refPrice = eng.BestBid()
 		}
 		if refPrice.IsPositive() {
-			factor := bps.Div(decimal.NewFromInt(10000))
+			factor := bps.Div(fixedpoint.FromInt64(10000))
 			if o.IsBuy() {
-				o.Price = refPrice.Mul(decimal.NewFromInt(1).Add(factor))
+				o.Price = refPrice.Mul(fixedpoint.FromInt64(1).Add(factor))
 			} else {
-				o.Price = refPrice.Mul(decimal.NewFromInt(1).Sub(factor))
+				o.Price = refPrice.Mul(fixedpoint.FromInt64(1).Sub(factor))
 			}
 			// The slippage cap becomes an IOC limit internally, so it must
 			// obey the same tick-size rule as a user-entered limit. Round the
@@ -205,13 +205,13 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 	//     price, and the worst case for a short is filling at the best bid.
 	//   Buy limits / spot: the limit price (a buyer never pays more).
 	var resAsset string
-	var resAmount decimal.Decimal
+	var resAmount fixedpoint.Fixed
 	if o.Type == models.Market || (o.Type == models.Stop && !o.Price.IsPositive()) {
 		eng, gerr := d.reg.Get(o.Symbol, o.Market)
 		if gerr != nil {
 			return rejectPipeline(d, o, gerr.Error(), http.StatusBadRequest, fmt.Errorf("risk: %w", gerr))
 		}
-		var estPrice decimal.Decimal
+		var estPrice fixedpoint.Fixed
 		if o.IsBuy() {
 			estPrice = eng.BestAsk()
 		} else {

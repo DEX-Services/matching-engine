@@ -6,10 +6,10 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
-	"github.com/shopspring/decimal"
 )
 
 // TestLossBufferConsumed covers the band arithmetic behind the options
@@ -37,14 +37,14 @@ import (
 // the full requirement — see the function's own doc for why that distinction
 // is what keeps the warning strictly ahead of the liquidation.
 func TestLossBufferConsumed(t *testing.T) {
-	d := decimal.NewFromInt
+	d := fixedpoint.FromInt64
 
 	// With reserved=10000 and a 50% maintenance bar, the buffer is the 5000
 	// between full collateral and the 5000 liquidation bar.
 	cases := []struct {
 		name     string
-		reserved decimal.Decimal
-		equity   decimal.Decimal
+		reserved fixedpoint.Fixed
+		equity   fixedpoint.Fixed
 		want     string
 	}{
 		{"untouched collateral consumes nothing", d(10000), d(10000), "0"},
@@ -52,12 +52,12 @@ func TestLossBufferConsumed(t *testing.T) {
 		{"half the buffer gone", d(10000), d(7500), "0.5"},
 		{"three quarters gone — the warning point", d(10000), d(6250), "0.75"},
 		{"at the liquidation bar", d(10000), d(5000), "1"},
-		{"past the liquidation bar", d(10000), decimal.Zero, "2"},
+		{"past the liquidation bar", d(10000), fixedpoint.Zero, "2"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := lossBufferConsumed(tc.reserved, tc.equity)
-			if !got.Equal(decimal.RequireFromString(tc.want)) {
+			if !got.Equal(fixedpoint.MustFromString(tc.want)) {
 				t.Fatalf("lossBufferConsumed(%s, %s) = %s, want %s", tc.reserved, tc.equity, got, tc.want)
 			}
 		})
@@ -67,9 +67,9 @@ func TestLossBufferConsumed(t *testing.T) {
 // TestLossBufferConsumed_NonPositiveReservedFailsClosed: a position with no
 // buffer left to measure must never be reported as healthy.
 func TestLossBufferConsumed_NonPositiveReservedFailsClosed(t *testing.T) {
-	for _, reserved := range []decimal.Decimal{decimal.Zero, decimal.NewFromInt(-100)} {
-		got := lossBufferConsumed(reserved, decimal.NewFromInt(1000))
-		if !got.Equal(decimal.NewFromInt(1)) {
+	for _, reserved := range []fixedpoint.Fixed{fixedpoint.Zero, fixedpoint.FromInt64(-100)} {
+		got := lossBufferConsumed(reserved, fixedpoint.FromInt64(1000))
+		if !got.Equal(fixedpoint.FromInt64(1)) {
 			t.Fatalf("reserved=%s must report a fully-consumed buffer, got %s", reserved, got)
 		}
 	}
@@ -80,7 +80,7 @@ func TestLossBufferConsumed_NonPositiveReservedFailsClosed(t *testing.T) {
 // position crosses it while still solvent and closable, rather than at the
 // same moment it is force-closed.
 func TestWarningFiresBeforeLiquidation(t *testing.T) {
-	if !warningLossFraction.LessThan(decimal.NewFromInt(1)) {
+	if !warningLossFraction.LessThan(fixedpoint.FromInt64(1)) {
 		t.Fatalf("warning fraction %s must be < 1 (the liquidation point), otherwise the warning arrives at or after the force-close and gives the writer no window to react",
 			warningLossFraction)
 	}
@@ -96,7 +96,7 @@ func TestWarningFiresBeforeLiquidation(t *testing.T) {
 	// of by the buffer, which put the 75% warning at equity = 25% of reserved
 	// — below the 50% liquidation bar — so every position was force-closed
 	// before its warning could fire. This test would have caught that.
-	reserved := decimal.NewFromInt(10000)
+	reserved := fixedpoint.FromInt64(10000)
 	liquidationAt := maintenanceBar(reserved)
 	buffer := reserved.Sub(liquidationAt)
 	warningAt := reserved.Sub(buffer.Mul(warningLossFraction))
@@ -127,7 +127,7 @@ func TestWarningFiresBeforeLiquidation(t *testing.T) {
 // only ~7% of their collateral, with ~12,000 still posted against a ~1,000
 // loss.
 func TestMaintenanceBarLeavesRoomToMove(t *testing.T) {
-	reserved := decimal.NewFromInt(10000)
+	reserved := fixedpoint.FromInt64(10000)
 	bar := maintenanceBar(reserved)
 
 	if !bar.LessThan(reserved) {
@@ -139,7 +139,7 @@ func TestMaintenanceBarLeavesRoomToMove(t *testing.T) {
 
 	// A writer barely underwater must survive: this is the case that used to
 	// force-close.
-	barelyUnderwater := reserved.Sub(decimal.NewFromInt(1000)) // 10% of collateral gone
+	barelyUnderwater := reserved.Sub(fixedpoint.FromInt64(1000)) // 10% of collateral gone
 	if barelyUnderwater.LessThan(bar) {
 		t.Fatalf("a writer with 90%% of collateral intact (equity %s) must not be liquidatable (bar %s)", barelyUnderwater, bar)
 	}
@@ -170,7 +170,7 @@ func TestMarginCallStages_WarnsWhileSolventThenLiquidates(t *testing.T) {
 		if liquidated {
 			t.Fatal("position was force-closed during the warning stage; the writer gets no window to react")
 		}
-		pos := os.GetPosition("writer", symbol, decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+		pos := os.GetPosition("writer", symbol, fixedpoint.FromInt64(60000), time.Now().Add(24*time.Hour), "CALL")
 		if pos == nil || pos.Size.IsZero() {
 			t.Fatal("expected the position to still be open after a warning")
 		}
@@ -187,7 +187,7 @@ func TestMarginCallStages_WarnsWhileSolventThenLiquidates(t *testing.T) {
 		if !liquidated {
 			t.Fatal("expected an EventLiquidation for an insolvent writer")
 		}
-		pos := os.GetPosition("writer", symbol, decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+		pos := os.GetPosition("writer", symbol, fixedpoint.FromInt64(60000), time.Now().Add(24*time.Hour), "CALL")
 		if pos != nil && !pos.Size.IsZero() {
 			t.Fatalf("expected the position to be force-closed, still open: %+v", pos)
 		}
@@ -200,17 +200,17 @@ func TestMarginCallStages_WarnsWhileSolventThenLiquidates(t *testing.T) {
 func openWriterThenMoveSpot(t *testing.T, symbol string, openSpot, nowSpot int64) (*settlement.OptionsSettlement, *Engine, <-chan *models.Event) {
 	t.Helper()
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(50_000_000))
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(50_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(50_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(50_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 
-	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": decimal.NewFromInt(openSpot)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": fixedpoint.FromInt64(openSpot)})
 	openShortOption(t, os, "writer", symbol, "CALL", "60000", "1", "500")
 
-	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": decimal.NewFromInt(nowSpot)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": fixedpoint.FromInt64(nowSpot)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
-	md := mdWithUnderlyingSpot("BTC-BI2XUSD", decimal.NewFromInt(nowSpot))
+	md := mdWithUnderlyingSpot("BTC-BI2XUSD", fixedpoint.FromInt64(nowSpot))
 	bus := events.NewBus()
 	ch := bus.Subscribe(20)
 	eng := newTestOptionsEngine(os, md, bus)

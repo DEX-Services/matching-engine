@@ -3,16 +3,16 @@ package orderbook
 import (
 	"container/list"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 // PriceLevel holds all resting orders at a single price, maintaining strict
 // FIFO time priority via a doubly-linked list.
 type PriceLevel struct {
-	Price  decimal.Decimal
-	orders *list.List                       // *models.Order, front = oldest (highest priority)
-	index  map[string]*list.Element         // orderID -> element for O(1) removal
+	Price  fixedpoint.Fixed
+	orders *list.List                // *models.Order, front = oldest (highest priority)
+	index  map[string]*list.Element  // orderID -> element for O(1) removal
 }
 
 // LevelSnapshot is an immutable, concurrency-safe snapshot of one price
@@ -20,12 +20,12 @@ type PriceLevel struct {
 // returned by Book.Depth so callers reading it off the engine goroutine can
 // never race concurrent mutation of the live PriceLevel.
 type LevelSnapshot struct {
-	Price         decimal.Decimal
-	TotalQuantity decimal.Decimal
+	Price         fixedpoint.Fixed
+	TotalQuantity fixedpoint.Fixed
 }
 
 // NewPriceLevel creates an empty price level at the given price.
-func NewPriceLevel(price decimal.Decimal) *PriceLevel {
+func NewPriceLevel(price fixedpoint.Fixed) *PriceLevel {
 	return &PriceLevel{
 		Price:  price,
 		orders: list.New(),
@@ -71,8 +71,8 @@ func (pl *PriceLevel) Len() int {
 }
 
 // TotalQuantity returns the aggregate resting quantity at this level.
-func (pl *PriceLevel) TotalQuantity() decimal.Decimal {
-	total := decimal.Zero
+func (pl *PriceLevel) TotalQuantity() fixedpoint.Fixed {
+	total := fixedpoint.Zero
 	for e := pl.orders.Front(); e != nil; e = e.Next() {
 		o := e.Value.(*models.Order)
 		total = total.Add(o.RemainingQty())
@@ -84,8 +84,8 @@ func (pl *PriceLevel) TotalQuantity() decimal.Decimal {
 // this level, excluding orders belonging to excludeAccountID (used by the
 // FOK pre-check so it doesn't count liquidity self-trade prevention will
 // actually skip).
-func (pl *PriceLevel) TotalQuantityExcludingAccount(excludeAccountID string) decimal.Decimal {
-	total := decimal.Zero
+func (pl *PriceLevel) TotalQuantityExcludingAccount(excludeAccountID string) fixedpoint.Fixed {
+	total := fixedpoint.Zero
 	for e := pl.orders.Front(); e != nil; e = e.Next() {
 		o := e.Value.(*models.Order)
 		if excludeAccountID != "" && o.AccountID == excludeAccountID {

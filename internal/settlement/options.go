@@ -10,11 +10,11 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // OptionsPosition tracks a holding in an options contract.
@@ -22,11 +22,11 @@ type OptionsPosition struct {
 	AccountID     string
 	Symbol        string
 	OptionType    string
-	StrikePrice   decimal.Decimal
+	StrikePrice   fixedpoint.Fixed
 	Expiry        time.Time
-	Size          decimal.Decimal // positive = long, negative = short
-	Premium       decimal.Decimal // premium paid (positive) or received (negative)
-	QuoteCurrency string          // settlement currency (e.g. "BI2XUSD")
+	Size          fixedpoint.Fixed // positive = long, negative = short
+	Premium       fixedpoint.Fixed // premium paid (positive) or received (negative)
+	QuoteCurrency string           // settlement currency (e.g. "BI2XUSD")
 }
 
 // PnL returns the position's unrealized profit/loss at the given current
@@ -44,9 +44,9 @@ type OptionsPosition struct {
 // the current cost to buy back the same position (markPrice * |Size|). A
 // writer profits as the option's value falls toward zero (paying less to
 // close than was received to open) and loses as it rises.
-func (p *OptionsPosition) PnL(markPrice decimal.Decimal) decimal.Decimal {
+func (p *OptionsPosition) PnL(markPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	if p.Size.IsZero() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	currentValue := markPrice.Mul(p.Size.Abs())
 	if p.Size.IsPositive() {
@@ -122,7 +122,7 @@ func (o *OptionsSettlement) Settle(trade *models.Trade) error {
 	return nil
 }
 
-func (o *OptionsSettlement) recordPosition(accountID, symbol string, size, premium decimal.Decimal, meta *models.Order, quote string) {
+func (o *OptionsSettlement) recordPosition(accountID, symbol string, size, premium fixedpoint.Fixed, meta *models.Order, quote string) {
 	key := positionKey(accountID, symbol, meta.StrikePrice, meta.Expiry, meta.OptionType)
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -142,12 +142,12 @@ func (o *OptionsSettlement) recordPosition(accountID, symbol string, size, premi
 	pos.Premium = pos.Premium.Add(premium)
 }
 
-func positionKey(accountID, symbol string, strike decimal.Decimal, expiry time.Time, optionType string) string {
+func positionKey(accountID, symbol string, strike fixedpoint.Fixed, expiry time.Time, optionType string) string {
 	return fmt.Sprintf("%s:%s:%s:%d:%s", accountID, symbol, strike.String(), expiry.Unix(), optionType)
 }
 
 // GetPosition returns an options position for account/symbol/strike/expiry/type, or nil.
-func (o *OptionsSettlement) GetPosition(accountID, symbol string, strike decimal.Decimal, expiry time.Time, optionType string) *OptionsPosition {
+func (o *OptionsSettlement) GetPosition(accountID, symbol string, strike fixedpoint.Fixed, expiry time.Time, optionType string) *OptionsPosition {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.positions[positionKey(accountID, symbol, strike, expiry, optionType)]
@@ -191,13 +191,13 @@ func (o *OptionsSettlement) AllPositions() []*OptionsPosition {
 // failure conditions), the position is NOT removed, mirroring
 // ExpiryProcessor's exercise-debit-failure path: leave it for manual
 // reconciliation rather than silently eat an unrecoverable loss.
-func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike decimal.Decimal, expiry time.Time, optionType string, reservedCollateral, markPrice decimal.Decimal) (decimal.Decimal, error) {
+func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike fixedpoint.Fixed, expiry time.Time, optionType string, reservedCollateral, markPrice fixedpoint.Fixed) (fixedpoint.Fixed, error) {
 	key := positionKey(accountID, symbol, strike, expiry, optionType)
 	o.mu.RLock()
 	pos, ok := o.positions[key]
 	o.mu.RUnlock()
 	if !ok || pos.Size.IsZero() {
-		return decimal.Zero, nil
+		return fixedpoint.Zero, nil
 	}
 	quote := pos.QuoteCurrency
 	pnl := pos.PnL(markPrice)
@@ -212,7 +212,7 @@ func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike 
 	closeEventID := uuid.NewString()
 	if pnl.IsNegative() {
 		if err := o.ledger.Debit(accountID, quote, pnl.Neg()); err != nil {
-			return decimal.Zero, fmt.Errorf("force-close debit: %w", err)
+			return fixedpoint.Zero, fmt.Errorf("force-close debit: %w", err)
 		}
 		key := closeEventID + ":" + accountID + ":settle"
 		amount := backendclient.ToRawUnits(pnl.Neg())
@@ -233,7 +233,7 @@ func (o *OptionsSettlement) ForceClosePosition(accountID, symbol string, strike 
 }
 
 // removePosition deletes a settled/expired position.
-func (o *OptionsSettlement) removePosition(accountID, symbol string, strike decimal.Decimal, expiry time.Time, optionType string) {
+func (o *OptionsSettlement) removePosition(accountID, symbol string, strike fixedpoint.Fixed, expiry time.Time, optionType string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	delete(o.positions, positionKey(accountID, symbol, strike, expiry, optionType))
@@ -308,11 +308,11 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 	}
 
 	markPrice := ticker.MarkPrice
-	var intrinsic decimal.Decimal
+	var intrinsic fixedpoint.Fixed
 	if pos.OptionType == "CALL" {
-		intrinsic = decimal.Max(decimal.Zero, markPrice.Sub(pos.StrikePrice))
+		intrinsic = fixedpoint.Max(fixedpoint.Zero, markPrice.Sub(pos.StrikePrice))
 	} else {
-		intrinsic = decimal.Max(decimal.Zero, pos.StrikePrice.Sub(markPrice))
+		intrinsic = fixedpoint.Max(fixedpoint.Zero, pos.StrikePrice.Sub(markPrice))
 	}
 
 	// A stable per-position-per-expiry key: settleExpiry runs at most once
@@ -377,7 +377,7 @@ func (p *ExpiryProcessor) settleExpiry(pos *OptionsPosition) {
 // publishExpiryEvent publishes an EventOrderExpired for the settled position so
 // downstream consumers (WS, Kafka→Postgres) are notified even when the
 // option expires worthless (OTM, no payout).
-func (p *ExpiryProcessor) publishExpiryEvent(pos *OptionsPosition, markPrice decimal.Decimal) {
+func (p *ExpiryProcessor) publishExpiryEvent(pos *OptionsPosition, markPrice fixedpoint.Fixed) {
 	if p.bus == nil {
 		return
 	}

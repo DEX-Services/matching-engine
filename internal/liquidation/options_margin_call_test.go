@@ -7,21 +7,21 @@ import (
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/orderbook"
 	"github.com/dex/matching-engine/internal/risk"
 	"github.com/dex/matching-engine/internal/settlement"
-	"github.com/shopspring/decimal"
 )
 
 // fakeMarkSource is a minimal risk.UnderlyingMarkSource for driving
 // shortOptionMargin/RequiredOptionsMargin in tests without a real
 // marketdata.Service/order book.
-type fakeMarkSource map[string]decimal.Decimal
+type fakeMarkSource map[string]fixedpoint.Fixed
 
-func (f fakeMarkSource) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
+func (f fakeMarkSource) UnderlyingMark(symbol string) (fixedpoint.Fixed, bool) {
 	v, ok := f[symbol]
 	return v, ok
 }
@@ -29,10 +29,10 @@ func (f fakeMarkSource) UnderlyingMark(symbol string) (decimal.Decimal, bool) {
 // fakeBook is a minimal marketdata.BookReader with a fixed best bid/ask, so
 // a real marketdata.Service can be driven to a known Ticker() output without
 // a live matching.Engine.
-type fakeBook struct{ bid, ask decimal.Decimal }
+type fakeBook struct{ bid, ask fixedpoint.Fixed }
 
-func (f fakeBook) BestBid() decimal.Decimal                         { return f.bid }
-func (f fakeBook) BestAsk() decimal.Decimal                         { return f.ask }
+func (f fakeBook) BestBid() fixedpoint.Fixed                        { return f.bid }
+func (f fakeBook) BestAsk() fixedpoint.Fixed                        { return f.ask }
 func (f fakeBook) Depth(int) (bids, asks []orderbook.LevelSnapshot) { return nil, nil }
 
 // mdWithUnderlyingSpot builds a real marketdata.Service with a registered
@@ -41,7 +41,7 @@ func (f fakeBook) Depth(int) (bids, asks []orderbook.LevelSnapshot) { return nil
 // for any option instrument — driving checkOptionsMarginCalls's optionMark
 // down its theoretical-Black-Scholes fallback path, which is what a
 // never-quoted option correctly falls back to.
-func mdWithUnderlyingSpot(underlying string, spot decimal.Decimal) *marketdata.Service {
+func mdWithUnderlyingSpot(underlying string, spot fixedpoint.Fixed) *marketdata.Service {
 	md := marketdata.NewService()
 	md.Register(underlying, models.Spot, fakeBook{bid: spot, ask: spot})
 	return md
@@ -52,9 +52,9 @@ func mdWithUnderlyingSpot(underlying string, spot decimal.Decimal) *marketdata.S
 // entry point real order flow uses too).
 func openShortOption(t *testing.T, os *settlement.OptionsSettlement, writer, symbol, optionType, strike, qty, premium string) {
 	t.Helper()
-	strikeDec := decimal.RequireFromString(strike)
-	qtyDec := decimal.RequireFromString(qty)
-	priceDec := decimal.RequireFromString(premium)
+	strikeDec := fixedpoint.MustFromString(strike)
+	qtyDec := fixedpoint.MustFromString(qty)
+	priceDec := fixedpoint.MustFromString(premium)
 	buyOrder := &models.Order{
 		AccountID: "buyer", Symbol: symbol, Market: models.Options, Side: models.Buy,
 		OptionType: optionType, StrikePrice: strikeDec, Expiry: time.Now().Add(24 * time.Hour),
@@ -81,10 +81,10 @@ func newTestOptionsEngine(os *settlement.OptionsSettlement, md *marketdata.Servi
 
 func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
-	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": decimal.NewFromInt(50000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": fixedpoint.FromInt64(50000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
 	// OTM call, spot far below strike: the writer's equity (reserved +
@@ -92,7 +92,7 @@ func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	// writer) stays comfortably above the maintenance requirement.
 	openShortOption(t, os, "writer", "BTC-BI2XUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BI2XUSD", decimal.NewFromInt(50000))
+	md := mdWithUnderlyingSpot("BTC-BI2XUSD", fixedpoint.FromInt64(50000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
 	eng := newTestOptionsEngine(os, md, bus)
@@ -104,7 +104,7 @@ func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 	default:
 	}
 
-	pos := os.GetPosition("writer", "BTC-BI2XUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	pos := os.GetPosition("writer", "BTC-BI2XUSD-60000-20260101-CALL", fixedpoint.FromInt64(60000), time.Now().Add(24*time.Hour), "CALL")
 	if pos == nil || pos.Size.IsZero() {
 		t.Fatal("expected the writer's position to still be open (not liquidated)")
 	}
@@ -112,17 +112,17 @@ func TestCheckOptionsMarginCalls_NoForceCloseWhenFarFromReserved(t *testing.T) {
 
 func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
 	// Deep ITM call: spot far above strike makes the short call a large
 	// unrealized loss for the writer, eroding equity well below maintenance.
-	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": decimal.NewFromInt(200000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": fixedpoint.FromInt64(200000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
 	openShortOption(t, os, "writer", "BTC-BI2XUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BI2XUSD", decimal.NewFromInt(200000))
+	md := mdWithUnderlyingSpot("BTC-BI2XUSD", fixedpoint.FromInt64(200000))
 	bus := events.NewBus()
 	ch := bus.Subscribe(10)
 	eng := newTestOptionsEngine(os, md, bus)
@@ -146,7 +146,7 @@ func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 		}
 	}
 
-	pos := os.GetPosition("writer", "BTC-BI2XUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	pos := os.GetPosition("writer", "BTC-BI2XUSD-60000-20260101-CALL", fixedpoint.FromInt64(60000), time.Now().Add(24*time.Hour), "CALL")
 	if pos != nil && !pos.Size.IsZero() {
 		t.Fatalf("expected the writer's position to be force-closed, still open: %+v", pos)
 	}
@@ -154,22 +154,22 @@ func TestCheckOptionsMarginCalls_ForceClosesWhenDeepITM(t *testing.T) {
 
 func TestCheckOptionsMarginCalls_IgnoresLongPositions(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("buyer", "BI2XUSD", decimal.NewFromInt(1_000_000))
-	ledger.Deposit("writer", "BI2XUSD", decimal.NewFromInt(1_000_000))
+	ledger.Deposit("buyer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
+	ledger.Deposit("writer", "BI2XUSD", fixedpoint.FromInt64(1_000_000))
 	os := settlement.NewOptionsSettlement(ledger, &backendclient.Client{})
-	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": decimal.NewFromInt(200000)})
+	risk.SetMarkSource(fakeMarkSource{"BTC-BI2XUSD": fixedpoint.FromInt64(200000)})
 	t.Cleanup(func() { risk.SetMarkSource(nil) })
 
 	openShortOption(t, os, "writer", "BTC-BI2XUSD-60000-20260101-CALL", "CALL", "60000", "1", "500")
 
-	md := mdWithUnderlyingSpot("BTC-BI2XUSD", decimal.NewFromInt(200000))
+	md := mdWithUnderlyingSpot("BTC-BI2XUSD", fixedpoint.FromInt64(200000))
 	bus := events.NewBus()
 	eng := newTestOptionsEngine(os, md, bus)
 	eng.checkOptionsMarginCalls()
 
 	// The buyer's long position must never be force-closed — buyers can't be
 	// margin-called; they already paid the full premium up front.
-	buyerPos := os.GetPosition("buyer", "BTC-BI2XUSD-60000-20260101-CALL", decimal.NewFromInt(60000), time.Now().Add(24*time.Hour), "CALL")
+	buyerPos := os.GetPosition("buyer", "BTC-BI2XUSD-60000-20260101-CALL", fixedpoint.FromInt64(60000), time.Now().Add(24*time.Hour), "CALL")
 	if buyerPos == nil || buyerPos.Size.IsZero() {
 		t.Fatal("expected the buyer's long position to remain untouched")
 	}

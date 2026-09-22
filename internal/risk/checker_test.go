@@ -3,15 +3,15 @@ package risk
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
-	"github.com/shopspring/decimal"
 )
 
 func newBuyOrder(qty, price string) *models.Order {
 	return &models.Order{
 		ID: "o1", AccountID: "buyer", Symbol: "BTC-USDT",
 		Side: models.Buy, Type: models.Limit,
-		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.MustFromString(qty),
 	}
 }
 
@@ -19,26 +19,26 @@ func newSellOrder(qty, price string) *models.Order {
 	return &models.Order{
 		ID: "o1", AccountID: "seller", Symbol: "BTC-USDT",
 		Side: models.Sell, Type: models.Limit,
-		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.MustFromString(qty),
 	}
 }
 
 func TestReserveRelease_FullCancel(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("buyer", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newBuyOrder("1", "100")
 	if err := checker.Reserve(order); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if got := ledger.Available("buyer", "USDT"); !got.Equal(decimal.NewFromInt(900)) {
+	if got := ledger.Available("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(900)) {
 		t.Fatalf("available after reserve = %s, want 900", got)
 	}
 
 	// Simulate cancel with nothing filled.
 	checker.Release(order)
-	if got := ledger.Available("buyer", "USDT"); !got.Equal(decimal.NewFromInt(1000)) {
+	if got := ledger.Available("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(1000)) {
 		t.Fatalf("available after release = %s, want 1000", got)
 	}
 	if got := ledger.Reserved("buyer", "USDT"); !got.IsZero() {
@@ -49,7 +49,7 @@ func TestReserveRelease_FullCancel(t *testing.T) {
 func TestReserveRelease_PartialFillThenCancel(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("buyer", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newBuyOrder("10", "100") // reserves 1000
 	if err := checker.Reserve(order); err != nil {
@@ -57,11 +57,11 @@ func TestReserveRelease_PartialFillThenCancel(t *testing.T) {
 	}
 
 	// Simulate a partial fill: 4 of 10 filled, settlement debits 400.
-	order.Filled = decimal.NewFromInt(4)
-	if err := ledger.Debit("buyer", "USDT", decimal.NewFromInt(400)); err != nil {
+	order.Filled = fixedpoint.FromInt64(4)
+	if err := ledger.Debit("buyer", "USDT", fixedpoint.FromInt64(400)); err != nil {
 		t.Fatalf("debit: %v", err)
 	}
-	if got := ledger.Reserved("buyer", "USDT"); !got.Equal(decimal.NewFromInt(600)) {
+	if got := ledger.Reserved("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(600)) {
 		t.Fatalf("reserved after partial fill = %s, want 600", got)
 	}
 
@@ -70,10 +70,10 @@ func TestReserveRelease_PartialFillThenCancel(t *testing.T) {
 	if got := ledger.Reserved("buyer", "USDT"); !got.IsZero() {
 		t.Fatalf("reserved after cancel = %s, want 0 (no double release / residual)", got)
 	}
-	if got := ledger.Available("buyer", "USDT"); !got.Equal(decimal.NewFromInt(600)) {
+	if got := ledger.Available("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(600)) {
 		t.Fatalf("available after cancel = %s, want 600 (1000 - 400 debited)", got)
 	}
-	if got := ledger.Balance("buyer", "USDT"); !got.Equal(decimal.NewFromInt(600)) {
+	if got := ledger.Balance("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(600)) {
 		t.Fatalf("balance after cancel = %s, want 600", got)
 	}
 }
@@ -81,7 +81,7 @@ func TestReserveRelease_PartialFillThenCancel(t *testing.T) {
 func TestReserveRelease_RejectPath(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("buyer", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newBuyOrder("2", "100") // reserves 200
 	if err := checker.Reserve(order); err != nil {
@@ -89,7 +89,7 @@ func TestReserveRelease_RejectPath(t *testing.T) {
 	}
 	// FOK rejection: nothing filled, release full reservation.
 	checker.Release(order)
-	if got := ledger.Available("buyer", "USDT"); !got.Equal(decimal.NewFromInt(1000)) {
+	if got := ledger.Available("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(1000)) {
 		t.Fatalf("available after reject-release = %s, want 1000", got)
 	}
 }
@@ -97,7 +97,7 @@ func TestReserveRelease_RejectPath(t *testing.T) {
 func TestReserveRelease_SellerSide(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("seller", "BTC", decimal.NewFromInt(10))
+	ledger.Deposit("seller", "BTC", fixedpoint.FromInt64(10))
 
 	order := newSellOrder("10", "100") // reserves 10 BTC
 	if err := checker.Reserve(order); err != nil {
@@ -108,11 +108,11 @@ func TestReserveRelease_SellerSide(t *testing.T) {
 	}
 
 	// Partial fill: 3 of 10 filled, settlement debits 3 BTC.
-	order.Filled = decimal.NewFromInt(3)
-	if err := ledger.Debit("seller", "BTC", decimal.NewFromInt(3)); err != nil {
+	order.Filled = fixedpoint.FromInt64(3)
+	if err := ledger.Debit("seller", "BTC", fixedpoint.FromInt64(3)); err != nil {
 		t.Fatalf("debit: %v", err)
 	}
-	if got := ledger.Reserved("seller", "BTC"); !got.Equal(decimal.NewFromInt(7)) {
+	if got := ledger.Reserved("seller", "BTC"); !got.Equal(fixedpoint.FromInt64(7)) {
 		t.Fatalf("reserved after partial fill = %s, want 7", got)
 	}
 
@@ -120,7 +120,7 @@ func TestReserveRelease_SellerSide(t *testing.T) {
 	if got := ledger.Reserved("seller", "BTC"); !got.IsZero() {
 		t.Fatalf("reserved after cancel = %s, want 0", got)
 	}
-	if got := ledger.Available("seller", "BTC"); !got.Equal(decimal.NewFromInt(7)) {
+	if got := ledger.Available("seller", "BTC"); !got.Equal(fixedpoint.FromInt64(7)) {
 		t.Fatalf("available after cancel = %s, want 7 (10 - 3 debited)", got)
 	}
 }
@@ -128,7 +128,7 @@ func TestReserveRelease_SellerSide(t *testing.T) {
 func TestRelease_NeverGoesNegative(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("buyer", "USDT", decimal.NewFromInt(1000))
+	ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(1000))
 
 	order := newBuyOrder("1", "100")
 	if err := checker.Reserve(order); err != nil {
@@ -139,7 +139,7 @@ func TestRelease_NeverGoesNegative(t *testing.T) {
 	if got := ledger.Reserved("buyer", "USDT"); !got.IsZero() {
 		t.Fatalf("reserved after double release = %s, want 0", got)
 	}
-	if got := ledger.Available("buyer", "USDT"); !got.Equal(decimal.NewFromInt(1000)) {
+	if got := ledger.Available("buyer", "USDT"); !got.Equal(fixedpoint.FromInt64(1000)) {
 		t.Fatalf("available after double release = %s, want 1000", got)
 	}
 }
@@ -147,7 +147,7 @@ func TestRelease_NeverGoesNegative(t *testing.T) {
 func TestReserve_InsufficientBalance(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("buyer", "USDT", decimal.NewFromInt(50))
+	ledger.Deposit("buyer", "USDT", fixedpoint.FromInt64(50))
 
 	order := newBuyOrder("1", "100") // needs 100, only has 50
 	if err := checker.Reserve(order); err == nil {
@@ -166,7 +166,7 @@ func newFuturesCloseOrder(qty, price string, leverage int) *models.Order {
 	return &models.Order{
 		ID: "close1", AccountID: "trader", Symbol: "BI2X-BI2XUSD",
 		Side: models.Buy, Type: models.Limit, Market: models.Futures,
-		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.MustFromString(qty),
 		ReduceOnly: true, Leverage: leverage,
 	}
 }
@@ -186,7 +186,7 @@ func TestCheck_ReduceOnlyFutures_RequiresNoMargin(t *testing.T) {
 	// than enough for the correct ~$10.61 one, and (this is the point of the
 	// fix) irrelevant either way: a reduce-only futures close needs no fresh
 	// margin check at all.
-	ledger.Deposit("trader", "BI2XUSD", decimal.RequireFromString("10.8071913811"))
+	ledger.Deposit("trader", "BI2XUSD", fixedpoint.MustFromString("10.8071913811"))
 
 	order := newFuturesCloseOrder("214.00377", "2.46", 0)
 	if err := checker.Check(order); err != nil {
@@ -200,7 +200,7 @@ func TestCheck_ReduceOnlyFutures_RequiresNoMargin(t *testing.T) {
 func TestCheck_NonReduceOnlyFutures_StillRequiresMargin(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2XUSD", decimal.RequireFromString("10.8071913811"))
+	ledger.Deposit("trader", "BI2XUSD", fixedpoint.MustFromString("10.8071913811"))
 
 	order := newFuturesCloseOrder("214.00377", "2.46", 0)
 	order.ReduceOnly = false // opening, not closing
@@ -217,7 +217,7 @@ func TestCheck_NonReduceOnlyFutures_StillRequiresMargin(t *testing.T) {
 func TestReserve_ReduceOnlyFutures_LocksNothing(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2XUSD", decimal.NewFromInt(1000))
+	ledger.Deposit("trader", "BI2XUSD", fixedpoint.FromInt64(1000))
 
 	order := newFuturesCloseOrder("214.00377", "2.46", 0)
 	if err := checker.Reserve(order); err != nil {
@@ -226,7 +226,7 @@ func TestReserve_ReduceOnlyFutures_LocksNothing(t *testing.T) {
 	if got := ledger.Reserved("trader", "BI2XUSD"); !got.IsZero() {
 		t.Fatalf("reserved after reduce-only futures close = %s, want 0", got)
 	}
-	if got := ledger.Available("trader", "BI2XUSD"); !got.Equal(decimal.NewFromInt(1000)) {
+	if got := ledger.Available("trader", "BI2XUSD"); !got.Equal(fixedpoint.FromInt64(1000)) {
 		t.Fatalf("available after reduce-only futures close reserve = %s, want unchanged 1000", got)
 	}
 }
@@ -237,11 +237,11 @@ func TestReserve_ReduceOnlyFutures_LocksNothing(t *testing.T) {
 func TestReserveMarket_ReduceOnlyFutures_LocksNothing(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2XUSD", decimal.NewFromInt(1000))
+	ledger.Deposit("trader", "BI2XUSD", fixedpoint.FromInt64(1000))
 
 	order := newFuturesCloseOrder("214.00377", "0", 0) // Market orders carry no own price
 	order.Type = models.Market
-	asset, amount, err := checker.ReserveMarket(order, decimal.RequireFromString("2.46"))
+	asset, amount, err := checker.ReserveMarket(order, fixedpoint.MustFromString("2.46"))
 	if err != nil {
 		t.Fatalf("reserveMarket: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestRequiredFor_ReduceOnlyFutures_ReturnsZero(t *testing.T) {
 func TestEstimatedRequired_ReduceOnlyFutures_ReturnsZero(t *testing.T) {
 	order := newFuturesCloseOrder("214.00377", "0", 0)
 	order.Type = models.Market
-	asset, amount := EstimatedRequired(order, decimal.RequireFromString("2.46"))
+	asset, amount := EstimatedRequired(order, fixedpoint.MustFromString("2.46"))
 	if !amount.IsZero() {
 		t.Fatalf("EstimatedRequired amount for reduce-only futures close = %s, want 0", amount)
 	}
@@ -292,7 +292,7 @@ func newSpotOCOLegOrder(qty, price string) *models.Order {
 	return &models.Order{
 		ID: "leg1", AccountID: "trader", Symbol: "BI2X-BI2XUSD",
 		Side: models.Sell, Type: models.Limit, Market: models.Spot,
-		Price: decimal.RequireFromString(price), Quantity: decimal.RequireFromString(qty),
+		Price: fixedpoint.MustFromString(price), Quantity: fixedpoint.MustFromString(qty),
 		ReduceOnly: true, GroupID: "group-1", GroupRole: "TP",
 	}
 }
@@ -307,14 +307,14 @@ func newSpotOCOLegOrder(qty, price string) *models.Order {
 func TestReserve_SpotOCOLeg_LocksNothing(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
-	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10)) // simulates reserveGroup's up-front shared lock
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
+	ledger.Reserve("trader", "BI2X", fixedpoint.FromInt64(10)) // simulates reserveGroup's up-front shared lock
 
 	order := newSpotOCOLegOrder("10", "6.00")
 	if err := checker.Reserve(order); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(fixedpoint.FromInt64(10)) {
 		t.Fatalf("reserved after spot OCO leg reserve = %s, want unchanged 10 (no second lock)", got)
 	}
 }
@@ -328,14 +328,14 @@ func TestReserve_SpotOCOLeg_LocksNothing(t *testing.T) {
 func TestReserve_SpotNonOCOOrder_StillRequiresFullReservation(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
 
 	order := newSpotOCOLegOrder("10", "6.00")
 	order.GroupID = "" // not an attached-order leg
 	if err := checker.Reserve(order); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(fixedpoint.FromInt64(10)) {
 		t.Fatalf("reserved after ordinary spot sell reserve = %s, want 10 (normal reservation, not exempted)", got)
 	}
 }
@@ -349,12 +349,12 @@ func TestReserve_SpotNonOCOOrder_StillRequiresFullReservation(t *testing.T) {
 func TestRelease_SpotOCOLeg_ReleasesNothing(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
-	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10)) // the shared reservation, still held (sibling filled and consumed nothing more of it here since this test only exercises the cancelled leg's Release call)
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
+	ledger.Reserve("trader", "BI2X", fixedpoint.FromInt64(10)) // the shared reservation, still held (sibling filled and consumed nothing more of it here since this test only exercises the cancelled leg's Release call)
 
 	order := newSpotOCOLegOrder("10", "6.00")
 	checker.Release(order)
-	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(decimal.NewFromInt(10)) {
+	if got := ledger.Reserved("trader", "BI2X"); !got.Equal(fixedpoint.FromInt64(10)) {
 		t.Fatalf("reserved after cancelling un-filled OCO sibling = %s, want unchanged 10 (nothing to release for this leg)", got)
 	}
 }
@@ -364,8 +364,8 @@ func TestRelease_SpotOCOLeg_ReleasesNothing(t *testing.T) {
 func TestRelease_SpotNonOCOOrder_StillReleasesNormally(t *testing.T) {
 	ledger := NewLedger()
 	checker := NewChecker(ledger)
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
-	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
+	ledger.Reserve("trader", "BI2X", fixedpoint.FromInt64(10))
 
 	order := newSpotOCOLegOrder("10", "6.00")
 	order.GroupID = ""

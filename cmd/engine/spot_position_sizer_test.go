@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/risk"
-	"github.com/shopspring/decimal"
 )
 
 // TestSpotPositionSizer_ReportsTotalBalance covers spotPositionSizer (added
@@ -14,12 +14,12 @@ import (
 // own protection look like it's shrinking to the resize listener.
 func TestSpotPositionSizer_ReportsTotalBalance(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
-	ledger.Reserve("trader", "BI2X", decimal.NewFromInt(4)) // e.g. the group's own shared TP/SL reservation
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
+	ledger.Reserve("trader", "BI2X", fixedpoint.FromInt64(4)) // e.g. the group's own shared TP/SL reservation
 
 	sizer := &spotPositionSizer{ledger: ledger}
 	got := sizer.CurrentSize("trader", "BI2X-BI2XUSD")
-	if !got.Equal(decimal.NewFromInt(10)) {
+	if !got.Equal(fixedpoint.FromInt64(10)) {
 		t.Fatalf("CurrentSize = %s, want 10 (total balance, not just available)", got)
 	}
 }
@@ -32,16 +32,16 @@ func TestSpotPositionSizer_ReportsTotalBalance(t *testing.T) {
 // this, since spot has no "position" object to report a resize event for.
 func TestSpotPositionSizer_ShrinksAfterManualSell(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
 	sizer := &spotPositionSizer{ledger: ledger}
-	if got := sizer.CurrentSize("trader", "BI2X-BI2XUSD"); !got.Equal(decimal.NewFromInt(10)) {
+	if got := sizer.CurrentSize("trader", "BI2X-BI2XUSD"); !got.Equal(fixedpoint.FromInt64(10)) {
 		t.Fatalf("CurrentSize before sell = %s, want 10", got)
 	}
 
-	if err := ledger.Debit("trader", "BI2X", decimal.NewFromInt(6)); err != nil {
+	if err := ledger.Debit("trader", "BI2X", fixedpoint.FromInt64(6)); err != nil {
 		t.Fatalf("debit: %v", err)
 	}
-	if got := sizer.CurrentSize("trader", "BI2X-BI2XUSD"); !got.Equal(decimal.NewFromInt(4)) {
+	if got := sizer.CurrentSize("trader", "BI2X-BI2XUSD"); !got.Equal(fixedpoint.FromInt64(4)) {
 		t.Fatalf("CurrentSize after selling 6 of 10 = %s, want 4", got)
 	}
 }
@@ -65,7 +65,7 @@ func TestSpotPositionSizer_UnknownAccountIsZero(t *testing.T) {
 // returns zero rather than panicking.
 func TestSpotPositionSizer_MalformedSymbolIsZero(t *testing.T) {
 	ledger := risk.NewLedger()
-	ledger.Deposit("trader", "BI2X", decimal.NewFromInt(10))
+	ledger.Deposit("trader", "BI2X", fixedpoint.FromInt64(10))
 	sizer := &spotPositionSizer{ledger: ledger}
 	got := sizer.CurrentSize("trader", "BI2X")
 	if !got.IsZero() {

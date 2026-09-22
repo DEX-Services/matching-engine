@@ -4,17 +4,17 @@ import (
 	"testing"
 
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/dex/matching-engine/internal/risk"
-	"github.com/shopspring/decimal"
 )
 
 // openLong opens a long position for accountID via a normal (non-closing)
 // buy fill against a counter-seller, funding the buyer's margin first.
-func openLong(t *testing.T, f *FuturesSettlement, ledger *risk.Ledger, accountID, symbol, quote string, qty, price decimal.Decimal) {
+func openLong(t *testing.T, f *FuturesSettlement, ledger *risk.Ledger, accountID, symbol, quote string, qty, price fixedpoint.Fixed) {
 	t.Helper()
-	ledger.Credit(accountID, quote, decimal.NewFromInt(1_000_000))
-	ledger.Credit("counterparty", quote, decimal.NewFromInt(1_000_000))
+	ledger.Credit(accountID, quote, fixedpoint.FromInt64(1_000_000))
+	ledger.Credit("counterparty", quote, fixedpoint.FromInt64(1_000_000))
 	trade := &models.Trade{
 		ID: "open1", Symbol: symbol, Market: models.Futures,
 		Price: price, Quantity: qty,
@@ -33,15 +33,15 @@ func TestClosePortion_PublishesRealizedPnlEvent(t *testing.T) {
 	f := NewFuturesSettlement(ledger, nil, bus, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
-	qty := decimal.NewFromInt(1)
-	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
+	qty := fixedpoint.FromInt64(1)
+	openLong(t, f, ledger, "acct1", symbol, quote, qty, fixedpoint.FromInt64(50000))
 	// Opening a position publishes no event (only closePortion does), so
 	// nothing to drain here before the closing fill below.
 
 	// Close it at a higher price (profitable long) via an opposite (sell) fill.
 	closeTrade := &models.Trade{
 		ID: "close1", Symbol: symbol, Market: models.Futures,
-		Price: decimal.NewFromInt(51000), Quantity: qty,
+		Price: fixedpoint.FromInt64(51000), Quantity: qty,
 		BuyOrder:  &models.Order{AccountID: "counterparty", Leverage: 10, MarginMode: models.MarginIsolated},
 		SellOrder: &models.Order{AccountID: "acct1", Leverage: 10, MarginMode: models.MarginIsolated},
 	}
@@ -83,12 +83,12 @@ func TestClosePortion_MarksLiquidationCloses(t *testing.T) {
 	f := NewFuturesSettlement(ledger, nil, bus, nil)
 
 	symbol, quote := "BTC-USDC", "USDC"
-	qty := decimal.NewFromInt(1)
-	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
+	qty := fixedpoint.FromInt64(1)
+	openLong(t, f, ledger, "acct1", symbol, quote, qty, fixedpoint.FromInt64(50000))
 
 	closeTrade := &models.Trade{
 		ID: "liq1", Symbol: symbol, Market: models.Futures,
-		Price: decimal.NewFromInt(49000), Quantity: qty,
+		Price: fixedpoint.FromInt64(49000), Quantity: qty,
 		BuyOrder:  &models.Order{AccountID: "counterparty", Leverage: 10, MarginMode: models.MarginIsolated},
 		SellOrder: &models.Order{AccountID: "acct1", Leverage: 10, MarginMode: models.MarginIsolated, InternalLiquidation: true},
 	}
@@ -114,12 +114,12 @@ func TestClosePortion_NoBusConfigured_DoesNotPanic(t *testing.T) {
 	ledger := risk.NewLedger()
 	f := NewFuturesSettlement(ledger, nil, nil, nil) // nil bus
 	symbol, quote := "BTC-USDC", "USDC"
-	qty := decimal.NewFromInt(1)
-	openLong(t, f, ledger, "acct1", symbol, quote, qty, decimal.NewFromInt(50000))
+	qty := fixedpoint.FromInt64(1)
+	openLong(t, f, ledger, "acct1", symbol, quote, qty, fixedpoint.FromInt64(50000))
 
 	closeTrade := &models.Trade{
 		ID: "close1", Symbol: symbol, Market: models.Futures,
-		Price: decimal.NewFromInt(51000), Quantity: qty,
+		Price: fixedpoint.FromInt64(51000), Quantity: qty,
 		BuyOrder:  &models.Order{AccountID: "counterparty", Leverage: 10, MarginMode: models.MarginIsolated},
 		SellOrder: &models.Order{AccountID: "acct1", Leverage: 10, MarginMode: models.MarginIsolated},
 	}

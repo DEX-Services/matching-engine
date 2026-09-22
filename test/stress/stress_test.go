@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/matching"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,8 +22,8 @@ type dropBus struct{}
 func (dropBus) Publish(_ *models.Event) {}
 
 const (
-	numSymbols        = 20
-	goroutinesPerSym  = 25
+	numSymbols         = 20
+	goroutinesPerSym   = 25
 	ordersPerGoroutine = 200
 )
 
@@ -46,10 +46,10 @@ func TestStress_MultiSymbolConcurrentLoad(t *testing.T) {
 	}
 
 	var (
-		wg             sync.WaitGroup
-		totalOrders    atomic.Int64
-		totalTrades    atomic.Int64
-		violations     atomic.Int64
+		wg          sync.WaitGroup
+		totalOrders atomic.Int64
+		totalTrades atomic.Int64
+		violations  atomic.Int64
 	)
 
 	start := time.Now()
@@ -75,8 +75,8 @@ func TestStress_MultiSymbolConcurrentLoad(t *testing.T) {
 						Market:      models.Spot,
 						Side:        side,
 						Type:        models.Limit,
-						Price:       decimal.RequireFromString(price),
-						Quantity:    decimal.NewFromInt(1),
+						Price:       fixedpoint.MustFromString(price),
+						Quantity:    fixedpoint.FromInt64(1),
 						TimeInForce: models.GTC,
 						Status:      models.StatusPending,
 						CreatedAt:   time.Now(),
@@ -145,8 +145,8 @@ func TestStress_RaceDetector(t *testing.T) {
 				Market:    models.Spot,
 				Side:      side,
 				Type:      models.Limit,
-				Price:     decimal.NewFromInt(100),
-				Quantity:  decimal.NewFromInt(1),
+				Price:     fixedpoint.FromInt64(100),
+				Quantity:  fixedpoint.FromInt64(1),
 				Status:    models.StatusPending,
 				CreatedAt: time.Now(),
 			}

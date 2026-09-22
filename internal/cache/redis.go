@@ -12,9 +12,9 @@ import (
 	"os"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/redis/go-redis/v9"
-	"github.com/shopspring/decimal"
 )
 
 const snapshotTTL = 24 * time.Hour
@@ -45,21 +45,21 @@ func NewClient(ctx context.Context) (*Client, error) {
 
 // BookSnapshot holds the resting orders of one side of the book.
 type BookSnapshot struct {
-	Symbol    string           `json:"symbol"`
+	Symbol    string            `json:"symbol"`
 	Market    models.MarketType `json:"market"`
-	Bids      []SnapOrder      `json:"bids"`
-	Asks      []SnapOrder      `json:"asks"`
-	CreatedAt time.Time        `json:"created_at"`
+	Bids      []SnapOrder       `json:"bids"`
+	Asks      []SnapOrder       `json:"asks"`
+	CreatedAt time.Time         `json:"created_at"`
 }
 
 // SnapOrder is a compact representation of a resting order.
 type SnapOrder struct {
-	ID        string          `json:"id"`
-	AccountID string          `json:"account_id"`
-	Price     decimal.Decimal `json:"price"`
-	Quantity  decimal.Decimal `json:"quantity"`
-	Filled    decimal.Decimal `json:"filled"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID        string           `json:"id"`
+	AccountID string           `json:"account_id"`
+	Price     fixedpoint.Fixed `json:"price"`
+	Quantity  fixedpoint.Fixed `json:"quantity"`
+	Filled    fixedpoint.Fixed `json:"filled"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
 // SaveSnapshot serialises and stores a book snapshot in Redis.

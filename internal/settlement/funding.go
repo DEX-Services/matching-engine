@@ -7,14 +7,14 @@ import (
 
 	"github.com/dex/matching-engine/internal/config"
 	"github.com/dex/matching-engine/internal/events"
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/marketdata"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/shopspring/decimal"
 )
 
 // fundingRateCap bounds the funding rate per interval to avoid runaway payments.
-var fundingRateCap = decimal.NewFromFloat(0.0075) // 0.75%
+var fundingRateCap = fixedpoint.MustFromString("0.0075") // 0.75%
 
 // maxMarkStaleness bounds how long ago a market's last real trade may have
 // been before its mark price is refused for a funding settlement — this
@@ -31,9 +31,9 @@ const maxMarkStaleness = 5 * time.Minute
 // handler, for display) use the exact same formula and cap that
 // settleFunding actually pays out — computing this independently anywhere
 // else risks the displayed rate silently drifting from the real one.
-func CurrentFundingRate(markPrice, indexPrice decimal.Decimal) decimal.Decimal {
+func CurrentFundingRate(markPrice, indexPrice fixedpoint.Fixed) fixedpoint.Fixed {
 	if indexPrice.IsZero() {
-		return decimal.Zero
+		return fixedpoint.Zero
 	}
 	rate := markPrice.Sub(indexPrice).Div(indexPrice)
 	if rate.GreaterThan(fundingRateCap) {

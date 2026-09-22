@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dex/matching-engine/internal/fixedpoint"
 	"github.com/dex/matching-engine/internal/models"
 	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 )
 
 // TestSubmitOrderPipeline_UnregisteredSymbolIs404 covers a real inconsistency
@@ -38,7 +38,7 @@ func TestSubmitOrderPipeline_UnregisteredSymbolIs404(t *testing.T) {
 			name: "market order for an unregistered symbol",
 			order: &models.Order{
 				ID: uuid.NewString(), AccountID: "acct1", Symbol: "EURUSD-BI2XUSD", Market: models.Futures,
-				Side: models.Buy, Type: models.Market, Quantity: decimal.NewFromInt(1),
+				Side: models.Buy, Type: models.Market, Quantity: fixedpoint.FromInt64(1),
 				TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			},
 		},
@@ -46,7 +46,7 @@ func TestSubmitOrderPipeline_UnregisteredSymbolIs404(t *testing.T) {
 			name: "limit order for an unregistered symbol",
 			order: &models.Order{
 				ID: uuid.NewString(), AccountID: "acct1", Symbol: "GOLD-BI2XUSD", Market: models.Futures,
-				Side: models.Buy, Type: models.Limit, Price: decimal.NewFromInt(2000), Quantity: decimal.NewFromInt(1),
+				Side: models.Buy, Type: models.Limit, Price: fixedpoint.FromInt64(2000), Quantity: fixedpoint.FromInt64(1),
 				TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 			},
 		},
@@ -83,7 +83,7 @@ func TestSubmitOrderPipeline_RegisteredSymbolPassesTheCheck(t *testing.T) {
 
 	o := &models.Order{
 		ID: uuid.NewString(), AccountID: "acct1", Symbol: "BTC-USDC", Market: models.Spot,
-		Side: models.Buy, Type: models.Market, Quantity: decimal.NewFromInt(1),
+		Side: models.Buy, Type: models.Market, Quantity: fixedpoint.FromInt64(1),
 		TimeInForce: models.GTC, Status: models.StatusPending, CreatedAt: time.Now(),
 	}
 	_, _, status, err := submitOrderPipeline(context.Background(), d, o, "")
