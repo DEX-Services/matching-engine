@@ -45,13 +45,69 @@ type Service struct {
 	books       map[string]BookReader       // key: symbol+":"+market
 	lastPrices  map[string]fixedpoint.Fixed // key: symbol+":"+market
 	lastTradeAt map[string]time.Time        // key: symbol+":"+market
-	trades      map[string][]recordedTrade  // key: symbol+":"+market, oldest first
+	trades      map[string]*tradeRing       // key: symbol+":"+market
 }
 
 type recordedTrade struct {
 	price fixedpoint.Fixed
 	qty   fixedpoint.Fixed
 	at    time.Time
+}
+
+// tradeRing is a fixed-capacity circular buffer of recordedTrade, doubling
+// its backing array when full rather than ever reallocating on every
+// RecordTrade call. See PERFORMANCE-CODE-REVIEW-FINDINGS.md item #6:
+// RecordTrade previously rebuilt the entire live 24h trade slice
+// (`append([]recordedTrade(nil), trades[firstCurrent:]...)`) on EVERY
+// single trade, an O(window size) copy per trade regardless of how many
+// trades were actually being trimmed. A ring buffer instead evicts expired
+// entries by advancing head — O(1) amortized per trade, no allocation once
+// warmed up to its steady-state size.
+type tradeRing struct {
+	buf   []recordedTrade
+	head  int // index of the oldest live entry
+	count int // number of live entries
+}
+
+const tradeRingInitialCap = 64
+
+func newTradeRing() *tradeRing {
+	return &tradeRing{buf: make([]recordedTrade, tradeRingInitialCap)}
+}
+
+// pushEvictingBefore appends t and evicts every entry older than cutoff
+// (from the head, since entries are always inserted in non-decreasing `at`
+// order by RecordTrade's caller — the matching engine's own event stream).
+func (r *tradeRing) pushEvictingBefore(t recordedTrade, cutoff time.Time) {
+	for r.count > 0 && r.buf[r.head].at.Before(cutoff) {
+		r.head = (r.head + 1) % len(r.buf)
+		r.count--
+	}
+	if r.count == len(r.buf) {
+		r.grow()
+	}
+	tail := (r.head + r.count) % len(r.buf)
+	r.buf[tail] = t
+	r.count++
+}
+
+func (r *tradeRing) grow() {
+	newBuf := make([]recordedTrade, len(r.buf)*2)
+	for i := 0; i < r.count; i++ {
+		newBuf[i] = r.buf[(r.head+i)%len(r.buf)]
+	}
+	r.buf = newBuf
+	r.head = 0
+}
+
+// forEach calls fn for every live entry, oldest first. fn must not retain
+// the recordedTrade beyond the call (it is a copy, not a pointer into the
+// ring, so retaining is actually safe — but callers should treat it as a
+// point-in-time read regardless, consistent with the old slice-based API).
+func (r *tradeRing) forEach(fn func(recordedTrade)) {
+	for i := 0; i < r.count; i++ {
+		fn(r.buf[(r.head+i)%len(r.buf)])
+	}
 }
 
 // Summary is the rolling, engine-derived market state used by the trade UI.
@@ -96,7 +152,7 @@ func NewService() *Service {
 		books:       make(map[string]BookReader),
 		lastPrices:  make(map[string]fixedpoint.Fixed),
 		lastTradeAt: make(map[string]time.Time),
-		trades:      make(map[string][]recordedTrade),
+		trades:      make(map[string]*tradeRing),
 	}
 }
 
@@ -121,55 +177,53 @@ func (s *Service) RecordTrade(symbol string, market models.MarketType, price, qt
 	s.mu.Lock()
 	s.lastPrices[key] = price
 	s.lastTradeAt[key] = at
-	cutoff := at.Add(-24 * time.Hour)
-	trades := append(s.trades[key], recordedTrade{price: price, qty: qty, at: at})
-	firstCurrent := 0
-	for firstCurrent < len(trades) && trades[firstCurrent].at.Before(cutoff) {
-		firstCurrent++
+	ring, ok := s.trades[key]
+	if !ok {
+		ring = newTradeRing()
+		s.trades[key] = ring
 	}
-	s.trades[key] = append([]recordedTrade(nil), trades[firstCurrent:]...)
+	cutoff := at.Add(-24 * time.Hour)
+	ring.pushEvictingBefore(recordedTrade{price: price, qty: qty, at: at}, cutoff)
 	s.mu.Unlock()
 }
 
 // Summary returns a price and rolling 24h change/volume from real engine
 // trades. It never synthesizes a value when there is no liquidity.
 //
-// Read-only by design: the 1s TICKER broadcaster calls this for every symbol,
-// and it previously took the WRITE lock to lazily trim the 24h window on each
-// read — contending with matching-side RecordTrade and /depth on the same
-// mutex 17x/s. The window is now trimmed exclusively on the write path
-// (RecordTrade); here we merely skip trades older than the cutoff when
-// accumulating, so a symbol that stops trading simply freezes its last window
-// instead of mutating shared state on read. Reading the stored slice without
-// holding the lock during accumulation is safe: RecordTrade only ever appends
-// at indexes >= the published length or replaces the slice with a fresh copy,
-// so elements within an observed snapshot are immutable.
+// The 1s TICKER broadcaster calls this for every symbol. Trimming the 24h
+// window lives entirely on the write path (RecordTrade's pushEvictingBefore);
+// here we merely skip trades older than the cutoff when accumulating, so a
+// symbol that stops trading simply freezes its last window instead of
+// mutating shared state on read. Unlike the old slice-based storage (which
+// only ever appended or swapped in a fresh copy, safe to read after
+// releasing the lock), tradeRing overwrites its backing array in place
+// (grow, tail-slot reuse) — so accumulation must happen while still holding
+// the read lock, not after copying out a stale slice header.
 func (s *Service) Summary(symbol string, market models.MarketType) (*Summary, error) {
 	ticker, err := s.Ticker(symbol, market)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
-	s.mu.RLock()
-	trades := s.trades[symbol+":"+string(market)]
-	s.mu.RUnlock()
-
 	price := ticker.MarkPrice
 	summary := &Summary{Symbol: symbol, Market: market, Price: price, UpdatedAt: now}
-	// Accumulate over the true trailing-24h window without mutating the
-	// stored slice — trimming lives on the RecordTrade write path (see the
-	// doc comment above).
 	cutoff := now.Add(-24 * time.Hour)
 	var opening fixedpoint.Fixed
-	for _, trade := range trades {
-		if trade.at.Before(cutoff) {
-			continue
-		}
-		if opening.IsZero() {
-			opening = trade.price
-		}
-		summary.Volume24h = summary.Volume24h.Add(trade.price.Mul(trade.qty))
+
+	s.mu.RLock()
+	if ring := s.trades[symbol+":"+string(market)]; ring != nil {
+		ring.forEach(func(trade recordedTrade) {
+			if trade.at.Before(cutoff) {
+				return
+			}
+			if opening.IsZero() {
+				opening = trade.price
+			}
+			summary.Volume24h = summary.Volume24h.Add(trade.price.Mul(trade.qty))
+		})
 	}
+	s.mu.RUnlock()
+
 	if opening.IsZero() || price.IsZero() {
 		return summary, nil
 	}

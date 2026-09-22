@@ -64,6 +64,32 @@ type result struct {
 // for any resting maker order cancelled by self-trade prevention.
 type ReleaseFunc func(order *models.Order)
 
+// resultChanPool recycles the buffered `chan result` every blocking public
+// method (Submit/Cancel/Modify/Depth/...) needs to wait for its reply. See
+// PERFORMANCE-CODE-REVIEW-FINDINGS.md item #3: at high order rates this was
+// a fresh channel (plus its own runtime bookkeeping) allocated and thrown
+// away per call, purely to synchronize with the engine goroutine's single
+// reply. A channel is safe to reuse once fully drained, which acquireResultCh/
+// releaseResultCh below guarantee: every caller reads exactly one value
+// before returning it to the pool, so it's always empty (and therefore safe
+// to hand to the next borrower) at release time.
+var resultChanPool = sync.Pool{
+	New: func() any { return make(chan result, 1) },
+}
+
+func acquireResultCh() chan result {
+	return resultChanPool.Get().(chan result)
+}
+
+// releaseResultCh returns ch to the pool. Callers must have already received
+// the one value the engine goroutine sends on it (every request path here
+// does: `r := <-ch` always precedes this call) — returning a channel that
+// might still receive a late value would let a future borrower observe a
+// stale reply meant for someone else.
+func releaseResultCh(ch chan result) {
+	resultChanPool.Put(ch)
+}
+
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
 // EventPublisher receives outbound events. Satisfied by events.Bus, which
@@ -164,9 +190,10 @@ func NewEngine(symbol string, market models.MarketType, pub EventPublisher, sh S
 // returns are racing the engine goroutine. Use SubmitSnapshot for a safe
 // point-in-time copy instead.
 func (e *Engine) Submit(order *models.Order) ([]*models.Trade, error) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqSubmit, order: order, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.trades, r.err
 }
 
@@ -176,25 +203,28 @@ func (e *Engine) Submit(order *models.Order) ([]*models.Trade, error) {
 // inside the engine goroutine before the result is sent, so it cannot race
 // a subsequent request that mutates the same underlying order.
 func (e *Engine) SubmitSnapshot(order *models.Order) ([]*models.Trade, *models.Order, error) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqSubmit, order: order, snapshot: true, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.trades, r.orderSnapshot, r.err
 }
 
 // Cancel cancels a resting order. Blocks until processed.
 func (e *Engine) Cancel(orderID string) (*models.Order, error) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqCancel, orderID: orderID, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.order, r.err
 }
 
 // Modify replaces price/qty on a resting order (cancel-and-replace).
 func (e *Engine) Modify(orderID string, newPrice, newQty fixedpoint.Fixed) (*models.Order, []*models.Trade, error) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqModify, orderID: orderID, newPrice: newPrice, newQty: newQty, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.order, r.trades, r.err
 }
 
@@ -207,18 +237,20 @@ func (e *Engine) Modify(orderID string, newPrice, newQty fixedpoint.Fixed) (*mod
 // no-op when nothing is triggered. Blocks until processed by the engine
 // goroutine, consistent with Submit/Cancel/Modify.
 func (e *Engine) CheckMarkPriceTriggers(markPrice fixedpoint.Fixed) []*models.Trade {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqCheckMarkPriceTriggers, markPrice: markPrice, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.trades
 }
 
 // AllOrders returns every resting order in this engine's book. Blocks until
 // processed by the engine goroutine, consistent with Submit/Cancel/Modify.
 func (e *Engine) AllOrders() []*models.Order {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqAllOrders, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.orders
 }
 
@@ -228,9 +260,10 @@ func (e *Engine) AllOrders() []*models.Order {
 // this command.  Events are emitted only after the complete replacement has
 // been applied.
 func (e *Engine) ReplaceAccountOrders(account string, orders []*models.Order) (removed, accepted []*models.Order, err error) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqReplaceAccountOrders, account: account, orders: orders, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.orders, r.accepted, r.err
 }
 
@@ -239,9 +272,10 @@ func (e *Engine) ReplaceAccountOrders(account string, orders []*models.Order) (r
 // from the book, so found=false means "not currently resting" — callers must
 // consult the durable Postgres record to distinguish a fill from a cancel.
 func (e *Engine) OrderByID(orderID string) (*models.Order, bool) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqOrderByID, orderID: orderID, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.order, r.found
 }
 
@@ -263,18 +297,20 @@ func (e *Engine) Stop() {
 // BestBid returns the current best bid price. Routed through the engine
 // goroutine so it never races with concurrent book mutation.
 func (e *Engine) BestBid() fixedpoint.Fixed {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqDepth, levels: 0, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.bestBid
 }
 
 // BestAsk returns the current best ask price. Routed through the engine
 // goroutine so it never races with concurrent book mutation.
 func (e *Engine) BestAsk() fixedpoint.Fixed {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqDepth, levels: 0, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.bestAsk
 }
 
@@ -282,9 +318,10 @@ func (e *Engine) BestAsk() fixedpoint.Fixed {
 // snapshots. Routed through the engine goroutine so it never races with
 // concurrent book mutation.
 func (e *Engine) Depth(levels int) (bids, asks []orderbook.LevelSnapshot) {
-	ch := make(chan result, 1)
+	ch := acquireResultCh()
 	e.inputCh <- request{kind: reqDepth, levels: levels, resultCh: ch}
 	r := <-ch
+	releaseResultCh(ch)
 	return r.bids, r.asks
 }
 

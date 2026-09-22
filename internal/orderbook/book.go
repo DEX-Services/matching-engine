@@ -88,6 +88,29 @@ type Book struct {
 
 	// tradeIDFunc generates unique trade IDs.
 	tradeIDFunc func() string
+
+	// version increments on every mutation that could change what Depth()
+	// returns for either side: adding/removing a resting order (addToBook/
+	// removeFromBook) AND partial fills, which mutate a resting maker's
+	// Filled in place without removing it from the book (see
+	// matchAggressively). depthCache/depthCacheVersion below let Depth()
+	// skip rebuilding the bids/asks snapshot slices when nothing has
+	// changed since the last call — see PERFORMANCE-CODE-REVIEW-FINDINGS.md
+	// item #4: the 1s TICKER broadcaster calls Depth() across every symbol
+	// every second regardless of whether that symbol has traded, so between
+	// trades this made every tick a full deep-copy of both sides for
+	// nothing.
+	version uint64
+
+	// depthCache holds the full (unsliced) bids/asks snapshot as of
+	// depthCacheVersion. Depth(levels) truncates from this shared cache
+	// instead of rebuilding when version == depthCacheVersion. Invalid
+	// (never populated) when depthCacheVersion == 0 and version == 0 is
+	// indistinguishable from "just built" — resolved by depthCacheValid.
+	depthCacheValid   bool
+	depthCacheVersion uint64
+	depthCacheBids    []LevelSnapshot
+	depthCacheAsks    []LevelSnapshot
 }
 
 // New constructs an empty order book for the given symbol and market type.
@@ -213,22 +236,41 @@ func (b *Book) BestAsk() fixedpoint.Fixed {
 // Depth returns up to `levels` price levels per side as immutable snapshots.
 // Snapshots are returned (not live *PriceLevel pointers) so callers reading
 // them off the engine goroutine cannot race concurrent book mutation.
+//
+// Rebuilding the full-depth snapshot is skipped whenever nothing has
+// mutated the book since the last call (see the version/depthCache fields'
+// doc comment) — repeated ticks between trades (the common case for most
+// symbols most of the time) become a slice-truncate instead of a full
+// PriceLevel walk across every level on both sides.
 func (b *Book) Depth(levels int) (bids, asks []LevelSnapshot) {
-	for i, p := range b.bidPrices {
-		if i >= levels {
-			break
+	if !b.depthCacheValid || b.depthCacheVersion != b.version {
+		b.depthCacheBids = b.depthCacheBids[:0]
+		for _, p := range b.bidPrices {
+			if lvl := b.bids[p]; lvl != nil {
+				b.depthCacheBids = append(b.depthCacheBids, lvl.Snapshot())
+			}
 		}
-		if lvl := b.bids[p]; lvl != nil {
-			bids = append(bids, lvl.Snapshot())
+		b.depthCacheAsks = b.depthCacheAsks[:0]
+		for _, p := range b.askPrices {
+			if lvl := b.asks[p]; lvl != nil {
+				b.depthCacheAsks = append(b.depthCacheAsks, lvl.Snapshot())
+			}
 		}
+		b.depthCacheVersion = b.version
+		b.depthCacheValid = true
 	}
-	for i, p := range b.askPrices {
-		if i >= levels {
-			break
-		}
-		if lvl := b.asks[p]; lvl != nil {
-			asks = append(asks, lvl.Snapshot())
-		}
+	if levels <= 0 {
+		return nil, nil
+	}
+	if levels < len(b.depthCacheBids) {
+		bids = append(bids, b.depthCacheBids[:levels]...)
+	} else {
+		bids = append(bids, b.depthCacheBids...)
+	}
+	if levels < len(b.depthCacheAsks) {
+		asks = append(asks, b.depthCacheAsks[:levels]...)
+	} else {
+		asks = append(asks, b.depthCacheAsks...)
 	}
 	return
 }
@@ -409,9 +451,16 @@ func (b *Book) matchAggressively(aggressor *models.Order) ([]*models.Trade, []*m
 		trades = append(trades, trade)
 		b.lastTradePrice = fillPrice
 
-		// Remove fully-filled maker from the book.
+		// Remove fully-filled maker from the book. A partial fill leaves the
+		// maker resting (not added/removed), but still changes what Depth()
+		// would report for this level's TotalQuantity — bump version so the
+		// depth cache invalidates either way (removeFromBook also bumps it,
+		// so this is only reached in the partial-fill branch in practice,
+		// but bumping unconditionally here is simpler and correct either way).
 		if maker.RemainingQty().IsZero() {
 			b.removeFromBook(maker)
+		} else {
+			b.version++
 		}
 	}
 
@@ -689,6 +738,7 @@ func (b *Book) addToBook(order *models.Order) {
 		b.asks[key].Add(order)
 	}
 	b.orderIndex[order.ID] = order
+	b.version++
 }
 
 func (b *Book) removeFromBook(order *models.Order) {
@@ -711,6 +761,7 @@ func (b *Book) removeFromBook(order *models.Order) {
 		}
 	}
 	delete(b.orderIndex, order.ID)
+	b.version++
 }
 
 // bestOppositeLevel returns the best price level on the opposite side.
