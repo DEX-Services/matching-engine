@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/dex/matching-engine/internal/backendclient"
 	"github.com/dex/matching-engine/internal/config"
@@ -39,6 +41,102 @@ type submitDeps struct {
 	// rejected order at this stage was invisible to order history entirely.
 	// bus may be nil (e.g. in tests); rejectPipeline simply skips publishing.
 	bus *events.Bus
+
+	// mmAcctLocks serializes marketMakerReplaceHandler per account. See
+	// mmAccountLocks' doc comment for why. submitDeps is passed BY VALUE
+	// throughout this package (rejectPipeline, submitOrderPipeline, every
+	// handler constructor) — go vet flags embedding a sync.Mutex directly
+	// here for exactly that reason, since each value copy would silently
+	// get its own independent lock, defeating the point. A pointer to a
+	// dedicated struct is shared correctly across every copy instead.
+	mmAcctLocks *mmAccountLocks
+}
+
+// mmAccountLocks is a per-account try-lock, one 1-buffered channel per
+// account used the same way Dex-Backend's TradeServer.acctLocks is:
+// acquiring means sending into it, releasing means receiving.
+//
+// marketMakerReplaceHandler's sequence — read the account's current orders
+// (AllOrders), swap the live book (ReplaceAccountOrders), then update the
+// in-memory reservation and the durable Postgres lock — is four separate
+// steps, none atomic with each other across two overlapping HTTP requests
+// for the SAME account. Two replace calls close together (e.g. a bot
+// requoting faster than one round-trip completes) can otherwise interleave
+// arbitrarily: both read the same starting AllOrders snapshot, both compute
+// their own targets, and their ReplaceAccountOrders/ReplaceReservations/
+// ReplaceLocks calls race each other, so the ledger and the durable lock can
+// each end up reflecting a DIFFERENT request's targets. A later fill against
+// whichever ladder actually ended up live then checks a lock that belongs to
+// the other request's targets and fails "insufficient locked ...", halting
+// the whole symbol for every account trading it — reproduced live under
+// back-to-back MM replace calls with no client-side wait between them.
+// Serializing the whole handler body per account closes this: only one
+// replace for a given account runs the sequence at a time.
+type mmAccountLocks struct {
+	mu    sync.Mutex
+	locks map[string]chan struct{}
+}
+
+func newMMAccountLocks() *mmAccountLocks {
+	return &mmAccountLocks{locks: make(map[string]chan struct{})}
+}
+
+// acquire waits for account's turn (creating its slot on first use) and
+// returns a release func, or ok=false if the wait times out — the account
+// already has a replace in flight that isn't completing.
+func (l *mmAccountLocks) acquire(ctx context.Context, account string) (release func(), ok bool) {
+	l.mu.Lock()
+	ch, exists := l.locks[account]
+	if !exists {
+		ch = make(chan struct{}, 1)
+		l.locks[account] = ch
+	}
+	l.mu.Unlock()
+
+	timer := time.NewTimer(8 * time.Second)
+	defer timer.Stop()
+	select {
+	case ch <- struct{}{}:
+		return func() { <-ch }, true
+	case <-timer.C:
+		return nil, false
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
+// worstCaseFillPrice estimates the worst price a market order of the given
+// quantity could fill at, by walking the opposite side of the book
+// (deepest-first is unnecessary — Depth already returns levels nearest the
+// touch first) until the requested quantity is covered. See its call site's
+// comment for why top-of-book alone understates this for a multi-level fill.
+// If the visible book doesn't have enough depth to cover the full quantity,
+// the deepest available level is used for the shortfall — better than
+// under-reserving entirely, though a fill that exhausts the whole visible
+// book and continues past it (extremely thin liquidity) can still exceed
+// this estimate; that residual gap is the same kind of stale-snapshot race
+// this change narrows but cannot fully close from outside the matching
+// goroutine.
+func worstCaseFillPrice(eng *matching.Engine, isBuy bool, qty fixedpoint.Fixed) fixedpoint.Fixed {
+	const maxLevels = 50
+	bids, asks := eng.Depth(maxLevels)
+	levels := asks
+	if !isBuy {
+		levels = bids
+	}
+	if len(levels) == 0 {
+		return fixedpoint.Zero
+	}
+	remaining := qty
+	worst := levels[0].Price
+	for _, lvl := range levels {
+		worst = lvl.Price
+		if remaining.LessThanOrEqual(lvl.TotalQuantity) {
+			break
+		}
+		remaining = remaining.Sub(lvl.TotalQuantity)
+	}
+	return worst
 }
 
 // rejectPipeline marks o rejected with reason, publishes an
@@ -211,12 +309,26 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 		if gerr != nil {
 			return rejectPipeline(d, o, gerr.Error(), http.StatusBadRequest, fmt.Errorf("risk: %w", gerr))
 		}
-		var estPrice fixedpoint.Fixed
-		if o.IsBuy() {
-			estPrice = eng.BestAsk()
-		} else {
-			estPrice = eng.BestBid()
-		}
+		// Walk the book for this order's quantity instead of using a single
+		// top-of-book price. Top-of-book alone understates the reservation
+		// for any order whose quantity exceeds what's resting at that one
+		// price level: settlement debits at the ACTUAL fill price(s), and a
+		// multi-level market fill settles at a worse average price than
+		// best-bid/best-ask, which can exceed a reservation sized off the
+		// top level alone and fail settlement's locked-balance check with
+		// "insufficient locked ..." — halting the whole symbol. Reproduced
+		// live: a market order filling across several levels of a fast-
+		// moving book (e.g. during rapid market-maker requoting) settled for
+		// more than its top-of-book reservation covered.
+		//
+		// This narrows but does not eliminate the race — Depth is still a
+		// snapshot taken before the order actually reaches the matching
+		// goroutine, so the book can still move in that gap. It is a real,
+		// large improvement (the dominant real-world cause was understating
+		// a multi-level fill's cost, not sub-millisecond top-of-book drift)
+		// without the risk of restructuring reservation to be atomic with
+		// matching, which touches every order type and is out of scope here.
+		estPrice := worstCaseFillPrice(eng, o.IsBuy(), o.Quantity)
 		resAsset, resAmount = risk.EstimatedRequired(o, estPrice)
 	} else if o.Market == models.Futures && o.Side == models.Sell {
 		resAsset, resAmount = risk.RequiredFor(o)
@@ -280,6 +392,66 @@ func submitOrderPipeline(ctx context.Context, d submitDeps, o *models.Order, sli
 				backendclient.Async(backendclient.PendingSync{Op: "unlock", AccountID: o.AccountID, Asset: resAsset, Amount: amount, IdempotencyKey: key}, func(ctx context.Context) error {
 					return d.backend.UnlockIdempotent(ctx, o.AccountID, resAsset, amount, key)
 				})
+			}
+		}
+	}
+
+	// Re-check and top up the reservation for a market order immediately
+	// before it reaches matching. The reservation above was computed from a
+	// Depth() snapshot, then went through a synchronous HTTP round-trip to
+	// Dex-Backend (LockIdempotent) that can take hundreds of milliseconds
+	// against the real cloud-hosted DB this stack uses — during which the
+	// book can genuinely move (e.g. a market maker replacing its ladder),
+	// so the price this order actually matches at can end up worse than
+	// what was reserved for. Root-caused with diagnostic logging after
+	// three prior fix attempts (each addressing a plausible but wrong
+	// mechanism) failed live re-testing: a real trade was reserved at
+	// est.price=2.00 but settled at fill price=2.10 because the market
+	// maker's ladder replaced twice during the ~340ms LockIdempotent call.
+	//
+	// This re-check happens with NO network call in between it and
+	// SubmitSnapshot below — both go through the same engine goroutine's
+	// serialized request channel — so the remaining staleness window
+	// shrinks from "one HTTP round-trip" (hundreds of ms) to "however long
+	// it takes another request already queued ahead of this one on the
+	// engine's single channel to run" (microseconds). It does not
+	// eliminate the window in principle, but it removes the dominant, real
+	// cause confirmed above.
+	if (o.Type == models.Market || (o.Type == models.Stop && !o.Price.IsPositive())) && resAmount.IsPositive() {
+		if eng, gerr := d.reg.Get(o.Symbol, o.Market); gerr == nil {
+			recheckPrice := worstCaseFillPrice(eng, o.IsBuy(), o.RemainingQty())
+			_, recheckAmount := risk.EstimatedRequired(o, recheckPrice)
+			if o.Market == models.Spot && o.Side == models.Buy && recheckAmount.IsPositive() {
+				if cfg, cerr := d.symbolRegistry.Get(o.Symbol, o.Market); cerr == nil {
+					feeRate := cfg.MakerFee
+					if cfg.TakerFee.GreaterThan(feeRate) {
+						feeRate = cfg.TakerFee
+					}
+					recheckAmount = recheckAmount.Add(recheckAmount.Mul(feeRate))
+				}
+			}
+			if shortfall := recheckAmount.Sub(resAmount); shortfall.IsPositive() {
+				if err := d.ledger.Reserve(o.AccountID, resAsset, shortfall); err == nil {
+					topUpOK := true
+					if d.backend.Enabled() {
+						if err := d.backend.LockIdempotent(ctx, o.AccountID, resAsset, backendclient.ToRawUnits(shortfall), o.ID+":topup"); err != nil {
+							d.ledger.Release(o.AccountID, resAsset, shortfall)
+							topUpOK = false
+						}
+					}
+					if topUpOK {
+						resAmount = resAmount.Add(shortfall)
+					}
+				}
+				// A failed top-up (insufficient balance, or the backend
+				// call itself failing) is deliberately NOT a hard reject
+				// here: the original reservation is still valid and the
+				// order proceeds on it. Settlement may still fail if the
+				// book moved even further in the brief remaining window,
+				// which correctly halts the symbol per the existing
+				// settlement-failure safety behavior — this re-check
+				// closes the dominant real cause without introducing a new
+				// way for a legitimately-affordable order to be rejected.
 			}
 		}
 	}

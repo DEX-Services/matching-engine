@@ -718,7 +718,7 @@ func main() {
 	mux.HandleFunc("/market-maker/replace", requireEngineServiceAuth(marketMakerReplaceHandler(submitDeps{
 		reg: reg, ledger: ledger, backend: backend, checker: checker,
 		symbolRegistry: symbolRegistry, futuresSettlement: futuresSettlement,
-		pgPool: pgPool, mdSvc: mdSvc, bus: bus,
+		pgPool: pgPool, mdSvc: mdSvc, bus: bus, mmAcctLocks: newMMAccountLocks(),
 	})))
 
 	mux.HandleFunc("/depth", func(w http.ResponseWriter, r *http.Request) {

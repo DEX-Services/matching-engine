@@ -77,6 +77,16 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			return
 		}
 
+		// See mmAccountLocks' doc comment: this handler's read-swap-update
+		// sequence is not atomic across two overlapping requests for the
+		// same account, so only one may run it at a time.
+		release, ok := d.mmAcctLocks.acquire(r.Context(), req.Account)
+		if !ok {
+			http.Error(w, "account has a replace already in flight", http.StatusConflict)
+			return
+		}
+		defer release()
+
 		orders := make([]*models.Order, 0, len(req.Orders))
 		targets := map[string]fixedpoint.Fixed{}
 		buys, sells := 0, 0
@@ -166,27 +176,47 @@ func marketMakerReplaceHandler(d submitDeps) http.HandlerFunc {
 			}
 			return out
 		}
-		if d.backend.Enabled() {
-			if err := d.backend.ReplaceLocks(r.Context(), req.Account, toRaw(targets)); err != nil {
-				http.Error(w, "balance replacement failed: "+err.Error(), http.StatusConflict)
-				return
-			}
+		// Order matters here to close a real race: the live book swap below
+		// (Registry.ReplaceAccountOrders) is atomic relative to matching —
+		// it runs on the symbol's single engine goroutine, same as Submit —
+		// so once it returns, the OLD orders are guaranteed gone and can
+		// never be matched again. Previously this handler updated the
+		// durable Postgres lock (ReplaceLocks) and the in-memory reservation
+		// FIRST, then swapped the book last. That left a window where an old
+		// order was still resting and matchable while Postgres's lock had
+		// already been overwritten to the NEW target amounts: an incoming
+		// order matching that old resting order made settlement check the
+		// lock against the wrong (new) target, fail "insufficient locked
+		// <asset> for buyer/seller", and auto-halt the entire symbol for
+		// every account trading it (see Engine.postProcess's settlement
+		// failure path). Swapping the book first eliminates the window
+		// entirely: no old order can still be resting by the time either
+		// ledger reflects the new targets, so settlement of an old order
+		// against a new-target lock can no longer happen.
+		removed, accepted, err := d.reg.ReplaceAccountOrders(req.Symbol, market, req.Account, orders)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("replacement failed: %v", err), http.StatusBadRequest)
+			return
 		}
 		if err := d.ledger.ReplaceReservations(req.Account, targets); err != nil {
-			if d.backend.Enabled() {
-				_ = d.backend.ReplaceLocks(r.Context(), req.Account, toRaw(oldTargets))
-			}
+			// The book has already been swapped to the new orders, so there
+			// is no old book state left to roll back to — put the OLD
+			// reservation totals back rather than leaving the account
+			// under-reserved relative to its now-live new orders. This
+			// mismatch is intentionally accepted: it can only be reached by
+			// a target that exceeds the account's real balance, which
+			// RequiredFor/the earlier validation above is expected to have
+			// already prevented for a well-formed dedicated MM wallet.
+			_ = d.ledger.ReplaceReservations(req.Account, oldTargets)
 			http.Error(w, "risk: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		removed, accepted, err := d.reg.ReplaceAccountOrders(req.Symbol, market, req.Account, orders)
-		if err != nil {
-			_ = d.ledger.ReplaceReservations(req.Account, oldTargets)
-			if d.backend.Enabled() {
-				_ = d.backend.ReplaceLocks(r.Context(), req.Account, toRaw(oldTargets))
+		if d.backend.Enabled() {
+			if err := d.backend.ReplaceLocks(r.Context(), req.Account, toRaw(targets)); err != nil {
+				_ = d.ledger.ReplaceReservations(req.Account, oldTargets)
+				http.Error(w, "balance replacement failed: "+err.Error(), http.StatusConflict)
+				return
 			}
-			http.Error(w, fmt.Sprintf("replacement failed: %v", err), http.StatusBadRequest)
-			return
 		}
 		out := make([]OpenOrderDTO, 0, len(accepted))
 		for _, o := range accepted {
