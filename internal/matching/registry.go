@@ -46,6 +46,13 @@ type Registry struct {
 	factory   SettlementFactory
 	release   ReleaseFunc
 	seqLookup SeqLookup
+
+	// OnAutoHalt, if set, is attached to every engine this registry creates
+	// (including lazily-created option/combo engines) so a self-halt (e.g.
+	// settlement failure) gets recorded in the admin halt registry instead
+	// of being invisible to it. Set directly after NewRegistry, before any
+	// Register/GetOrCreate call.
+	OnAutoHalt func(symbol, market, reason, note string)
 }
 
 // NewRegistry creates a Registry. release may be nil (defaults to a no-op),
@@ -190,5 +197,11 @@ func (r *Registry) newEngine(symbol string, market models.MarketType) *Engine {
 	if r.seqLookup != nil {
 		startSeq = r.seqLookup(symbol)
 	}
-	return NewEngine(symbol, market, r.pub, sh, r.release, startSeq)
+	eng := NewEngine(symbol, market, r.pub, sh, r.release, startSeq)
+	if r.OnAutoHalt != nil {
+		eng.SetOnAutoHalt(func(reason, note string) {
+			r.OnAutoHalt(symbol, string(market), reason, note)
+		})
+	}
+	return eng
 }

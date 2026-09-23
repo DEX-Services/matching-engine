@@ -195,6 +195,14 @@ func main() {
 			eng.Resume()
 		}
 	}
+	// When an engine halts itself (e.g. a settlement failure), record it in
+	// haltReg too so /admin/halted actually reports it instead of the halt
+	// being invisible to admin tooling while every order on the symbol keeps
+	// rejecting with "is halted". Must be set before Register/GetOrCreate
+	// creates any engines below, since newEngine attaches it at construction.
+	reg.OnAutoHalt = func(sym, mkt, reason, note string) {
+		_ = haltReg.Halt(sym, mkt, risk_admin.HaltReason(reason), note)
+	}
 
 	// Register trading pairs. Options engines are created lazily per
 	// instrument via GetOrCreate (see validateAndPrepareOption), not

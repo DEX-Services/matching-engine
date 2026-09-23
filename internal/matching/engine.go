@@ -146,6 +146,15 @@ type Engine struct {
 	settlement SettlementHandler
 	release    ReleaseFunc
 
+	// onAutoHalt, if set, is invoked whenever this engine halts itself (e.g.
+	// on a settlement failure, see the reqSubmit case below) so the admin
+	// halt registry (cmd/engine/main.go's haltReg) learns about the halt.
+	// Without this, engine.halted could flip true with zero record in
+	// haltReg: /admin/halted would report nothing halted while every order
+	// on the symbol kept rejecting with "is halted" — a real incident found
+	// while triaging test failures that traced back to exactly this gap.
+	onAutoHalt func(reason, note string)
+
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	done     chan struct{}
@@ -287,6 +296,11 @@ func (e *Engine) Resume() { e.halted.Store(false) }
 
 // IsHalted reports whether the engine is currently halted.
 func (e *Engine) IsHalted() bool { return e.halted.Load() }
+
+// SetOnAutoHalt registers a callback invoked whenever this engine halts
+// itself (as opposed to being halted via Halt() by an operator through the
+// admin registry). See onAutoHalt's doc comment for why this exists.
+func (e *Engine) SetOnAutoHalt(fn func(reason, note string)) { e.onAutoHalt = fn }
 
 // Stop shuts down the engine goroutine and waits for it to exit.
 func (e *Engine) Stop() {
@@ -626,6 +640,9 @@ func (e *Engine) postProcess(order *models.Order, trades []*models.Trade, cancel
 				"tradeId", trade.ID, "symbol", trade.Symbol, "price", trade.Price, "qty", trade.Quantity, "err", err)
 			e.publishEvent(models.EventTradeSettlementFailed, nil, trade)
 			e.halted.Store(true)
+			if e.onAutoHalt != nil {
+				e.onAutoHalt("CIRCUIT_BREAK", fmt.Sprintf("settlement failed for trade %s: %v", trade.ID, err))
+			}
 			return
 		}
 		e.publishEvent(models.EventTrade, nil, trade)
