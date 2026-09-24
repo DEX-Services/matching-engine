@@ -103,6 +103,16 @@ func withRateLimit(next http.Handler) http.Handler {
 		if host, _, err := net.SplitHostPort(key); err == nil {
 			key = host
 		}
+		// Loopback is this deployment's own service mesh (bots' fill-detect +
+		// requote polls, Dex-Backend's settle/credit callbacks all originate
+		// from 127.0.0.1). With 11+ MM desks each polling per index tick, the
+		// aggregate easily exceeds the public-facing 40 req/s budget and every
+		// desk started 429-ing. The limiter exists to throttle untrusted public
+		// traffic, not our own inter-service calls — exempt loopback entirely.
+		if key == "127.0.0.1" || key == "::1" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !store.allow(key) {
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
